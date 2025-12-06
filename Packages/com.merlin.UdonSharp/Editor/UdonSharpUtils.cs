@@ -596,12 +596,24 @@ namespace UdonSharp
 
         public static bool DoesUnityProjectHaveCompileErrors()
         {
+            // First check using EditorUtility.scriptCompilationFailed - this is the most reliable method
+            // as it directly reflects Unity's internal compilation state
+            if (EditorUtility.scriptCompilationFailed)
+                return true;
+            
             Type logEntryType = typeof(Editor).Assembly.GetType("UnityEditor.LogEntries");
             MethodInfo getLinesAndModeMethod = logEntryType.GetMethod("GetLinesAndModeFromEntryInternal", BindingFlags.Public | BindingFlags.Static);
             
             bool hasCompileError = false;
             
             int logEntryCount = (int)logEntryType.GetMethod("StartGettingEntries", BindingFlags.Public | BindingFlags.Static).Invoke(null, Array.Empty<object>());
+
+            // Unity ConsoleWindow.Mode flags:
+            // 1 << 6  == AssetImportError - errors during asset import (including package C# compilation)
+            // 1 << 11 == ScriptCompileError - script compilation errors
+            const int assetImportError = 1 << 6;
+            const int scriptCompileError = 1 << 11;
+            const int compileErrorMask = assetImportError | scriptCompileError;
 
             try
             {
@@ -614,8 +626,8 @@ namespace UdonSharp
 
                     int mode = (int)getLinesParams[2];
 
-                    // 1 << 11 == ConsoleWindow.Mode.ScriptCompileError
-                    if ((mode & (1 << 11)) != 0)
+                    // Check for either script compile errors or asset import errors (which includes package C# errors)
+                    if ((mode & compileErrorMask) != 0)
                     {
                         hasCompileError = true;
                         break;
