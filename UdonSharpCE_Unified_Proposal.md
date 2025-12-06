@@ -10,13 +10,13 @@ UdonSharpCE (Community Edition) builds on MerlinVR's UdonSharp 1.2-beta1 to prov
 
 This proposal defines eight modules with clear boundaries, explicit non-goals, and design constraints informed by real Udon/VRChat limitations.
 
-### Progress Audit (Dec 2024)
+### Progress Audit (Dec 2025)
 
 - Phase 1 (DevTools core, Data): Implemented in `Packages/com.merlin.UdonSharp/Runtime/Libraries/CE/DevTools` and `/CE/Data`.
 - Phase 2 (Persistence + analyzers): Attribute/validation/runtime size estimator and analyzers implemented; PlayerObject helpers, lifecycle callbacks, and compile-time size warnings still pending.
 - Phase 3 (Async + Net core): UdonTask runtime, Sync/Rpc/LocalOnly attributes, and analyzers implemented; async state-machine emitter and fuller bandwidth estimator still pending.
 - Phase 4 (Perf): ECS-lite, pooling, grid/LOD utilities implemented in `/CE/Perf`.
-- Phase 5 (Procgen, Net advanced, GraphBridge): Not started.
+- Phase 5 (Procgen, Net advanced, GraphBridge): Partial. CERandom, CENoise, CEDungeon, WFCSolver, and samples implemented in `/CE/Procgen`; GraphBridge not started.
 
 ---
 
@@ -62,7 +62,7 @@ UdonSharpCE treats **Merlin's 1.2-beta1** as the minimum baseline. This provides
 
 Type-safe, ergonomic data abstractions bridging Merlin's collections to VRChat's Data Containers (`DataList`, `DataDictionary`, `DataToken`).
 
-**Status (Dec 2024):** Implemented (`Packages/com.merlin.UdonSharp/Runtime/Libraries/CE/Data`, samples in `Packages/com.merlin.UdonSharp/Samples~/CE/DataModels`).
+**Status (Dec 2025):** Implemented (`Packages/com.merlin.UdonSharp/Runtime/Libraries/CE/Data`, samples in `Packages/com.merlin.UdonSharp/Samples~/CE/DataModels`).
 
 ### Features
 
@@ -122,7 +122,7 @@ public class InventoryManager : UdonSharpBehaviour
 
 Provide async/await-style workflows compiled into Udon-compatible state machines for complex sequences, cutscenes, quests, and multi-step logic.
 
-**Status (Dec 2024):** Partial. Runtime `UdonTask`/`UdonTask<T>` APIs and analyzers are in-place (`Runtime/Libraries/CE/Async`, `Editor/CE/Async/AsyncMethodAnalyzer.cs`); the state-machine emitter is still pending.
+**Status (Dec 2025):** Partial. Runtime `UdonTask`/`UdonTask<T>` APIs and analyzers are in-place (`Runtime/Libraries/CE/Async`, `Editor/CE/Async/AsyncMethodAnalyzer.cs`); the state-machine emitter is still pending.
 
 ### Features
 
@@ -199,7 +199,7 @@ public class CutsceneController : UdonSharpBehaviour
 
 Type-safe RPC and sync with clear guarantees, visibility control, and compile-time analysis for network budget and safety.
 
-**Status (Dec 2024):** Partial. Core attributes (`[Sync]`, `[Rpc]`, `[LocalOnly]`), rate limiter, and analyzers are live (`Runtime/Libraries/CE/Net`, `Editor/CE/Net`). Advanced late-join sync and conflict helpers are not yet implemented.
+**Status (Dec 2025):** Partial. Core attributes (`[Sync]`, `[Rpc]`, `[LocalOnly]`), rate limiter, and analyzers are live (`Runtime/Libraries/CE/Net`, `Editor/CE/Net`). Advanced late-join sync and conflict helpers are not yet implemented.
 
 ### Features
 
@@ -290,7 +290,7 @@ public class ScoreBoard : UdonSharpBehaviour
 
 Attribute-based mapping from C# models to VRChat's PlayerData and PlayerObject systems, making persistent worlds dramatically easier to build.
 
-**Status (Dec 2024):** Partial. Attribute mapping, validation helpers, runtime persistence API, and size estimator are implemented (`Runtime/Libraries/CE/Persistence`, samples in `Samples~/CE/Persistence`). PlayerObject helpers, lifecycle callbacks, and compile-time size warnings remain TODO.
+**Status (Dec 2025):** Partial. Attribute mapping, validation helpers, runtime persistence API, and size estimator are implemented (`Runtime/Libraries/CE/Persistence`, samples in `Samples~/CE/Persistence`). PlayerObject helpers, lifecycle callbacks, and compile-time size warnings remain TODO.
 
 ### Features
 
@@ -395,7 +395,7 @@ public class SaveManager : UdonSharpBehaviour
 
 Expose UdonSharpCE systems to Udon Graph users via attributes, turning CE into a platform non-coders can adopt.
 
-**Status (Dec 2024):** Not started. No GraphBridge runtime/editor code is present yet.
+**Status (Dec 2025):** Not started. No GraphBridge runtime/editor code is present yet.
 
 ### Features
 
@@ -480,7 +480,7 @@ public class QuestSystem : UdonSharpBehaviour
 
 Make ambitious Udon worlds testable, debuggable, and maintainable through comprehensive tooling.
 
-**Status (Dec 2024):** Core console/profiler/logger and analyzers are implemented (`Runtime/Libraries/CE/DevTools`, `Editor/CE/Analyzers`). Network/state inspector UX is still conceptual.
+**Status (Dec 2025):** Core console/profiler/logger and analyzers are implemented (`Runtime/Libraries/CE/DevTools`, `Editor/CE/Analyzers`). Network/state inspector UX is still conceptual.
 
 ### Features
 
@@ -574,7 +574,7 @@ public class GameManager : UdonSharpBehaviour
 
 Enable high-entity-count worlds through data-oriented patterns that work within Udon's performance constraints.
 
-**Status (Dec 2024):** Implemented. CEWorld, CEGrid, CEPool, LOD helpers, and ECS utilities live in `Runtime/Libraries/CE/Perf`.
+**Status (Dec 2025):** Implemented. CEWorld, CEGrid, CEPool, LOD helpers, and ECS utilities live in `Runtime/Libraries/CE/Perf`.
 
 ### Features
 
@@ -691,7 +691,7 @@ Udon runs 200-1000x slower than native C#. Traditional approaches hit walls at 5
 
 Enable deterministic procedural content that generates identically across all clients from shared seeds.
 
-**Status (Dec 2024):** Not started. No CE.Procgen runtime/editor code exists yet.
+**Status (Dec 2025):** Partial. Core runtime implemented (`Runtime/Libraries/CE/Procgen`): `CERandom` (deterministic PRNG), `CENoise` (Perlin, Simplex, Worley, fractal), `CEDungeon` (graph-based room/corridor generation), `WFCSolver` (Wave Function Collapse). Sample in `Samples~/CE/Procgen`.
 
 ### Features
 
@@ -820,12 +820,12 @@ CE APIs are designed to avoid fighting known Udon/VRChat limitations:
 
 ### Persistence Constraints
 
-| Constraint                 | CE Approach                            |
-| -------------------------- | -------------------------------------- |
+| Constraint                 | CE Approach                                           |
+| -------------------------- | ----------------------------------------------------- |
 | 100KB PlayerData limit     | Runtime size estimator; compile-time warnings planned |
-| 100KB PlayerObject limit   | Schema design guidance                 |
-| No save slots built-in     | CE.Persistence provides abstraction    |
-| Can't save in OnPlayerLeft | Auto-save system with periodic flush   |
+| 100KB PlayerObject limit   | Schema design guidance                                |
+| No save slots built-in     | CE.Persistence provides abstraction                   |
+| Can't save in OnPlayerLeft | Auto-save system with periodic flush                  |
 
 ---
 
@@ -1014,10 +1014,11 @@ Status legend: `[x]` done, `[~]` in progress/partial, `[ ]` not started.
 
 **Deliverables:**
 
-- [ ] `CERandom` deterministic PRNG
-- [ ] `CENoise` (Perlin, Simplex, Worley)
-- [ ] `CEDungeon` graph-based room generation
-- [ ] Wave Function Collapse solver (time-sliced)
+- [x] `CERandom` deterministic PRNG
+- [x] `CENoise` (Perlin, Simplex, Worley, fractal combinations)
+- [x] `CEDungeon` graph-based room generation (MST connectivity, corridor gen, room types)
+- [x] Wave Function Collapse solver (time-sliced)
+- [x] Procgen samples/examples (`Samples~/CE/Procgen/ProcgenExample.cs`)
 - [ ] CE.Net: late-joiner state reconstruction
 - [ ] CE.Net: `[SyncOnJoin]` attribute
 - [ ] CE.Net: conflict resolution helpers
@@ -1083,5 +1084,5 @@ The result enables world types that are currently impractical or impossible:
 
 ---
 
-_UdonSharpCE Enhancement Proposal — December 2024_  
+_UdonSharpCE Enhancement Proposal — December 2025_  
 _Synthesized from original proposal and upstream alignment analysis_
