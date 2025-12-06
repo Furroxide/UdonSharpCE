@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using UnityEditor;
 using UnityEngine;
+using UdonSharp.CE.GraphBridge;
 
 namespace UdonSharp.CE.Editor.GraphBridge
 {
@@ -202,13 +203,13 @@ namespace UdonSharp.CE.Editor.GraphBridge
         /// </summary>
         private static void ScanAssembly(Assembly assembly, List<NodeDefinition> nodes)
         {
-            Type graphNodeAttrType = typeof(CE.GraphBridge.GraphNodeAttribute);
+            Type graphNodeAttrType = typeof(GraphNodeAttribute);
 
             foreach (var type in assembly.GetTypes())
             {
                 // Get category attribute if present
                 string categoryPath = null;
-                var categoryAttr = type.GetCustomAttribute<CE.GraphBridge.GraphCategoryAttribute>();
+                var categoryAttr = type.GetCustomAttribute<GraphCategoryAttribute>();
                 if (categoryAttr != null)
                 {
                     categoryPath = categoryAttr.Path;
@@ -217,7 +218,7 @@ namespace UdonSharp.CE.Editor.GraphBridge
                 // Scan methods
                 foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance))
                 {
-                    var nodeAttr = method.GetCustomAttribute<CE.GraphBridge.GraphNodeAttribute>();
+                    var nodeAttr = method.GetCustomAttribute<GraphNodeAttribute>();
                     if (nodeAttr == null)
                         continue;
 
@@ -231,7 +232,7 @@ namespace UdonSharp.CE.Editor.GraphBridge
                 // Scan properties
                 foreach (var property in type.GetProperties(BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance))
                 {
-                    var propAttr = property.GetCustomAttribute<CE.GraphBridge.GraphPropertyAttribute>();
+                    var propAttr = property.GetCustomAttribute<GraphPropertyAttribute>();
                     if (propAttr == null)
                         continue;
 
@@ -246,7 +247,7 @@ namespace UdonSharp.CE.Editor.GraphBridge
         /// </summary>
         private static NodeDefinition CreateNodeDefinition(
             MethodInfo method,
-            CE.GraphBridge.GraphNodeAttribute nodeAttr,
+            GraphNodeAttribute nodeAttr,
             string categoryPath)
         {
             var node = new NodeDefinition
@@ -270,8 +271,8 @@ namespace UdonSharp.CE.Editor.GraphBridge
             // Parse parameters for inputs
             foreach (var param in method.GetParameters())
             {
-                var inputAttr = param.GetCustomAttribute<CE.GraphBridge.GraphInputAttribute>();
-                var outputAttr = param.GetCustomAttribute<CE.GraphBridge.GraphOutputAttribute>();
+                var inputAttr = param.GetCustomAttribute<GraphInputAttribute>();
+                var outputAttr = param.GetCustomAttribute<GraphOutputAttribute>();
 
                 if (param.IsOut || outputAttr != null)
                 {
@@ -308,7 +309,7 @@ namespace UdonSharp.CE.Editor.GraphBridge
             }
 
             // Parse flow outputs
-            var flowOutputAttrs = method.GetCustomAttributes<CE.GraphBridge.GraphFlowOutputAttribute>();
+            var flowOutputAttrs = method.GetCustomAttributes<GraphFlowOutputAttribute>();
             foreach (var flowAttr in flowOutputAttrs)
             {
                 node.FlowOutputs.Add(flowAttr.Name);
@@ -322,7 +323,7 @@ namespace UdonSharp.CE.Editor.GraphBridge
         /// </summary>
         private static List<NodeDefinition> CreatePropertyNodes(
             PropertyInfo property,
-            CE.GraphBridge.GraphPropertyAttribute propAttr,
+            GraphPropertyAttribute propAttr,
             string categoryPath)
         {
             var nodes = new List<NodeDefinition>();
