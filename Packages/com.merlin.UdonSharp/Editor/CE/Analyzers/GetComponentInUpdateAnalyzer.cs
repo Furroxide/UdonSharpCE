@@ -82,7 +82,7 @@ namespace UdonSharp.CE.Editor.Analyzers
 
                 // Check the method's syntax for GetComponent calls
                 var syntaxRefs = method.RoslynSymbol?.DeclaringSyntaxReferences;
-                if (syntaxRefs == null || syntaxRefs.Value.Length == 0)
+                if (!syntaxRefs.HasValue || syntaxRefs.Value.Length == 0)
                     continue;
 
                 var methodSyntax = syntaxRefs.Value.First().GetSyntax();

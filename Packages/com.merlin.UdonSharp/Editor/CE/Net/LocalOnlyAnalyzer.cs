@@ -89,7 +89,7 @@ namespace UdonSharp.CE.Editor.Analyzers
 
                     // Check the second argument (event name)
                     var args = invocation.ArgumentList?.Arguments;
-                    if (args == null || args.Value.Count < 2)
+                    if (!args.HasValue || args.Value.Count < 2)
                         continue;
 
                     string targetMethodName = GetStringLiteralOrNameof(args.Value[1].Expression);
