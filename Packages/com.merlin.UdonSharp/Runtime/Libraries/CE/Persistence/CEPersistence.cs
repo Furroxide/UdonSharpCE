@@ -263,11 +263,20 @@ namespace UdonSharp.CE.Persistence
                 // For now, this serves as a placeholder that shows the intended flow
                 // The actual implementation depends on VRChat SDK version
                 Debug.Log($"[CE.Persistence] Saved {typeof(T).Name} to key '{key}' ({estimatedSize} bytes)");
+
+                // Notify lifecycle callbacks
+                PersistenceLifecycle.NotifyDataSaved(SaveResult.Success, key);
+
                 return SaveResult.Success;
             }
             catch (Exception e)
             {
                 Debug.LogError($"[CE.Persistence] Save<{typeof(T).Name}>: failed - {e.Message}");
+
+                // Notify lifecycle callbacks of failure
+                string key2 = PersistenceModelStorage<T>.Key;
+                PersistenceLifecycle.NotifyDataSaved(SaveResult.NetworkError, key2);
+
                 return SaveResult.NetworkError;
             }
         }
@@ -367,11 +376,19 @@ namespace UdonSharp.CE.Persistence
 
                 // For demonstration, return NoData
                 Debug.Log($"[CE.Persistence] Restore<{typeof(T).Name}>: no existing data for key '{key}'");
+
+                // Notify lifecycle callbacks
+                PersistenceLifecycle.NotifyDataRestored(RestoreResult.NoData, key);
+
                 return RestoreResult.NoData;
             }
             catch (Exception e)
             {
                 Debug.LogError($"[CE.Persistence] Restore<{typeof(T).Name}>: failed - {e.Message}");
+
+                // Notify lifecycle callbacks of failure
+                PersistenceLifecycle.NotifyDataRestored(RestoreResult.NetworkError, key);
+
                 return RestoreResult.NetworkError;
             }
         }

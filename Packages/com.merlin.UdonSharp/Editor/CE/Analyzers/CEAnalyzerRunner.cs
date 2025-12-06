@@ -31,7 +31,10 @@ namespace UdonSharp.CE.Editor.Analyzers
             new LocalOnlyAnalyzer(),
 
             // Phase 3: CE.Async analyzers
-            new AsyncMethodAnalyzer()
+            new AsyncMethodAnalyzer(),
+
+            // Phase 2: CE.Persistence analyzers
+            new PlayerDataSizeAnalyzer()
         };
 
         /// <summary>
