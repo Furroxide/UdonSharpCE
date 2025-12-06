@@ -1,6 +1,8 @@
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using UdonSharp;
 using UdonSharp.CE.Net;
 using UdonSharp.Compiler;
 using UdonSharp.Compiler.Binder;
@@ -66,7 +68,7 @@ namespace UdonSharp.CE.Editor.Analyzers
             bool isManualSync = behaviourSyncAttr?.behaviourSyncMode == BehaviourSyncMode.Manual;
 
             // Check all fields
-            if (type.FieldSymbols == null)
+            if (type.FieldSymbols.IsDefaultOrEmpty)
                 return diagnostics;
 
             foreach (FieldSymbol field in type.FieldSymbols)

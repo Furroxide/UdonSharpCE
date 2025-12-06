@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using UdonSharp.CE.Persistence;
@@ -107,7 +108,7 @@ namespace UdonSharp.CE.Editor.Analyzers
             int totalBytes = JSON_OBJECT_OVERHEAD; // Base object overhead
             var fieldEstimates = new List<(FieldSymbol field, string key, int size)>();
 
-            if (type.FieldSymbols == null)
+            if (type.FieldSymbols.IsDefaultOrEmpty)
                 return diagnostics;
 
             foreach (FieldSymbol field in type.FieldSymbols)

@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using UdonSharp;
 using UdonSharp.Compiler;
 using UdonSharp.Compiler.Binder;
 using UdonSharp.Compiler.Symbols;
@@ -93,7 +95,7 @@ namespace UdonSharp.CE.Editor.Analyzers
             int totalBytes = 0;
             var syncedFields = new List<(FieldSymbol field, int size)>();
 
-            if (type.FieldSymbols == null)
+            if (type.FieldSymbols.IsDefaultOrEmpty)
                 return diagnostics;
 
             foreach (FieldSymbol field in type.FieldSymbols)

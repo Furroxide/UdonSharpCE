@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using UdonSharp;
 using UdonSharp.CE.Net;
 using UdonSharp.Compiler;
 using UdonSharp.Compiler.Binder;

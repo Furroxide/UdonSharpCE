@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using UdonSharp.Compiler;
@@ -35,7 +36,7 @@ namespace UdonSharp.CE.Editor.Analyzers
             var diagnostics = new List<AnalyzerDiagnostic>();
 
             // Check all field symbols in the type
-            if (type.FieldSymbols == null)
+            if (type.FieldSymbols.IsDefaultOrEmpty)
                 return diagnostics;
 
             foreach (FieldSymbol field in type.FieldSymbols)
