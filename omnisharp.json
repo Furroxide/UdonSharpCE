@@ -1,0 +1,26 @@
+{
+  "RoslynExtensionsOptions": {
+    "EnableAnalyzersSupport": true,
+    "EnableImportCompletion": true,
+    "AnalyzeOpenDocumentsOnly": false,
+    "EnableDecompilationSupport": true
+  },
+  "MsBuild": {
+    "LoadProjectsOnDemand": false,
+    "UseBundledOnly": false
+  },
+  "FormattingOptions": {
+    "EnableEditorConfigSupport": true
+  },
+  "FileOptions": {
+    "SystemExcludeSearchPatterns": [
+      "**/node_modules/**/*",
+      "**/bin/**/*",
+      "**/obj/**/*",
+      "**/Library/**/*",
+      "**/Temp/**/*"
+    ],
+    "ExcludeSearchPatterns": []
+  }
+}
+
