@@ -10,6 +10,14 @@ UdonSharpCE (Community Edition) builds on MerlinVR's UdonSharp 1.2-beta1 to prov
 
 This proposal defines eight modules with clear boundaries, explicit non-goals, and design constraints informed by real Udon/VRChat limitations.
 
+### Progress Audit (Dec 2024)
+
+- Phase 1 (DevTools core, Data): Implemented in `Packages/com.merlin.UdonSharp/Runtime/Libraries/CE/DevTools` and `/CE/Data`.
+- Phase 2 (Persistence + analyzers): Attribute/validation/runtime size estimator and analyzers implemented; PlayerObject helpers, lifecycle callbacks, and compile-time size warnings still pending.
+- Phase 3 (Async + Net core): UdonTask runtime, Sync/Rpc/LocalOnly attributes, and analyzers implemented; async state-machine emitter and fuller bandwidth estimator still pending.
+- Phase 4 (Perf): ECS-lite, pooling, grid/LOD utilities implemented in `/CE/Perf`.
+- Phase 5 (Procgen, Net advanced, GraphBridge): Not started.
+
 ---
 
 ## Baseline: UdonSharp 1.2-beta1
@@ -53,6 +61,8 @@ UdonSharpCE treats **Merlin's 1.2-beta1** as the minimum baseline. This provides
 ### Goal
 
 Type-safe, ergonomic data abstractions bridging Merlin's collections to VRChat's Data Containers (`DataList`, `DataDictionary`, `DataToken`).
+
+**Status (Dec 2024):** Implemented (`Packages/com.merlin.UdonSharp/Runtime/Libraries/CE/Data`, samples in `Packages/com.merlin.UdonSharp/Samples~/CE/DataModels`).
 
 ### Features
 
@@ -111,6 +121,8 @@ public class InventoryManager : UdonSharpBehaviour
 ### Goal
 
 Provide async/await-style workflows compiled into Udon-compatible state machines for complex sequences, cutscenes, quests, and multi-step logic.
+
+**Status (Dec 2024):** Partial. Runtime `UdonTask`/`UdonTask<T>` APIs and analyzers are in-place (`Runtime/Libraries/CE/Async`, `Editor/CE/Async/AsyncMethodAnalyzer.cs`); the state-machine emitter is still pending.
 
 ### Features
 
@@ -186,6 +198,8 @@ public class CutsceneController : UdonSharpBehaviour
 ### Goal
 
 Type-safe RPC and sync with clear guarantees, visibility control, and compile-time analysis for network budget and safety.
+
+**Status (Dec 2024):** Partial. Core attributes (`[Sync]`, `[Rpc]`, `[LocalOnly]`), rate limiter, and analyzers are live (`Runtime/Libraries/CE/Net`, `Editor/CE/Net`). Advanced late-join sync and conflict helpers are not yet implemented.
 
 ### Features
 
@@ -275,6 +289,8 @@ public class ScoreBoard : UdonSharpBehaviour
 ### Goal
 
 Attribute-based mapping from C# models to VRChat's PlayerData and PlayerObject systems, making persistent worlds dramatically easier to build.
+
+**Status (Dec 2024):** Partial. Attribute mapping, validation helpers, runtime persistence API, and size estimator are implemented (`Runtime/Libraries/CE/Persistence`, samples in `Samples~/CE/Persistence`). PlayerObject helpers, lifecycle callbacks, and compile-time size warnings remain TODO.
 
 ### Features
 
@@ -379,6 +395,8 @@ public class SaveManager : UdonSharpBehaviour
 
 Expose UdonSharpCE systems to Udon Graph users via attributes, turning CE into a platform non-coders can adopt.
 
+**Status (Dec 2024):** Not started. No GraphBridge runtime/editor code is present yet.
+
 ### Features
 
 1. **Node Export Attributes**
@@ -461,6 +479,8 @@ public class QuestSystem : UdonSharpBehaviour
 ### Goal
 
 Make ambitious Udon worlds testable, debuggable, and maintainable through comprehensive tooling.
+
+**Status (Dec 2024):** Core console/profiler/logger and analyzers are implemented (`Runtime/Libraries/CE/DevTools`, `Editor/CE/Analyzers`). Network/state inspector UX is still conceptual.
 
 ### Features
 
@@ -553,6 +573,8 @@ public class GameManager : UdonSharpBehaviour
 ### Goal
 
 Enable high-entity-count worlds through data-oriented patterns that work within Udon's performance constraints.
+
+**Status (Dec 2024):** Implemented. CEWorld, CEGrid, CEPool, LOD helpers, and ECS utilities live in `Runtime/Libraries/CE/Perf`.
 
 ### Features
 
@@ -668,6 +690,8 @@ Udon runs 200-1000x slower than native C#. Traditional approaches hit walls at 5
 ### Goal
 
 Enable deterministic procedural content that generates identically across all clients from shared seeds.
+
+**Status (Dec 2024):** Not started. No CE.Procgen runtime/editor code exists yet.
 
 ### Features
 
@@ -798,7 +822,7 @@ CE APIs are designed to avoid fighting known Udon/VRChat limitations:
 
 | Constraint                 | CE Approach                            |
 | -------------------------- | -------------------------------------- |
-| 100KB PlayerData limit     | Compile-time size estimation, warnings |
+| 100KB PlayerData limit     | Runtime size estimator; compile-time warnings planned |
 | 100KB PlayerObject limit   | Schema design guidance                 |
 | No save slots built-in     | CE.Persistence provides abstraction    |
 | Can't save in OnPlayerLeft | Auto-save system with periodic flush   |
@@ -834,6 +858,8 @@ UdonSharpCE will **NOT** pursue:
 ## Implementation Phases
 
 Each phase builds on the previous. A phase is complete when its modules are functional and tested.
+
+Status legend: `[x]` done, `[~]` in progress/partial, `[ ]` not started.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -890,11 +916,11 @@ Each phase builds on the previous. A phase is complete when its modules are func
 
 **Deliverables:**
 
-- [ ] In-world debug console (log viewer, error display)
-- [ ] Basic profiler (frame timing, Update costs)
-- [ ] `CEList<T>`, `CEDictionary<K,V>` wrappers
-- [ ] `DataList` / `DataDictionary` bridge methods
-- [ ] `[DataModel]` and `[DataField]` attribute handling
+- [x] In-world debug console (log viewer, error display)
+- [x] Basic profiler (frame timing, Update costs)
+- [x] `CEList<T>`, `CEDictionary<K,V>` wrappers
+- [x] `DataList` / `DataDictionary` bridge methods
+- [x] `[DataModel]` and `[DataField]` attribute handling
 
 **Exit criteria:** Can create data models, bridge to Data Containers, and debug basic behaviours in-world.
 
@@ -913,13 +939,13 @@ Each phase builds on the previous. A phase is complete when its modules are func
 
 **Deliverables:**
 
-- [ ] `[PlayerData]` and `[PersistKey]` attribute mapping
+- [x] `[PlayerData]` and `[PersistKey]` attribute mapping
 - [ ] PlayerObject integration helpers
 - [ ] `OnDataRestored` / `OnDataSaved` lifecycle events
-- [ ] Compile-time size estimation (100KB limit warnings)
-- [ ] Analyzer: uninitialized synced arrays
-- [ ] Analyzer: `GetComponent` in Update/FixedUpdate
-- [ ] Analyzer: oversized sync payloads
+- [~] Compile-time size estimation (runtime estimator in CEPersistence; compiler warnings pending)
+- [x] Analyzer: uninitialized synced arrays
+- [x] Analyzer: `GetComponent` in Update/FixedUpdate
+- [x] Analyzer: oversized sync payloads
 
 **Exit criteria:** Can define persistent player data with attributes, save/restore works correctly, compile-time warnings catch common issues.
 
@@ -938,13 +964,13 @@ Each phase builds on the previous. A phase is complete when its modules are func
 
 **Deliverables:**
 
-- [ ] `UdonTask` / `UdonTask<T>` promise types
+- [x] `UdonTask` / `UdonTask<T>` promise types
 - [ ] State machine compiler transformation for `async`/`await`
-- [ ] `UdonTask.Delay()`, `UdonTask.Yield()`, `UdonTask.WhenAll()`
-- [ ] `[Sync]` attribute with interpolation/quantization options
-- [ ] `[Rpc]` attribute with target and rate limiting
-- [ ] `[LocalOnly]` attribute (non-networked methods)
-- [ ] Bandwidth estimation per behaviour
+- [x] `UdonTask.Delay()`, `UdonTask.Yield()`, `UdonTask.WhenAll()`
+- [x] `[Sync]` attribute with interpolation/quantization options
+- [x] `[Rpc]` attribute with target and rate limiting
+- [x] `[LocalOnly]` attribute (non-networked methods)
+- [~] Bandwidth estimation per behaviour (continuous sync analyzer only)
 
 **Exit criteria:** Can write async sequences that compile to valid Udon; can define typed RPCs and sync properties with compile-time validation.
 
