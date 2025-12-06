@@ -963,13 +963,13 @@ Each phase builds on the previous. A phase is complete when its modules are func
 
 **Deliverables:**
 
-- [ ] `[CEComponent]` struct definitions
-- [ ] Struct-to-SoA compiler transformation
-- [ ] `CEWorld` entity container with archetype storage
-- [ ] `[CESystem]` attribute and system registration
-- [ ] Batched update loop execution
-- [ ] `CEPool<T>` object pooling
-- [ ] Spatial partitioning (grid-based)
+- [x] `[CEComponent]` struct definitions
+- [x] Struct-to-SoA compiler transformation
+- [x] `CEWorld` entity container with archetype storage
+- [x] `[CESystem]` attribute and system registration
+- [x] Batched update loop execution
+- [x] `CEPool<T>` object pooling
+- [x] Spatial partitioning (grid-based)
 
 **Exit criteria:** Can define ECS-style components and systems; demo showing 500+ entities updating without frame drops.
 
