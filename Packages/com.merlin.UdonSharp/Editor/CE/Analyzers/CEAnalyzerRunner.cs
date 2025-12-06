@@ -20,9 +20,18 @@ namespace UdonSharp.CE.Editor.Analyzers
         /// </summary>
         private static readonly ICompileTimeAnalyzer[] Analyzers = new ICompileTimeAnalyzer[]
         {
+            // Phase 2: Core analyzers
             new UninitializedSyncArrayAnalyzer(),
             new GetComponentInUpdateAnalyzer(),
-            new SyncPayloadSizeAnalyzer()
+            new SyncPayloadSizeAnalyzer(),
+
+            // Phase 3: CE.Net analyzers
+            new SyncFieldAnalyzer(),
+            new RpcMethodAnalyzer(),
+            new LocalOnlyAnalyzer(),
+
+            // Phase 3: CE.Async analyzers
+            new AsyncMethodAnalyzer()
         };
 
         /// <summary>
