@@ -22,7 +22,6 @@ using UdonSharp.Compiler.Binder;
 using UdonSharp.Compiler.Emit;
 using UdonSharp.Compiler.Symbols;
 using UdonSharp.Compiler.Udon;
-using UdonSharp.CE.Editor.Analyzers;
 using UdonSharp.Core;
 using UdonSharp.Internal;
 using UdonSharp.Lib.Internal;
@@ -614,13 +613,13 @@ namespace UdonSharp.Compiler
 
             BindAllPrograms(rootTypes, compilationContext);
 
-            // Run CE compile-time analyzers after binding
+            // Run registered compile-time analyzers after binding
             foreach (var binding in rootTypes)
             {
                 if (binding.Item2.binding != null)
                 {
                     TypeSymbol typeSymbol = binding.Item2.binding.GetTypeSymbol(binding.Item1);
-                    CEAnalyzerRunner.RunAnalyzers(typeSymbol, binding.Item2.binding, compilationContext);
+                    CompileTimeAnalyzerRegistry.RunAnalyzers(typeSymbol, binding.Item2.binding, compilationContext);
                 }
             }
 

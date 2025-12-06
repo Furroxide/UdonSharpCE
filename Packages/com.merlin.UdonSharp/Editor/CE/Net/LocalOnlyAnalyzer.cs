@@ -71,10 +71,10 @@ namespace UdonSharp.CE.Editor.Analyzers
             foreach (MethodSymbol method in methods)
             {
                 var syntaxRefs = method.RoslynSymbol?.DeclaringSyntaxReferences;
-                if (syntaxRefs == null || syntaxRefs.Length == 0)
+                if (syntaxRefs == null || syntaxRefs.Value.Length == 0)
                     continue;
 
-                var methodSyntax = syntaxRefs.First().GetSyntax();
+                var methodSyntax = syntaxRefs.Value.First().GetSyntax();
 
                 // Find all invocation expressions
                 var invocations = methodSyntax.DescendantNodes()
@@ -89,10 +89,10 @@ namespace UdonSharp.CE.Editor.Analyzers
 
                     // Check the second argument (event name)
                     var args = invocation.ArgumentList?.Arguments;
-                    if (args == null || args.Count < 2)
+                    if (args == null || args.Value.Count < 2)
                         continue;
 
-                    string targetMethodName = GetStringLiteralOrNameof(args[1].Expression);
+                    string targetMethodName = GetStringLiteralOrNameof(args.Value[1].Expression);
                     if (targetMethodName == null)
                         continue;
 

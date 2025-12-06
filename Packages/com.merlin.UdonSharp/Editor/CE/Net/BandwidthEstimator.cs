@@ -9,7 +9,7 @@ namespace UdonSharp.CE.Editor.Net
     /// <summary>
     /// Estimation result for a single synced field.
     /// </summary>
-    public class FieldBandwidthEstimate
+    internal class FieldBandwidthEstimate
     {
         /// <summary>
         /// The field name.
@@ -69,7 +69,7 @@ namespace UdonSharp.CE.Editor.Net
     /// <summary>
     /// Estimation result for an entire behaviour's sync payload.
     /// </summary>
-    public class BehaviourBandwidthEstimate
+    internal class BehaviourBandwidthEstimate
     {
         /// <summary>
         /// The behaviour type name.
@@ -113,7 +113,7 @@ namespace UdonSharp.CE.Editor.Net
     /// Supports quantization and delta encoding hints from CE.Net attributes
     /// to provide more accurate estimates.
     /// </summary>
-    public static class BandwidthEstimator
+    internal static class BandwidthEstimator
     {
         #region Constants
 

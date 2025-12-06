@@ -82,10 +82,10 @@ namespace UdonSharp.CE.Editor.Analyzers
 
                 // Check the method's syntax for GetComponent calls
                 var syntaxRefs = method.RoslynSymbol?.DeclaringSyntaxReferences;
-                if (syntaxRefs == null || syntaxRefs.Length == 0)
+                if (syntaxRefs == null || syntaxRefs.Value.Length == 0)
                     continue;
 
-                var methodSyntax = syntaxRefs.First().GetSyntax();
+                var methodSyntax = syntaxRefs.Value.First().GetSyntax();
 
                 // Find all invocation expressions in the method
                 var invocations = methodSyntax.DescendantNodes()

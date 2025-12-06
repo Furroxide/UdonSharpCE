@@ -1,5 +1,6 @@
 using Microsoft.CodeAnalysis;
 using UdonSharp.Compiler;
+using DiagnosticSeverity = UdonSharp.Compiler.DiagnosticSeverity;
 
 namespace UdonSharp.CE.Editor.Analyzers
 {

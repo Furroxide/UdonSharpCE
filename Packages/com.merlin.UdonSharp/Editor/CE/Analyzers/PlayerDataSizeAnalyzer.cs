@@ -357,15 +357,15 @@ namespace UdonSharp.CE.Editor.Analyzers
         private Location GetTypeLocation(TypeSymbol type)
         {
             var declaringSyntaxRefs = type.RoslynSymbol?.DeclaringSyntaxReferences;
-            if (declaringSyntaxRefs != null && declaringSyntaxRefs.Length > 0)
+            if (declaringSyntaxRefs != null && declaringSyntaxRefs.Value.Length > 0)
             {
-                return declaringSyntaxRefs.First().GetSyntax().GetLocation();
+                return declaringSyntaxRefs.Value.First().GetSyntax().GetLocation();
             }
 
             var locations = type.RoslynSymbol?.Locations;
-            if (locations != null && locations.Length > 0)
+            if (locations != null && locations.Value.Length > 0)
             {
-                return locations.First();
+                return locations.Value.First();
             }
 
             return Location.None;

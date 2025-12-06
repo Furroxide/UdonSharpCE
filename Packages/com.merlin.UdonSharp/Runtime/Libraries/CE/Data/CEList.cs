@@ -4,9 +4,6 @@ using UnityEngine;
 using VRC.SDK3.Data;
 using UdonSharp.CE.Data.Internal;
 
-// Use internal List<T> from UdonSharp
-using InternalList = UdonSharp.Lib.Internal.Collections.List<int>; // Placeholder for generic reference
-
 namespace UdonSharp.CE.Data
 {
     /// <summary>

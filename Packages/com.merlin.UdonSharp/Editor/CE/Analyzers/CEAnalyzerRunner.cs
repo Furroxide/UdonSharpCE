@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using UdonSharp.Compiler;
 using UdonSharp.Compiler.Binder;
 using UdonSharp.Compiler.Symbols;
+using UnityEditor;
 using UnityEngine;
 
 namespace UdonSharp.CE.Editor.Analyzers
@@ -13,8 +14,17 @@ namespace UdonSharp.CE.Editor.Analyzers
     /// This class manages the collection of registered analyzers and executes them
     /// in a thread-safe manner during compilation.
     /// </summary>
+    [InitializeOnLoad]
     internal static class CEAnalyzerRunner
     {
+        /// <summary>
+        /// Static constructor registers with the compiler's analyzer registry.
+        /// </summary>
+        static CEAnalyzerRunner()
+        {
+            CompileTimeAnalyzerRegistry.RegisterAnalyzer(RunAnalyzers);
+        }
+
         /// <summary>
         /// The collection of all registered analyzers.
         /// </summary>

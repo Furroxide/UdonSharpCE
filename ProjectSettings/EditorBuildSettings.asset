@@ -9,5 +9,7 @@ EditorBuildSettings:
     path: Assets/UdonSharp/Tests/IntegrationTestScene.unity
     guid: e67d621624f092b4bb4ee6743395a752
   m_configObjects:
-    com.unity.xr.management.loader_settings: {fileID: 11400000, guid: e944e02ede24fc54784d606bdd20f98d,
+    Unity.XR.Oculus.Settings: {fileID: 11400000, guid: 1658c7acdae68064ebcb9754fe625d52,
+      type: 2}
+    com.unity.xr.management.loader_settings: {fileID: 11400000, guid: 234699db68ecaed4fb129052c8dc5c8d,
       type: 2}
