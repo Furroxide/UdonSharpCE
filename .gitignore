@@ -69,13 +69,7 @@ Assets/UdonSharp/Scripts/Editor.meta
 **/.idea/*
 Assets/Udon.meta
 [Aa]ssets/SerializedUdonPrograms*
-Packages/*
-
-# UdonSharp stuff
-# Except UdonSharp folder from Packages/* rule
-!Packages/com.merlin.UdonSharp/
-# Track VPM manifest for dependency management
-!Packages/vpm-manifest.json
+# Package management handled by Packages/.gitignore
 /Assets/UdonSharp/UdonSharpSettings.asset
 /Assets/UdonSharp/UdonSharpSettings.asset.meta
 Assets/Merlin.meta

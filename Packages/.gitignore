@@ -1,0 +1,12 @@
+# Ignore all VPM-managed packages (will be downloaded by VPM)
+com.vrchat.base/
+com.vrchat.worlds/
+com.vrchat.core.vpm-resolver/
+
+# Keep Unity package files
+!manifest.json
+!packages-lock.json
+!vpm-manifest.json
+
+# Keep our custom UdonSharp package
+!com.merlin.UdonSharp/
