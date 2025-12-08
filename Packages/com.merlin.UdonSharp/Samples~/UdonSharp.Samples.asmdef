@@ -1,0 +1,19 @@
+{
+    "name": "UdonSharp.Samples",
+    "references": [
+        "UdonSharp.Runtime",
+        "UdonSharp.Lib",
+        "VRC.Udon",
+        "VRC.SDKBase",
+        "VRC.SDK3"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

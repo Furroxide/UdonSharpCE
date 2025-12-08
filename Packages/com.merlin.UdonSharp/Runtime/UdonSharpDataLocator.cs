@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using UnityEngine;
 using System.IO;
-using FileInfo = System.IO.FileInfo;
 
 #if UNITY_EDITOR
 using UnityEditor;
@@ -52,24 +51,10 @@ namespace UdonSharp.Updater
         }
 
 #if UNITY_EDITOR
-        private static string GetUtilitiesPath(string locatorPath)
-        {
-            return Path.Combine(Path.GetDirectoryName(locatorPath), "UtilityScripts");
-        }
-        
         private static UdonSharpDataLocator InitializeUdonSharpData()
         {
             if (!AssetDatabase.IsValidFolder(Path.GetDirectoryName(DEFAULT_DATA_PATH)))
                 AssetDatabase.CreateFolder("Assets", "UdonSharp");
-
-            string utilsTargetPath = GetUtilitiesPath(DEFAULT_DATA_PATH);
-            
-            string utilsSourcePath = Path.Combine(UdonSharpLocator.SamplesPath, "Utilities");
-            
-            if (Directory.Exists(utilsSourcePath))
-                DeepCopyDirectory(utilsSourcePath, utilsTargetPath);
-            else
-                Debug.LogWarning("No utilities directory found to copy from for UdonSharp utility scripts");
             
             UdonSharpDataLocator locator = CreateInstance<UdonSharpDataLocator>();
             AssetDatabase.CreateAsset(locator, DEFAULT_DATA_PATH);
@@ -81,25 +66,6 @@ namespace UdonSharp.Updater
             return locator;
         }
     #endif
-
-        private static void DeepCopyDirectory(string sourcePath, string destinationPath)
-        {
-            string[] sourceDirs = Directory.GetDirectories(sourcePath, "*", SearchOption.AllDirectories);
-
-            foreach (string sourceDir in sourceDirs)
-            {
-                Directory.CreateDirectory(sourceDir.Replace(sourcePath, destinationPath));
-            }
-
-            string[] sourceFiles = Directory.GetFiles(sourcePath, "*", SearchOption.AllDirectories);
-
-            foreach (string sourceFile in sourceFiles)
-            {
-                string targetFilePath = sourceFile.Replace(sourcePath, destinationPath);
-                File.Copy(sourceFile, targetFilePath, true);
-                new FileInfo(targetFilePath).IsReadOnly = false;
-            }
-        }
     }
 
 #if UNITY_EDITOR

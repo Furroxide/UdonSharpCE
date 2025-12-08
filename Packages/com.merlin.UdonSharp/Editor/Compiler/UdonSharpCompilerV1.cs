@@ -449,6 +449,11 @@ namespace UdonSharp.Compiler
             compilationContext.CurrentPhase = CompilationContext.CompilePhase.Setup;
             ModuleBinding[] syntaxTrees = compilationContext.LoadSyntaxTreesAndCreateModules(allScriptAssemblies);
 
+            // Run CE compile-time optimizers on syntax trees
+            Stopwatch optimizerTimer = Stopwatch.StartNew();
+            RunCompileTimeOptimizers(syntaxTrees);
+            PrintStageTime("CE Optimizers", optimizerTimer);
+
             foreach (ModuleBinding binding in syntaxTrees)
             {
                 foreach (Diagnostic diag in binding.tree.GetDiagnostics())
@@ -1135,6 +1140,42 @@ namespace UdonSharp.Compiler
                 }
 
                 rootBinding.assembly = generatedUasm;
+            }
+        }
+
+        /// <summary>
+        /// Runs compile-time optimizers on all syntax trees.
+        /// Optimizers transform syntax trees before Roslyn compilation to generate more efficient Udon code.
+        /// </summary>
+        private static void RunCompileTimeOptimizers(ModuleBinding[] syntaxTrees)
+        {
+            if (syntaxTrees == null || syntaxTrees.Length == 0)
+                return;
+
+            try
+            {
+                // Convert to the format expected by the optimizer registry
+                var treeTuples = new (SyntaxTree tree, string filePath)[syntaxTrees.Length];
+                for (int i = 0; i < syntaxTrees.Length; i++)
+                {
+                    treeTuples[i] = (syntaxTrees[i].tree, syntaxTrees[i].filePath);
+                }
+
+                // Run all registered optimizers
+                var optimizedTuples = CompileTimeOptimizerRegistry.RunOptimizers(treeTuples);
+
+                // Update the module bindings with optimized trees
+                for (int i = 0; i < syntaxTrees.Length; i++)
+                {
+                    if (optimizedTuples[i].tree != syntaxTrees[i].tree)
+                    {
+                        syntaxTrees[i].tree = optimizedTuples[i].tree;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[UdonSharp] Compile-time optimization failed: {ex.Message}");
             }
         }
     }

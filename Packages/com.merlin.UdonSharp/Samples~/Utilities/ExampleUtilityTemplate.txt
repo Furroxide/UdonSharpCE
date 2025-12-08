@@ -1,15 +1,15 @@
+This folder contains example utility scripts for UdonSharp.
 
-using UnityEngine;
-using VRC.SDK3.Components;
-using VRC.SDKBase;
-using VRC.Udon;
+To use these samples:
+1. Import them via Unity Package Manager -> UdonSharp -> Samples
+2. Or copy the scripts you need to your Assets folder
 
-namespace UdonSharp.Examples.Utilities
-{
-    /// <summary>
-    /// 
-    /// </summary>
-    public class <TemplateClassName> : UdonSharpBehaviour 
-    {
-    }
-}
+These scripts demonstrate common patterns for VRChat world development:
+- BoneFollower: Follow avatar bones
+- InteractToggle: Toggle objects on interact
+- PlayerModSetter: Set player movement settings
+- TrackingDataFollower: Follow VR tracking data
+- WorldAudioSettings: Configure world audio
+- Synced/GlobalToggleObject: Synced toggle any player can use
+- Synced/MasterToggleObject: Synced toggle only master can use
+

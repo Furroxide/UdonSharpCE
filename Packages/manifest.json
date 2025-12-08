@@ -3,11 +3,13 @@
     {
       "name": "OpenUPM",
       "url": "https://package.openupm.com",
-      "scopes": ["com.cysharp"]
+      "scopes": [
+        "com.coplaydev.unity-mcp",
+        "com.cysharp"
+      ]
     }
   ],
   "dependencies": {
-    "com.cysharp.unitask": "2.5.0",
     "com.unity.2d.sprite": "1.0.0",
     "com.unity.2d.tilemap": "1.0.0",
     "com.unity.ads": "4.4.2",
@@ -56,6 +58,7 @@
     "com.unity.modules.video": "1.0.0",
     "com.unity.modules.vr": "1.0.0",
     "com.unity.modules.wind": "1.0.0",
-    "com.unity.modules.xr": "1.0.0"
+    "com.unity.modules.xr": "1.0.0",
+    "com.coplaydev.unity-mcp": "8.2.1"
   }
 }

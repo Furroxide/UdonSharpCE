@@ -1,0 +1,26 @@
+{
+    "name": "UdonSharp.Samples.Editor",
+    "references": [
+        "UdonSharp.Runtime",
+        "UdonSharp.Lib",
+        "UdonSharp.Editor",
+        "UdonSharp.Samples",
+        "VRC.Udon",
+        "VRC.SDKBase"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
+
+
+
+

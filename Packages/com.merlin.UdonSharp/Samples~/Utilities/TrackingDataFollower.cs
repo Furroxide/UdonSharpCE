@@ -5,26 +5,25 @@ using VRC.SDKBase;
 namespace UdonSharp.Examples.Utilities
 {
     /// <summary>
-    /// Follows one of the chosen playerApi tracking targets
+    /// Follows VR tracking data for the local player
     /// </summary>
     [AddComponentMenu("Udon Sharp/Utilities/Tracking Data Follower")]
     [UdonBehaviourSyncMode(BehaviourSyncMode.NoVariableSync)]
-    public class TrackingDataFollower : UdonSharpBehaviour 
+    public class TrackingDataFollower : UdonSharpBehaviour
     {
         public VRCPlayerApi.TrackingDataType trackingTarget;
 
         VRCPlayerApi playerApi;
         bool isInEditor;
 
-        private void Start()
+        void Start()
         {
             playerApi = Networking.LocalPlayer;
-            isInEditor = playerApi == null; // PlayerApi will be null in editor
+            isInEditor = playerApi == null;
         }
 
-        private void LateUpdate()
+        void Update()
         {
-            // PlayerApi data will only be valid in game so we don't run the update if we're in editor
             if (isInEditor)
                 return;
 
@@ -33,3 +32,4 @@ namespace UdonSharp.Examples.Utilities
         }
     }
 }
+

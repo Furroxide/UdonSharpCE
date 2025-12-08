@@ -1,10 +1,12 @@
 {
   "dependencies": {
-    "com.cysharp.unitask": {
-      "version": "2.5.0",
+    "com.coplaydev.unity-mcp": {
+      "version": "8.2.1",
       "depth": 0,
       "source": "registry",
-      "dependencies": {},
+      "dependencies": {
+        "com.unity.nuget.newtonsoft-json": "3.0.2"
+      },
       "url": "https://package.openupm.com"
     },
     "com.merlin.udonsharp": {

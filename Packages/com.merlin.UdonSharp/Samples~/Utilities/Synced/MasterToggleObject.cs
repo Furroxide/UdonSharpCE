@@ -5,43 +5,36 @@ using VRC.SDKBase;
 namespace UdonSharp.Examples.Utilities
 {
     /// <summary>
-    /// Allows the master and only the master to toggle a game object globally
+    /// Synced toggle that only the instance master can interact with
     /// </summary>
+    [AddComponentMenu("Udon Sharp/Utilities/Synced/Master Toggle Object")]
     [UdonBehaviourSyncMode(BehaviourSyncMode.Manual)]
-    public class MasterToggleObject : UdonSharpBehaviour 
+    public class MasterToggleObject : UdonSharpBehaviour
     {
         public GameObject toggleObject;
 
         [UdonSynced]
         bool isObjectEnabled;
 
-        private void Start()
+        public override void Interact()
         {
-            isObjectEnabled = toggleObject.activeSelf;
-        }
-
-        // Prevents people who are not the master from taking ownership
-        public override bool OnOwnershipRequest(VRCPlayerApi requestingPlayer, VRCPlayerApi requestedOwner)
-        {
-            return requestedOwner.isMaster;
+            if (!Networking.IsMaster) return;
+            
+            isObjectEnabled = !isObjectEnabled;
+            RequestSerialization();
+            UpdateToggleState();
         }
 
         public override void OnDeserialization()
         {
-            toggleObject.SetActive(isObjectEnabled);
+            UpdateToggleState();
         }
 
-        public override void Interact()
+        void UpdateToggleState()
         {
-            if (!Networking.IsMaster)
-                return;
-            else if (!Networking.IsOwner(gameObject)) // The object may have transfer ownership on collision checked which would allow people to take ownership by accident
-                Networking.SetOwner(Networking.LocalPlayer, gameObject);
-
-            isObjectEnabled = !isObjectEnabled;
-            toggleObject.SetActive(isObjectEnabled);
-
-            RequestSerialization();
+            if (toggleObject != null)
+                toggleObject.SetActive(isObjectEnabled);
         }
     }
 }
+

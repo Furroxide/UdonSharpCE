@@ -1,43 +1,39 @@
 
 using UnityEngine;
-using VRC.SDK3.Components;
 using VRC.SDKBase;
-using VRC.Udon;
 
 namespace UdonSharp.Examples.Utilities
 {
     /// <summary>
-    /// This class allows anyone to toggle a gameobject for everyone in the world. 
-    /// This script assumes that the object it is on will not have other things transferring ownership of it.
+    /// Globally synced toggle that any player can interact with
     /// </summary>
+    [AddComponentMenu("Udon Sharp/Utilities/Synced/Global Toggle Object")]
     [UdonBehaviourSyncMode(BehaviourSyncMode.Manual)]
-    public class GlobalToggleObject : UdonSharpBehaviour 
+    public class GlobalToggleObject : UdonSharpBehaviour
     {
         public GameObject toggleObject;
 
         [UdonSynced]
         bool isEnabled;
 
-        private void Start()
+        public override void Interact()
         {
-            isEnabled = toggleObject.activeSelf;
+            Networking.SetOwner(Networking.LocalPlayer, gameObject);
+            isEnabled = !isEnabled;
+            RequestSerialization();
+            UpdateToggleState();
         }
 
         public override void OnDeserialization()
         {
-            if (!Networking.IsOwner(gameObject))
-                toggleObject.SetActive(isEnabled);
+            UpdateToggleState();
         }
 
-        public override void Interact()
+        void UpdateToggleState()
         {
-            if (!Networking.IsOwner(gameObject))
-                Networking.SetOwner(Networking.LocalPlayer, gameObject);
-
-            isEnabled = !isEnabled;
-            toggleObject.SetActive(isEnabled);
-
-            RequestSerialization();
+            if (toggleObject != null)
+                toggleObject.SetActive(isEnabled);
         }
     }
 }
+

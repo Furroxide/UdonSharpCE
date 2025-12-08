@@ -1,16 +1,14 @@
 
 using UnityEngine;
-using VRC.SDK3.Components;
 
 namespace UdonSharp.Examples.Utilities
 {
     /// <summary>
-    /// A Basic example class that demonstrates how to toggle a list of object on and off when someone interacts with the UdonBehaviour
-    /// This toggle only works locally
+    /// Toggles a list of game objects on and off when interacted with
     /// </summary>
     [AddComponentMenu("Udon Sharp/Utilities/Interact Toggle")]
     [UdonBehaviourSyncMode(BehaviourSyncMode.NoVariableSync)]
-    public class InteractToggle : UdonSharpBehaviour 
+    public class InteractToggle : UdonSharpBehaviour
     {
         [Tooltip("List of objects to toggle on and off")]
         public GameObject[] toggleObjects;
@@ -19,10 +17,10 @@ namespace UdonSharp.Examples.Utilities
         {
             foreach (GameObject toggleObject in toggleObjects)
             {
-                if (toggleObject != null) {
+                if (toggleObject != null)
                     toggleObject.SetActive(!toggleObject.activeSelf);
-                }
             }
         }
     }
 }
+

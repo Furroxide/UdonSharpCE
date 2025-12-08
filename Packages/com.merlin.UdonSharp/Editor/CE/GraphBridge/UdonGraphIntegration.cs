@@ -200,7 +200,12 @@ namespace UdonSharp.CE.Editor.GraphBridge
                 }
             }
 
-            Debug.Log($"[UdonGraphIntegration] Registered {_registeredNodes.Count} custom nodes");
+            if (_registeredNodes.Count != 0)
+            {
+                Debug.Log($"[UdonGraphIntegration] Registered {_registeredNodes.Count} custom nodes");
+            }
+
+        
         }
 
         /// <summary>
