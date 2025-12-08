@@ -94,7 +94,7 @@ namespace UdonSharp.Lib.Internal.Collections
             // ReSharper disable once PossibleNullReferenceException
             int hashCode = value.GetHashCode();
             HashSetEntry<T>[] buckets = _buckets;
-            int bucketIndex = Mathf.Abs(hashCode % buckets.Length);
+            int bucketIndex = (hashCode & 0x7FFFFFFF) % buckets.Length;
 
             HashSetEntry<T> entry = buckets[bucketIndex];
 
@@ -142,7 +142,7 @@ namespace UdonSharp.Lib.Internal.Collections
             // ReSharper disable once PossibleNullReferenceException
             int hashCode = value.GetHashCode();
             HashSetEntry<T>[] buckets = _buckets;
-            int bucketIndex = Mathf.Abs(hashCode % buckets.Length);
+            int bucketIndex = (hashCode & 0x7FFFFFFF) % buckets.Length;
 
             HashSetEntry<T> entry = buckets[bucketIndex];
 
@@ -175,7 +175,7 @@ namespace UdonSharp.Lib.Internal.Collections
             // ReSharper disable once PossibleNullReferenceException
             int hashCode = value.GetHashCode();
             HashSetEntry<T>[] buckets = _buckets;
-            int bucketIndex = Mathf.Abs(hashCode % buckets.Length);
+            int bucketIndex = (hashCode & 0x7FFFFFFF) % buckets.Length;
 
             HashSetEntry<T> entry = buckets[bucketIndex];
             HashSetEntry<T> previousEntry = null;
@@ -497,7 +497,7 @@ namespace UdonSharp.Lib.Internal.Collections
                 {
                     HashSetEntry<T> nextEntry = entry.next;
 
-                    int newBucketIndex = Mathf.Abs(entry.value.GetHashCode() % newSize);
+                    int newBucketIndex = (entry.value.GetHashCode() & 0x7FFFFFFF) % newSize;
                     entry.next = newBuckets[newBucketIndex];
                     newBuckets[newBucketIndex] = entry;
 

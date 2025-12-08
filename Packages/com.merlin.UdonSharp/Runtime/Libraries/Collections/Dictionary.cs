@@ -141,7 +141,7 @@ namespace UdonSharp.Lib.Internal.Collections
             // ReSharper disable once PossibleNullReferenceException
             int hashCode = key.GetHashCode();
             DictionaryEntry<TKey, TValue>[] buckets = _buckets;
-            int bucketIndex = Mathf.Abs(hashCode % buckets.Length);
+            int bucketIndex = (hashCode & 0x7FFFFFFF) % buckets.Length;
 
             DictionaryEntry<TKey, TValue> entry = buckets[bucketIndex];
 
@@ -193,7 +193,7 @@ namespace UdonSharp.Lib.Internal.Collections
                 // ReSharper disable once PossibleNullReferenceException
                 int hashCode = key.GetHashCode();
                 DictionaryEntry<TKey, TValue>[] buckets = _buckets;
-                int bucketIndex = Mathf.Abs(hashCode % buckets.Length);
+                int bucketIndex = (hashCode & 0x7FFFFFFF) % buckets.Length;
 
                 DictionaryEntry<TKey, TValue> entry = buckets[bucketIndex];
 
@@ -227,7 +227,7 @@ namespace UdonSharp.Lib.Internal.Collections
                 // ReSharper disable once PossibleNullReferenceException
                 int hashCode = key.GetHashCode();
                 DictionaryEntry<TKey, TValue>[] buckets = _buckets;
-                int bucketIndex = Mathf.Abs(hashCode % buckets.Length);
+                int bucketIndex = (hashCode & 0x7FFFFFFF) % buckets.Length;
 
                 DictionaryEntry<TKey, TValue> entry = buckets[bucketIndex];
                 
@@ -274,7 +274,7 @@ namespace UdonSharp.Lib.Internal.Collections
 
             int hashCode = key.GetHashCode();
             var buckets = _buckets;
-            int bucketIndex = Mathf.Abs(hashCode % buckets.Length);
+            int bucketIndex = (hashCode & 0x7FFFFFFF) % buckets.Length;
 
             DictionaryEntry<TKey, TValue> entry = buckets[bucketIndex];
 
@@ -309,7 +309,7 @@ namespace UdonSharp.Lib.Internal.Collections
             // ReSharper disable once PossibleNullReferenceException
             int hashCode = key.GetHashCode();
             DictionaryEntry<TKey, TValue>[] buckets = _buckets;
-            int bucketIndex = Mathf.Abs(hashCode % buckets.Length);
+            int bucketIndex = (hashCode & 0x7FFFFFFF) % buckets.Length;
 
             DictionaryEntry<TKey, TValue> entry = buckets[bucketIndex];
             DictionaryEntry<TKey, TValue> previousEntry = null;
@@ -350,7 +350,7 @@ namespace UdonSharp.Lib.Internal.Collections
             int hashCode = key.GetHashCode();
             
             DictionaryEntry<TKey, TValue>[] buckets = _buckets;
-            int bucketIndex = Mathf.Abs(hashCode % buckets.Length);
+            int bucketIndex = (hashCode & 0x7FFFFFFF) % buckets.Length;
 
             DictionaryEntry<TKey, TValue> entry = buckets[bucketIndex];
             DictionaryEntry<TKey, TValue> previousEntry = null;
@@ -393,7 +393,7 @@ namespace UdonSharp.Lib.Internal.Collections
             // ReSharper disable once PossibleNullReferenceException
             int hashCode = key.GetHashCode();
             DictionaryEntry<TKey, TValue>[] buckets = _buckets;
-            int bucketIndex = Mathf.Abs(hashCode % buckets.Length);
+            int bucketIndex = (hashCode & 0x7FFFFFFF) % buckets.Length;
 
             DictionaryEntry<TKey, TValue> entry = buckets[bucketIndex];
 
@@ -457,7 +457,7 @@ namespace UdonSharp.Lib.Internal.Collections
 
                 while (entry != null)
                 {
-                    int newBucketIndex = Mathf.Abs(entry.key.GetHashCode() % newSize);
+                    int newBucketIndex = (entry.key.GetHashCode() & 0x7FFFFFFF) % newSize;
 
                     DictionaryEntry<TKey, TValue> nextEntry = entry.next;
                     entry.next = newBuckets[newBucketIndex];

@@ -106,6 +106,12 @@ namespace UdonSharp.CE.Perf
         private readonly int[] _freeList;
         private int _freeListCount;
 
+        /// <summary>
+        /// List of entities pending destruction for O(1) check.
+        /// </summary>
+        private readonly int[] _pendingDestroyList;
+        private int _pendingDestroyCount;
+
         #endregion
 
         #region Component Storage
@@ -200,6 +206,8 @@ namespace UdonSharp.CE.Perf
             _componentMasks = new int[maxEntities];
             _freeList = new int[maxEntities];
             _freeListCount = 0;
+            _pendingDestroyList = new int[maxEntities];
+            _pendingDestroyCount = 0;
             _activeEntityCount = 0;
             _nextEntitySlot = 0;
 
@@ -284,6 +292,13 @@ namespace UdonSharp.CE.Perf
         {
             if (!IsValidEntity(entityId)) return;
             _entityStates[entityId] = EntityState.PendingDestroy;
+            
+            // Add to pending destroy list for O(1) processing
+            if (_pendingDestroyCount < _pendingDestroyList.Length)
+            {
+                _pendingDestroyList[_pendingDestroyCount] = entityId;
+                _pendingDestroyCount++;
+            }
         }
 
         /// <summary>
@@ -549,25 +564,37 @@ namespace UdonSharp.CE.Perf
 
         /// <summary>
         /// Processes entities marked for deferred destruction.
+        /// O(1) check when no entities pending, O(k) where k = pending count.
         /// </summary>
         private void ProcessPendingDestructions()
         {
-            for (int i = 0; i < _maxEntities; i++)
+            // Early exit - common case when no entities pending
+            if (_pendingDestroyCount == 0) return;
+            
+            int pendingCount = _pendingDestroyCount;
+            int[] pendingList = _pendingDestroyList;
+            
+            for (int i = 0; i < pendingCount; i++)
             {
-                if (_entityStates[i] == EntityState.PendingDestroy)
+                int entityId = pendingList[i];
+                
+                // Verify entity is still pending (could have been destroyed immediately)
+                if (_entityStates[entityId] == EntityState.PendingDestroy)
                 {
-                    _entityStates[i] = EntityState.Free;
-                    _entityVersions[i]++;
-                    _componentMasks[i] = 0;
+                    _entityStates[entityId] = EntityState.Free;
+                    _entityVersions[entityId]++;
+                    _componentMasks[entityId] = 0;
                     _activeEntityCount--;
 
                     if (_freeListCount < _freeList.Length)
                     {
-                        _freeList[_freeListCount] = i;
+                        _freeList[_freeListCount] = entityId;
                         _freeListCount++;
                     }
                 }
             }
+            
+            _pendingDestroyCount = 0;
         }
 
         /// <summary>
@@ -615,9 +642,26 @@ namespace UdonSharp.CE.Perf
 
             _activeEntityCount = 0;
             _freeListCount = 0;
+            _pendingDestroyCount = 0;
             _nextEntitySlot = 0;
         }
 
+        #region Internal Accessors for Hot Path Optimization
+        
+        /// <summary>
+        /// Gets direct access to entity states array for hot path optimization.
+        /// Only for use by CEQuery - do not modify.
+        /// </summary>
+        internal EntityState[] GetEntityStates() => _entityStates;
+        
+        /// <summary>
+        /// Gets direct access to component masks array for hot path optimization.
+        /// Only for use by CEQuery - do not modify.
+        /// </summary>
+        internal int[] GetComponentMasks() => _componentMasks;
+        
+        #endregion
+        
         /// <summary>
         /// Gets all active entity IDs.
         /// </summary>

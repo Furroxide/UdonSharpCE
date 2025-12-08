@@ -35,12 +35,18 @@ namespace UdonSharp.CE.Data
     {
         private const int InitialSize = 23;
         private const float LoadFactor = 0.75f;
+        
+        // Slot states for tombstone deletion
+        private const byte SlotEmpty = 0;
+        private const byte SlotOccupied = 1;
+        private const byte SlotTombstone = 2;
 
         private TKey[] _keys;
         private TValue[] _values;
-        private bool[] _occupied;
+        private byte[] _slotState;  // Replaces bool[] _occupied for tombstone support
         private int _size;
         private int _capacity;
+        private int _tombstoneCount;
 
         #region Constructors
 
@@ -49,8 +55,9 @@ namespace UdonSharp.CE.Data
             _capacity = InitialSize;
             _keys = new TKey[_capacity];
             _values = new TValue[_capacity];
-            _occupied = new bool[_capacity];
+            _slotState = new byte[_capacity];
             _size = 0;
+            _tombstoneCount = 0;
         }
 
         public CEDictionary(int capacity)
@@ -58,8 +65,9 @@ namespace UdonSharp.CE.Data
             _capacity = capacity > 0 ? capacity : InitialSize;
             _keys = new TKey[_capacity];
             _values = new TValue[_capacity];
-            _occupied = new bool[_capacity];
+            _slotState = new byte[_capacity];
             _size = 0;
+            _tombstoneCount = 0;
         }
 
         #endregion
@@ -113,26 +121,47 @@ namespace UdonSharp.CE.Data
                 return;
             }
 
-            if (_size >= (int)(_capacity * LoadFactor))
+            // Rehash if too full (including tombstones)
+            if (_size + _tombstoneCount >= (int)(_capacity * LoadFactor))
             {
                 Resize();
             }
 
-            // Find empty slot
+            // Find empty or tombstone slot
             int hashCode = key.GetHashCode();
-            int startIndex = Mathf.Abs(hashCode % _capacity);
+            int startIndex = (hashCode & 0x7FFFFFFF) % _capacity;
+            int firstTombstone = -1;
 
             for (int i = 0; i < _capacity; i++)
             {
                 int idx = (startIndex + i) % _capacity;
-                if (!_occupied[idx])
+                byte state = _slotState[idx];
+                
+                if (state == SlotEmpty)
                 {
-                    _keys[idx] = key;
-                    _values[idx] = value;
-                    _occupied[idx] = true;
+                    // Use first tombstone if found, otherwise use empty slot
+                    int insertIdx = firstTombstone >= 0 ? firstTombstone : idx;
+                    _keys[insertIdx] = key;
+                    _values[insertIdx] = value;
+                    _slotState[insertIdx] = SlotOccupied;
                     _size++;
+                    if (firstTombstone >= 0) _tombstoneCount--;
                     return;
                 }
+                else if (state == SlotTombstone && firstTombstone < 0)
+                {
+                    firstTombstone = idx;
+                }
+            }
+            
+            // If we found a tombstone but no empty slot, use the tombstone
+            if (firstTombstone >= 0)
+            {
+                _keys[firstTombstone] = key;
+                _values[firstTombstone] = value;
+                _slotState[firstTombstone] = SlotOccupied;
+                _size++;
+                _tombstoneCount--;
             }
         }
 
@@ -146,11 +175,16 @@ namespace UdonSharp.CE.Data
 
             _keys[index] = default;
             _values[index] = default;
-            _occupied[index] = false;
+            _slotState[index] = SlotTombstone;  // Mark as tombstone instead of empty
             _size--;
+            _tombstoneCount++;
 
-            // Rehash following entries to maintain probe sequence
-            RehashAfterRemoval(index);
+            // Rehash only when tombstones exceed threshold (25% of capacity)
+            if (_tombstoneCount > _capacity / 4)
+            {
+                Resize();
+            }
+            
             return true;
         }
 
@@ -175,7 +209,7 @@ namespace UdonSharp.CE.Data
         {
             for (int i = 0; i < _capacity; i++)
             {
-                if (_occupied[i])
+                if (_slotState[i] == SlotOccupied)
                 {
                     if (value == null)
                     {
@@ -194,8 +228,9 @@ namespace UdonSharp.CE.Data
         {
             Array.Clear(_keys, 0, _capacity);
             Array.Clear(_values, 0, _capacity);
-            Array.Clear(_occupied, 0, _capacity);
+            Array.Clear(_slotState, 0, _capacity);
             _size = 0;
+            _tombstoneCount = 0;
         }
 
         public TKey[] GetKeys()
@@ -204,7 +239,7 @@ namespace UdonSharp.CE.Data
             int idx = 0;
             for (int i = 0; i < _capacity && idx < _size; i++)
             {
-                if (_occupied[i])
+                if (_slotState[i] == SlotOccupied)
                 {
                     result[idx++] = _keys[i];
                 }
@@ -218,7 +253,7 @@ namespace UdonSharp.CE.Data
             int idx = 0;
             for (int i = 0; i < _capacity && idx < _size; i++)
             {
-                if (_occupied[i])
+                if (_slotState[i] == SlotOccupied)
                 {
                     result[idx++] = _values[i];
                 }
@@ -240,7 +275,7 @@ namespace UdonSharp.CE.Data
 
             for (int i = 0; i < _capacity; i++)
             {
-                if (_occupied[i])
+                if (_slotState[i] == SlotOccupied)
                 {
                     DataToken keyToken = DataTokenConverter.ToToken(_keys[i]);
                     DataToken valueToken = DataTokenConverter.ToToken(_values[i]);
@@ -268,7 +303,7 @@ namespace UdonSharp.CE.Data
 
             for (int i = 0; i < _capacity; i++)
             {
-                if (_occupied[i])
+                if (_slotState[i] == SlotOccupied)
                 {
                     DataToken keyToken = keyConverter(_keys[i]);
                     DataToken valueToken = valueConverter(_values[i]);
@@ -443,7 +478,7 @@ namespace UdonSharp.CE.Data
 
         internal bool GetEntryAt(int index, out TKey key, out TValue value)
         {
-            if (index >= 0 && index < _capacity && _occupied[index])
+            if (index >= 0 && index < _capacity && _slotState[index] == SlotOccupied)
             {
                 key = _keys[index];
                 value = _values[index];
@@ -455,7 +490,7 @@ namespace UdonSharp.CE.Data
         }
 
         internal int Capacity => _capacity;
-        internal bool IsOccupied(int index) => index >= 0 && index < _capacity && _occupied[index];
+        internal bool IsOccupied(int index) => index >= 0 && index < _capacity && _slotState[index] == SlotOccupied;
 
         #endregion
 
@@ -466,16 +501,20 @@ namespace UdonSharp.CE.Data
             if (key == null) return -1;
 
             int hashCode = key.GetHashCode();
-            int startIndex = Mathf.Abs(hashCode % _capacity);
+            int startIndex = (hashCode & 0x7FFFFFFF) % _capacity;
 
             for (int i = 0; i < _capacity; i++)
             {
                 int idx = (startIndex + i) % _capacity;
-                if (!_occupied[idx])
+                byte state = _slotState[idx];
+                
+                if (state == SlotEmpty)
                 {
                     return -1; // Empty slot means key not found
                 }
-                if (key.Equals(_keys[idx]))
+                
+                // Continue past tombstones, only check occupied slots
+                if (state == SlotOccupied && key.Equals(_keys[idx]))
                 {
                     return idx;
                 }
@@ -488,40 +527,23 @@ namespace UdonSharp.CE.Data
             int newCapacity = _capacity * 2 + 1;
             TKey[] oldKeys = _keys;
             TValue[] oldValues = _values;
-            bool[] oldOccupied = _occupied;
+            byte[] oldSlotState = _slotState;
             int oldCapacity = _capacity;
 
             _capacity = newCapacity;
             _keys = new TKey[newCapacity];
             _values = new TValue[newCapacity];
-            _occupied = new bool[newCapacity];
+            _slotState = new byte[newCapacity];
             _size = 0;
+            _tombstoneCount = 0;  // Clear tombstones during resize
 
             for (int i = 0; i < oldCapacity; i++)
             {
-                if (oldOccupied[i])
+                // Only copy occupied slots, skip tombstones
+                if (oldSlotState[i] == SlotOccupied)
                 {
                     Add(oldKeys[i], oldValues[i]);
                 }
-            }
-        }
-
-        private void RehashAfterRemoval(int removedIndex)
-        {
-            int idx = (removedIndex + 1) % _capacity;
-            while (_occupied[idx])
-            {
-                TKey key = _keys[idx];
-                TValue value = _values[idx];
-
-                _keys[idx] = default;
-                _values[idx] = default;
-                _occupied[idx] = false;
-                _size--;
-
-                Add(key, value);
-
-                idx = (idx + 1) % _capacity;
             }
         }
 

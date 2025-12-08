@@ -5,6 +5,43 @@ using UnityEngine;
 namespace UdonSharp.CE.Perf
 {
     /// <summary>
+    /// Handle for a pooled object. Use this for O(1) release operations.
+    /// </summary>
+    /// <typeparam name="T">The type of the pooled object.</typeparam>
+    [PublicAPI]
+    public struct PoolHandle<T> where T : class
+    {
+        /// <summary>
+        /// The pool index of the object.
+        /// </summary>
+        public readonly int Index;
+        
+        /// <summary>
+        /// The pooled object.
+        /// </summary>
+        public readonly T Object;
+        
+        /// <summary>
+        /// Creates a new pool handle.
+        /// </summary>
+        internal PoolHandle(int index, T obj)
+        {
+            Index = index;
+            Object = obj;
+        }
+        
+        /// <summary>
+        /// Whether this handle is valid (has a valid index).
+        /// </summary>
+        public bool IsValid => Index >= 0;
+        
+        /// <summary>
+        /// Returns an invalid pool handle.
+        /// </summary>
+        public static PoolHandle<T> Invalid => new PoolHandle<T>(-1, null);
+    }
+
+    /// <summary>
     /// Generic object pool for reusing objects without garbage collection.
     ///
     /// Pre-allocates a fixed number of objects at initialization and recycles them
@@ -313,7 +350,57 @@ namespace UdonSharp.CE.Perf
         }
 
         /// <summary>
+        /// Acquires an object from the pool and returns a handle for O(1) release.
+        /// Preferred over Acquire() when you need to release the object later.
+        /// </summary>
+        /// <returns>A handle containing the object and its index, or Invalid if pool is empty.</returns>
+        public PoolHandle<T> AcquireHandle()
+        {
+            if (!_initialized)
+            {
+                Debug.LogError("[CE.Perf] CEPool: Not initialized");
+                return PoolHandle<T>.Invalid;
+            }
+
+            if (_freeCount == 0)
+            {
+                Debug.LogWarning("[CE.Perf] CEPool: Pool exhausted");
+                return PoolHandle<T>.Invalid;
+            }
+
+            // Pop from free stack
+            _freeCount--;
+            int index = _freeStack[_freeCount];
+
+            _inUse[index] = true;
+            _activeCount++;
+
+            T obj = _objects[index];
+
+            // Call acquire callback
+            if (_onAcquire != null)
+            {
+                _onAcquire(obj);
+            }
+
+            return new PoolHandle<T>(index, obj);
+        }
+
+        /// <summary>
+        /// Releases an object back to the pool using its handle.
+        /// O(1) operation - much faster than Release(obj).
+        /// </summary>
+        /// <param name="handle">The handle returned from AcquireHandle().</param>
+        /// <returns>True if the object was released.</returns>
+        public bool Release(PoolHandle<T> handle)
+        {
+            if (!handle.IsValid) return false;
+            return ReleaseByIndex(handle.Index);
+        }
+
+        /// <summary>
         /// Releases an object back to the pool.
+        /// O(n) operation - consider using AcquireHandle() and Release(handle) for O(1) performance.
         /// </summary>
         /// <param name="obj">The object to release.</param>
         /// <returns>True if the object was released, false if not found.</returns>
@@ -321,7 +408,7 @@ namespace UdonSharp.CE.Perf
         {
             if (!_initialized || obj == null) return false;
 
-            // Find the object in the pool
+            // Find the object in the pool - O(n) search
             int index = -1;
             for (int i = 0; i < _capacity; i++)
             {
