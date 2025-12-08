@@ -182,15 +182,18 @@ namespace UdonSharp.Compiler.Symbols
                 if (member.DirectDependencies == null)
                     continue;
 
-                foreach (Symbol dependency in member.DirectDependencies.Where(e => !e.IsBound))
+                foreach (Symbol dependency in member.DirectDependencies)
                 {
+                    if (dependency.IsBound)
+                        continue;
+                    
                     if (dependency is TypeSymbol typeSymbol)
                     {
                         // if (typeSymbol.IsGenericType && !typeSymbol.IsFullyConstructedGeneric)
                         //     continue;
                         
-                        if (!referencedTypes.ContainsKey(typeSymbol))
-                            referencedTypes.Add(typeSymbol, new HashSet<Symbol>());
+                        if (!referencedTypes.TryGetValue(typeSymbol, out _))
+                            referencedTypes[typeSymbol] = new HashSet<Symbol>();
                     }
                     else
                     {
@@ -199,17 +202,19 @@ namespace UdonSharp.Compiler.Symbols
                         // if (containingType.IsGenericType && !containingType.IsFullyConstructedGeneric)
                         //     continue;
                         
-                        if (!referencedTypes.ContainsKey(containingType))
-                            referencedTypes.Add(containingType, new HashSet<Symbol>());
-
-                        referencedTypes[containingType].Add(dependency);
+                        if (!referencedTypes.TryGetValue(containingType, out var symbolSet))
+                        {
+                            symbolSet = new HashSet<Symbol>();
+                            referencedTypes[containingType] = symbolSet;
+                        }
+                        symbolSet.Add(dependency);
                     }
                 }
             }
 
             if (BaseType != null && !BaseType.IsBound && 
-                !referencedTypes.ContainsKey(BaseType))
-                referencedTypes.Add(BaseType, new HashSet<Symbol>());
+                !referencedTypes.TryGetValue(BaseType, out _))
+                referencedTypes[BaseType] = new HashSet<Symbol>();
 
             if (IsArray)
             {
@@ -220,8 +225,8 @@ namespace UdonSharp.Compiler.Symbols
                 // if (currentSymbol.IsGenericType && !currentSymbol.IsFullyConstructedGeneric)
                 //     return referencedTypes;
                 
-                if (!referencedTypes.ContainsKey(currentSymbol))
-                    referencedTypes.Add(currentSymbol, new HashSet<Symbol>());
+                if (!referencedTypes.TryGetValue(currentSymbol, out _))
+                    referencedTypes[currentSymbol] = new HashSet<Symbol>();
             }
 
             return referencedTypes;

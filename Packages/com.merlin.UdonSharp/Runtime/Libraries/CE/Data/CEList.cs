@@ -15,8 +15,9 @@ namespace UdonSharp.CE.Data
         where T : IComparable
     #endif
     {
-        private T[] _items;
-        private int _size;
+        // Internal to allow CEListIterator to access without bounds checking
+        internal T[] _items;
+        internal int _size;
 
         #region Constructors
 
@@ -461,13 +462,14 @@ namespace UdonSharp.CE.Data
         public bool MoveNext()
         {
             CEList<T> list = _list;
-            int count = list.Count;
+            int count = list._size;
             int index = _index + 1;
 
             if (index < count)
             {
                 _index = index;
-                _current = list[index];
+                // Access _items directly to skip bounds check (already validated above)
+                _current = list._items[index];
                 return true;
             }
 

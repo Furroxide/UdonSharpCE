@@ -117,7 +117,20 @@ namespace UdonSharp.Compiler.Symbols
 
             foreach (MethodSymbol foundMethod in foundNamedMethods)
             {
-                if (foundMethod.Parameters.Length == Parameters.Length && foundMethod.Parameters.Select(e => e.Type).SequenceEqual(Parameters.Select(e => e.Type))) 
+                if (foundMethod.Parameters.Length != Parameters.Length)
+                    continue;
+                
+                bool allMatch = true;
+                for (int i = 0; i < Parameters.Length; i++)
+                {
+                    if (foundMethod.Parameters[i].Type != Parameters[i].Type)
+                    {
+                        allMatch = false;
+                        break;
+                    }
+                }
+                
+                if (allMatch)
                     throw new CompilerException($"U# does not yet support hiding base methods, did you intend to override '{RoslynSymbol.Name}'?");
             }
         }

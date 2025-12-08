@@ -1,6 +1,7 @@
 ﻿
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using JetBrains.Annotations;
 using Microsoft.CodeAnalysis;
@@ -56,6 +57,38 @@ namespace UdonSharp.Compiler.Binder
             "GetComponentInParent",
             "GetComponentsInParent",
         };
+
+        /// <summary>
+        /// Compares two parameter arrays for type and ref kind equality without LINQ allocations.
+        /// </summary>
+        private static bool ParametersMatch(ImmutableArray<ParameterSymbol> a, ImmutableArray<ParameterSymbol> b)
+        {
+            if (a.Length != b.Length)
+                return false;
+            
+            for (int i = 0; i < a.Length; i++)
+            {
+                if (a[i].Type != b[i].Type || a[i].RefKind != b[i].RefKind)
+                    return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Compares parameter types to expression value types without LINQ allocations.
+        /// </summary>
+        private static bool ParameterTypesMatchExpressions(ImmutableArray<ParameterSymbol> parameters, BoundExpression[] expressions)
+        {
+            if (parameters.Length != expressions.Length)
+                return false;
+            
+            for (int i = 0; i < parameters.Length; i++)
+            {
+                if (parameters[i].Type != expressions[i].ValueType)
+                    return false;
+            }
+            return true;
+        }
 
         private static bool TryCreateUdonSharpMetadataInvocation(AbstractPhaseContext context, SyntaxNode node,
             MethodSymbol symbol, BoundExpression instanceExpression,
@@ -308,11 +341,15 @@ namespace UdonSharp.Compiler.Binder
                         throw new NotSupportedException("Udon does not support instantiating non-GameObject types");
 
                     TypeSymbol instantiateShim = context.GetTypeSymbol(typeof(InstantiationShim));
-                    MethodSymbol instantiateMethod = instantiateShim.GetMembers<MethodSymbol>("Instantiate", context)
-                                                                    .First(e => e.Parameters
-                                                                        .Select(p => p.Type)
-                                                                        .SequenceEqual(parameterExpressions
-                                                                            .Select(p => p.ValueType)));
+                    MethodSymbol instantiateMethod = null;
+                    foreach (MethodSymbol e in instantiateShim.GetMembers<MethodSymbol>("Instantiate", context))
+                    {
+                        if (ParameterTypesMatchExpressions(e.Parameters, parameterExpressions))
+                        {
+                            instantiateMethod = e;
+                            break;
+                        }
+                    }
                     
                     context.MarkSymbolReferenced(instantiateMethod);
                     
@@ -450,8 +487,15 @@ namespace UdonSharp.Compiler.Binder
                 
                 TypeSymbol forwardedTypeSymbol = context.GetTypeSymbol(forwardedType);
                 
-                MethodSymbol forwardedMethod = forwardedTypeSymbol.GetMembers<MethodSymbol>(symbol.Name, context)
-                    .FirstOrDefault(e => e.Parameters.Select(p => p.Type).SequenceEqual(parameterExpressions.Select(p => p.ValueType)));
+                MethodSymbol forwardedMethod = null;
+                foreach (MethodSymbol e in forwardedTypeSymbol.GetMembers<MethodSymbol>(symbol.Name, context))
+                {
+                    if (ParameterTypesMatchExpressions(e.Parameters, parameterExpressions))
+                    {
+                        forwardedMethod = e;
+                        break;
+                    }
+                }
 
                 if (forwardedMethod != null)
                 {
@@ -670,11 +714,18 @@ namespace UdonSharp.Compiler.Binder
                                                   (symbol.ContainingType.RoslynSymbol.TypeKind == TypeKind.Interface || 
                                                     (symbol.ContainingType == context.GetTypeSymbol(SpecialType.System_Object) && (symbol.Name == "ToString" || symbol.Name == "GetHashCode" || symbol.Name == "Equals"))))
             {
-                MethodSymbol derivedMethod = instanceExpression.ValueType.GetMembers<MethodSymbol>(symbol.Name, context).FirstOrDefault(e => 
-                    e.IsStatic == symbol.IsStatic &&
-                    e.Parameters.Length == symbol.Parameters.Length &&
-                    e.ReturnType == symbol.ReturnType &&
-                    Enumerable.SequenceEqual(e.Parameters.Select(p => (p.Type, p.RefKind)), (symbol.Parameters.Select(p => (p.Type, p.RefKind)))));
+                MethodSymbol derivedMethod = null;
+                foreach (MethodSymbol e in instanceExpression.ValueType.GetMembers<MethodSymbol>(symbol.Name, context))
+                {
+                    if (e.IsStatic == symbol.IsStatic &&
+                        e.Parameters.Length == symbol.Parameters.Length &&
+                        e.ReturnType == symbol.ReturnType &&
+                        ParametersMatch(e.Parameters, symbol.Parameters))
+                    {
+                        derivedMethod = e;
+                        break;
+                    }
+                }
 
                 if (derivedMethod != null && derivedMethod != symbol)
                 {

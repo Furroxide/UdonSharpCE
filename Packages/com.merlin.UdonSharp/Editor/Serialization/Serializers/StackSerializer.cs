@@ -1,7 +1,7 @@
 using System;
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
 using UdonSharp.Lib.Internal;
 
@@ -9,8 +9,28 @@ namespace UdonSharp.Serialization
 {
     internal class StackSerializer<T> : Serializer<T>
     {
+        // Cache for reflection lookups to avoid repeated GetMethod calls
+        private static readonly ConcurrentDictionary<Type, MethodInfo> _pushMethodCache = new ConcurrentDictionary<Type, MethodInfo>();
+        private static readonly ConcurrentDictionary<Type, MethodInfo> _toArrayMethodCache = new ConcurrentDictionary<Type, MethodInfo>();
+        private static readonly ConcurrentDictionary<Type, MethodInfo> _clearMethodCache = new ConcurrentDictionary<Type, MethodInfo>();
+        
         public StackSerializer(TypeSerializationMetadata typeMetadata) : base(typeMetadata)
         {
+        }
+        
+        private static MethodInfo GetPushMethod(Type stackType)
+        {
+            return _pushMethodCache.GetOrAdd(stackType, t => t.GetMethod("Push"));
+        }
+        
+        private static MethodInfo GetToArrayMethod(Type stackType)
+        {
+            return _toArrayMethodCache.GetOrAdd(stackType, t => t.GetMethod("ToArray"));
+        }
+        
+        private static MethodInfo GetClearMethod(Type stackType)
+        {
+            return _clearMethodCache.GetOrAdd(stackType, t => t.GetMethod("Clear"));
         }
 
         protected override Serializer MakeSerializer(TypeSerializationMetadata typeMetadata)
@@ -50,9 +70,11 @@ namespace UdonSharp.Serialization
             
             object newUSharpList = Activator.CreateInstance(uSharpStackType);
             
-            MethodInfo addMethod = uSharpStackType.GetMethod("Push");
+            MethodInfo addMethod = GetPushMethod(uSharpStackType);
             
-            object[] reverseArray = new object[((IEnumerable)sourceObject).Cast<object>().Count()];
+            // Use ICollection.Count instead of LINQ Cast+Count to avoid double enumeration
+            int count = ((ICollection)sourceObject).Count;
+            object[] reverseArray = new object[count];
             int index = reverseArray.Length - 1;
             foreach (object item in (IEnumerable)sourceObject)
             {
@@ -91,7 +113,7 @@ namespace UdonSharp.Serialization
             }
             else
             {
-                MethodInfo clearMethod = targetObject.GetType().GetMethod("Clear");
+                MethodInfo clearMethod = GetClearMethod(targetObject.GetType());
                 clearMethod.Invoke(targetObject, null);
             }
 
@@ -102,13 +124,14 @@ namespace UdonSharp.Serialization
             object newUSharpList = Activator.CreateInstance(uSharpStackType);
             serializer.ReadWeak(ref newUSharpList, sourceObject);
 
-            MethodInfo toArrayMethod = uSharpStackType.GetMethod("ToArray");
+            MethodInfo toArrayMethod = GetToArrayMethod(uSharpStackType);
             // ReSharper disable once PossibleNullReferenceException
             Array listArray = (Array)toArrayMethod.Invoke(newUSharpList, null);
             
-            MethodInfo addMethod = uSharpStackType.GetMethod("Push");
+            MethodInfo addMethod = GetPushMethod(targetObject.GetType());
             
-            object[] reverseArray = new object[listArray.Cast<object>().Count()];
+            // Use Array.Length instead of LINQ Cast+Count
+            object[] reverseArray = new object[listArray.Length];
             int index = reverseArray.Length - 1;
             foreach (object item in (IEnumerable)listArray)
             {

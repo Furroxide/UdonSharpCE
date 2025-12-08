@@ -437,15 +437,15 @@ namespace UdonSharp.Editors
 
                     Type[] assemblyTypes = assembly.GetTypes();
 
-                    List<Type> types = new List<Type>();
+                    // Use HashSet directly instead of List + Distinct().ToList()
+                    HashSet<Type> types = new HashSet<Type>();
 
                     foreach (Type assemblyType in assemblyTypes)
                     {
                         types.Add(assemblyType);
-                        types.AddRange(GetNestedTypes(assemblyType));
+                        foreach (Type nestedType in GetNestedTypes(assemblyType))
+                            types.Add(nestedType);
                     }
-
-                    types = types.Distinct().ToList();
 
                     HashSet<Type> localExposedTypeSet = new HashSet<Type>();
 
