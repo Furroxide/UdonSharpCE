@@ -387,7 +387,8 @@ namespace UdonSharp
             return (UdonSharpProgramAsset[])_programAssetCache.Clone();
         }
 
-        [MenuItem("VRChat SDK/Udon Sharp/Refresh All UdonSharp Assets")]
+        // Menu Guideline: Keep at root level unless Compiler section grows to 3+ items
+        [MenuItem("Udon CE/Refresh All Assets", false, 1101)]
         public static void UdonSharpCheckAbsent()
         {
             Debug.Log( "Checking Absent" );

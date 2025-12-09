@@ -729,7 +729,8 @@ namespace UdonSharp.Editors
 
         private Vector2 _currentScrollPos = Vector2.zero;
 
-        [MenuItem("VRChat SDK/Udon Sharp/Class Exposure Tree ^#u")]
+        // Menu Guideline: Debug has 3 items → keep as submenu
+        [MenuItem("Udon CE/Debug/Class Exposure Tree %#u", false, 1901)]
         private static void Init()
         {
             GetWindow<UdonTypeExposureTree>(false, "Udon Class Exposure Tree");

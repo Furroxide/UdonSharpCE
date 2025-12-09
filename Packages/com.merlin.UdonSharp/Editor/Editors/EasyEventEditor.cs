@@ -458,7 +458,8 @@ namespace Merlin
     #else
     public class EasyEventEditorSettings : EditorWindow
     {
-        [MenuItem("Edit/Easy Event Editor Settings")]
+        // Menu Guideline: Keep at root level unless Settings section grows to 3+ items
+        [MenuItem("Udon CE/Easy Event Editor Settings", false, 1801)]
         static void Init()
         {
             EasyEventEditorSettings window = GetWindow<EasyEventEditorSettings>(false, "EEE Settings");

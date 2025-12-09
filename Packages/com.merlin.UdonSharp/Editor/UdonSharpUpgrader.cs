@@ -36,7 +36,8 @@ namespace UdonSharpEditor
             }
         }
 
-        [MenuItem("VRChat SDK/Udon Sharp/Force Upgrade")]
+        // Menu Guideline: Keep at root level unless Compiler section grows to 3+ items
+        [MenuItem("Udon CE/Force Recompile", false, 1102)]
         internal static void ForceUpgrade()
         {
             UdonSharpProgramAsset.GetAllUdonSharpPrograms().ForEach(QueueUpgrade);

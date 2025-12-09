@@ -8,7 +8,7 @@ using VRC.Udon.Editor;
 
 public class GrabNodeDefinitions : EditorWindow
 {
-    [MenuItem("VRChat SDK/Udon Sharp/Node Definition Grabber")]
+    [MenuItem("Udon CE/Debug/Node Definition Grabber", false, 1902)]
     static void Init()
     {
         GrabNodeDefinitions window = GetWindow<GrabNodeDefinitions>(false, "Node Definition Grabber");

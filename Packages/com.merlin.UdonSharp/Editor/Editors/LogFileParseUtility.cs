@@ -10,7 +10,7 @@ namespace UdonSharpEditor
 {
     public static class LogFileParseUtility
     {
-        [MenuItem("VRChat SDK/Udon Sharp/Parse Logs from File")]
+        [MenuItem("Udon CE/Debug/Parse Log File", false, 1903)]
         private static void ParseLogsFromFileMenuItem()
         {
             string filePath = EditorUtility.OpenFilePanel("Parse VRChat Log File", "", "txt");
