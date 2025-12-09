@@ -65,6 +65,10 @@ namespace UdonSharp.CE.Editor.Optimizers
                     var originalText = node.ToString();
                     var optimizedText = result.ToString();
 
+                    // Skip recording if the result is semantically the same
+                    if (string.Equals(originalText, optimizedText, StringComparison.OrdinalIgnoreCase))
+                        return visited;
+
                     _context.RecordOptimization(
                         "CEOPT001",
                         $"Folded constant: {originalText} → {optimizedText}",
@@ -83,6 +87,12 @@ namespace UdonSharp.CE.Editor.Optimizers
             {
                 var visited = (PrefixUnaryExpressionSyntax)base.VisitPrefixUnaryExpression(node);
 
+                // If the operand is already a simple literal, there's nothing meaningful to fold.
+                // E.g., -1, -1f, +5 are already in their simplest form.
+                // We only want to fold compound expressions like --1 → 1 or -(1+2) → -3
+                if (visited.Operand is LiteralExpressionSyntax)
+                    return visited;
+
                 if (!IsConstantExpression(visited.Operand))
                     return visited;
 
@@ -91,6 +101,10 @@ namespace UdonSharp.CE.Editor.Optimizers
                 {
                     var originalText = node.ToString();
                     var optimizedText = result.ToString();
+
+                    // Skip recording if the result is semantically the same (e.g., case normalization)
+                    if (string.Equals(originalText, optimizedText, StringComparison.OrdinalIgnoreCase))
+                        return visited;
 
                     _context.RecordOptimization(
                         "CEOPT001",

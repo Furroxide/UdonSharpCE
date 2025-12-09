@@ -28,7 +28,6 @@ namespace UdonSharp.CE.Editor.Optimizers
 
         private GroupBy _groupBy = GroupBy.File;
 
-        [MenuItem("Tools/UdonSharpCE/Show Optimization Report", false, 100)]
         public static void ShowWindow()
         {
             var window = GetWindow<OptimizationReportWindow>();
