@@ -28,7 +28,7 @@ namespace UdonSharp.CE.Editor.GraphBridge
         /// <summary>
         /// Generates documentation for all discovered graph nodes.
         /// </summary>
-        [MenuItem("Tools/UdonSharpCE/Generate Node Documentation")]
+        [MenuItem("Udon CE/Graph Bridge/Generate Documentation", false, 1505)]
         public static void GenerateAllDocs()
         {
             var nodes = GraphNodeGenerator.GetNodeDefinitions();

@@ -27,7 +27,7 @@ namespace UdonSharp.CE.Editor.GraphBridge
         /// <summary>
         /// Generates wrapper code for all discovered graph nodes.
         /// </summary>
-        [MenuItem("Tools/UdonSharpCE/Generate All Wrappers")]
+        [MenuItem("Udon CE/Graph Bridge/Generate Wrappers", false, 1504)]
         public static void GenerateAllWrappers()
         {
             var nodes = GraphNodeGenerator.GetNodeDefinitions();

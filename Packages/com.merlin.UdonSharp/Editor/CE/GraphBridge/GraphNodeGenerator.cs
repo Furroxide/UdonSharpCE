@@ -121,7 +121,7 @@ namespace UdonSharp.CE.Editor.GraphBridge
         /// <summary>
         /// Menu item to regenerate graph nodes.
         /// </summary>
-        [MenuItem("Tools/UdonSharpCE/Generate Graph Nodes")]
+        [MenuItem("Udon CE/Graph Bridge/Generate Nodes", false, 1503)]
         public static void GenerateNodes()
         {
             var nodes = ScanForGraphNodes();

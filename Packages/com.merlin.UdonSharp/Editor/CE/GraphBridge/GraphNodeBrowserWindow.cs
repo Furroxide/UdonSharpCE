@@ -16,7 +16,8 @@ namespace UdonSharp.CE.Editor.GraphBridge
     {
         #region Menu Item
 
-        [MenuItem("CE Tools/Graph Node Browser", priority = 102)]
+        // Menu Guideline: Graph Bridge has 5 items → keep as submenu
+        [MenuItem("Udon CE/Graph Bridge/Node Browser", false, 1501)]
         public static void ShowWindow()
         {
             var window = GetWindow<GraphNodeBrowserWindow>();

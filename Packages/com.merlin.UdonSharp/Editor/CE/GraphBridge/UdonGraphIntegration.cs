@@ -429,7 +429,7 @@ namespace UdonSharp.CE.Editor.GraphBridge
         /// <summary>
         /// Validates all registered nodes.
         /// </summary>
-        [MenuItem("Tools/UdonSharpCE/Validate Graph Nodes")]
+        [MenuItem("Udon CE/Graph Bridge/Validate Nodes", false, 1502)]
         public static void ValidateAllNodes()
         {
             var nodes = GetRegisteredNodes();
