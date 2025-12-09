@@ -1,5 +1,5 @@
-using System;
 using JetBrains.Annotations;
+using UdonSharp.CE.Core;
 using UnityEngine;
 
 namespace UdonSharp.CE.Perf
@@ -137,12 +137,12 @@ namespace UdonSharp.CE.Perf
         #region System Storage
 
         /// <summary>
-        /// Registered system delegates.
+        /// Registered system callbacks.
         /// </summary>
-        private readonly Action[] _systems;
+        private readonly CECallback[] _systems;
 
         /// <summary>
-        /// System execution order values.
+        /// Execution order for each system (lower runs first).
         /// </summary>
         private readonly int[] _systemOrders;
 
@@ -157,7 +157,7 @@ namespace UdonSharp.CE.Perf
         private int _systemCount;
 
         /// <summary>
-        /// Whether systems need re-sorting after registration.
+        /// Whether systems need to be re-sorted.
         /// </summary>
         private bool _systemsDirty;
 
@@ -179,11 +179,6 @@ namespace UdonSharp.CE.Perf
         /// Gets the number of registered component types.
         /// </summary>
         public int ComponentTypeCount => _registeredComponentCount;
-
-        /// <summary>
-        /// Gets the number of registered systems.
-        /// </summary>
-        public int SystemCount => _systemCount;
 
         #endregion
 
@@ -217,7 +212,7 @@ namespace UdonSharp.CE.Perf
             _registeredComponentCount = 0;
 
             // System storage
-            _systems = new Action[MaxSystems];
+            _systems = new CECallback[MaxSystems];
             _systemOrders = new int[MaxSystems];
             _systemEnabled = new bool[MaxSystems];
             _systemCount = 0;
@@ -469,14 +464,27 @@ namespace UdonSharp.CE.Perf
         /// <summary>
         /// Registers a system to be executed during Tick().
         /// </summary>
-        /// <param name="system">The system action to register.</param>
+        /// <param name="target">The UdonSharpBehaviour that owns the system method.</param>
+        /// <param name="methodName">The name of the method to call (use nameof()).</param>
         /// <param name="order">Execution order (lower runs first).</param>
         /// <returns>The system index, or -1 if registration failed.</returns>
-        public int RegisterSystem(Action system, int order = 0)
+        /// <example>
+        /// <code>
+        /// world.RegisterSystem(this, nameof(UpdatePhysics), order: 10);
+        /// world.RegisterSystem(this, nameof(UpdateRendering), order: 20);
+        /// </code>
+        /// </example>
+        public int RegisterSystem(UdonSharpBehaviour target, string methodName, int order = 0)
         {
-            if (system == null)
+            if (target == null)
             {
-                Debug.LogError("[CE.Perf] CEWorld: Cannot register null system");
+                Debug.LogError("[CE.Perf] CEWorld: Cannot register system with null target");
+                return -1;
+            }
+
+            if (string.IsNullOrEmpty(methodName))
+            {
+                Debug.LogError("[CE.Perf] CEWorld: Cannot register system with empty method name");
                 return -1;
             }
 
@@ -487,7 +495,37 @@ namespace UdonSharp.CE.Perf
             }
 
             int index = _systemCount;
-            _systems[index] = system;
+            _systems[index] = new CECallback(target, methodName);
+            _systemOrders[index] = order;
+            _systemEnabled[index] = true;
+            _systemCount++;
+            _systemsDirty = true;
+
+            return index;
+        }
+
+        /// <summary>
+        /// Registers a system callback to be executed during Tick().
+        /// </summary>
+        /// <param name="callback">The callback to register.</param>
+        /// <param name="order">Execution order (lower runs first).</param>
+        /// <returns>The system index, or -1 if registration failed.</returns>
+        public int RegisterSystem(CECallback callback, int order = 0)
+        {
+            if (!callback.IsValid)
+            {
+                Debug.LogError("[CE.Perf] CEWorld: Cannot register invalid callback");
+                return -1;
+            }
+
+            if (_systemCount >= MaxSystems)
+            {
+                Debug.LogError("[CE.Perf] CEWorld: Maximum systems exceeded");
+                return -1;
+            }
+
+            int index = _systemCount;
+            _systems[index] = callback;
             _systemOrders[index] = order;
             _systemEnabled[index] = true;
             _systemCount++;
@@ -554,7 +592,7 @@ namespace UdonSharp.CE.Perf
             {
                 if (_systemEnabled[i])
                 {
-                    _systems[i]();
+                    _systems[i].Invoke();
                 }
             }
 
@@ -606,7 +644,7 @@ namespace UdonSharp.CE.Perf
             // Insertion sort - stable and efficient for small arrays
             for (int i = 1; i < _systemCount; i++)
             {
-                Action system = _systems[i];
+                CECallback system = _systems[i];
                 int order = _systemOrders[i];
                 bool enabled = _systemEnabled[i];
 
