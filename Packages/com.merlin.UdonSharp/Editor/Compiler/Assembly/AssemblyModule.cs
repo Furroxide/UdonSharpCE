@@ -58,6 +58,16 @@ namespace UdonSharp.Compiler.Assembly
             instruction.InstructionAddress = _currentAddress;
             _currentAddress += instruction.Size;
         }
+
+        internal List<AssemblyInstruction> GetInstructionList()
+        {
+            return _instructions;
+        }
+
+        internal IReadOnlyList<JumpLabel> GetJumpLabels()
+        {
+            return _jumpLabels;
+        }
         
         public void AddNop()
         {
@@ -164,6 +174,20 @@ namespace UdonSharp.Compiler.Assembly
                 throw new ArgumentException("Label has already been set");
 
             label.Address = _currentAddress;
+        }
+
+        /// <summary>
+        /// Recalculates instruction addresses after optimization passes modify the instruction list.
+        /// </summary>
+        public void RecalculateInstructionAddresses()
+        {
+            _currentAddress = 0;
+
+            foreach (AssemblyInstruction instruction in _instructions)
+            {
+                instruction.InstructionAddress = _currentAddress;
+                _currentAddress += instruction.Size;
+            }
         }
 
         #endregion

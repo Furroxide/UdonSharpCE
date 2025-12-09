@@ -45,6 +45,16 @@ namespace UdonSharp.Compiler
         // public bool BuildDebugInfo { get; set; } = true;
         public bool DisableLogging { get; set; } = false;
         public bool ConcurrentBuild { get; set; } = true;
+        
+        /// <summary>
+        /// Enable the assembly-level optimizer that runs after emit. Enabled by default.
+        /// </summary>
+        public bool EnableAssemblyOptimization { get; set; } = true;
+
+        /// <summary>
+        /// Optional set of pass names to disable when the optimizer runs.
+        /// </summary>
+        public HashSet<string> DisabledOptimizationPasses { get; set; } = new HashSet<string>();
     }
     
     [InitializeOnLoad]
