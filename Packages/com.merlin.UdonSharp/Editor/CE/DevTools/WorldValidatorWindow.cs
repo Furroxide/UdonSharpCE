@@ -17,7 +17,7 @@ namespace UdonSharp.CE.Editor.DevTools
     {
         #region Menu Item
 
-        [MenuItem("CE Tools/World Validator", priority = 101)]
+        [MenuItem("Udon CE/Dev Tools/World Validator", false, 1402)]
         public static void ShowWindow()
         {
             var window = GetWindow<WorldValidatorWindow>();

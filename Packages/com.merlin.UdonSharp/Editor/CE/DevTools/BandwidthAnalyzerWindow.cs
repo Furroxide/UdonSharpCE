@@ -15,7 +15,8 @@ namespace UdonSharp.CE.Editor.DevTools
     {
         #region Menu Item
 
-        [MenuItem("CE Tools/Bandwidth Analyzer", priority = 100)]
+        // Menu Guideline: Dev Tools has 4 items → keep as submenu
+        [MenuItem("Udon CE/Dev Tools/Bandwidth Analyzer", false, 1401)]
         public static void ShowWindow()
         {
             var window = GetWindow<BandwidthAnalyzerWindow>();

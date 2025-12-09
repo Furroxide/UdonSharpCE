@@ -12,7 +12,7 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
     {
         #region Menu Item
 
-        [MenuItem("CE Tools/Network Simulator", priority = 103)]
+        [MenuItem("Udon CE/Dev Tools/Network Simulator", false, 1403)]
         public static void ShowWindow()
         {
             var window = GetWindow<NetworkSimulatorWindow>();

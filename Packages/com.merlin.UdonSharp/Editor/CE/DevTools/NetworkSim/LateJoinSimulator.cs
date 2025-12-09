@@ -512,7 +512,7 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
     {
         #region Menu Item
 
-        [MenuItem("CE Tools/Late-Join Simulator", priority = 104)]
+        [MenuItem("Udon CE/Dev Tools/Late-Join Simulator", false, 1404)]
         public static void ShowWindow()
         {
             var window = GetWindow<LateJoinSimulatorWindow>();
