@@ -1648,6 +1648,10 @@ namespace UdonSharpEditor
             {
                 UdonSharpProgramAsset programAsset = UdonSharpEditorUtility.GetUdonSharpProgramAsset(behaviour);
                 
+                // Skip if no valid program asset - script may not be compiled yet
+                if (programAsset == null)
+                    continue;
+                
                 if (programAsset.ScriptVersion < UdonSharpProgramVersion.V1SerializationUpdate)
                     continue;
 
@@ -1869,8 +1873,12 @@ namespace UdonSharpEditor
                         // Make sure the serialized asset reference is intact
                         if (programAssetProperty.objectReferenceValue == null)
                         {
-                            programAssetProperty.objectReferenceValue = UdonSharpEditorUtility.GetUdonSharpProgramAsset(behaviour).SerializedProgramAsset;
-                            behaviourObject.ApplyModifiedPropertiesWithoutUndo();
+                            UdonSharpProgramAsset programAsset = UdonSharpEditorUtility.GetUdonSharpProgramAsset(behaviour);
+                            if (programAsset != null && programAsset.SerializedProgramAsset != null)
+                            {
+                                programAssetProperty.objectReferenceValue = programAsset.SerializedProgramAsset;
+                                behaviourObject.ApplyModifiedPropertiesWithoutUndo();
+                            }
                         }
                     }
                     

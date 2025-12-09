@@ -81,15 +81,23 @@ namespace UdonSharp.CE.Editor.Analyzers
         {
             var diagnostics = new List<AnalyzerDiagnostic>();
 
+            if (type == null || context == null)
+                return diagnostics;
+
             // Check behaviour sync mode
             var behaviourSyncAttr = type.GetAttribute<UdonBehaviourSyncModeAttribute>();
             bool networkingDisabled = behaviourSyncAttr?.behaviourSyncMode == BehaviourSyncMode.None;
 
             // Get all methods in the type
             var methods = type.GetMembers<MethodSymbol>(context);
+            if (methods == null)
+                return diagnostics;
 
             foreach (MethodSymbol method in methods)
             {
+                if (method == null)
+                    continue;
+                    
                 var rpcAttr = method.GetAttribute<RpcAttribute>();
                 if (rpcAttr == null)
                     continue;

@@ -19,6 +19,11 @@ namespace UdonSharp.Lib.Internal.Collections
             _stack = stack;
             _index = stack._size;
         }
+
+        public void Reset()
+        {
+            _index = _stack._size;
+        }
         
         public bool MoveNext()
         {
@@ -32,6 +37,7 @@ namespace UdonSharp.Lib.Internal.Collections
     {
         internal T[] _items = new T[8];
         internal int _size;
+        private StackIterator<T> _cachedIterator;
         
         public int Count => _size;
         
@@ -168,7 +174,61 @@ namespace UdonSharp.Lib.Internal.Collections
         
         public StackIterator<T> GetEnumerator()
         {
-            return new StackIterator<T>(this);
+            if (_cachedIterator == null)
+                _cachedIterator = new StackIterator<T>(this);
+            else
+                _cachedIterator.Reset();
+
+            return _cachedIterator;
         }
+
+        #region Performance Helpers
+
+        /// <summary>
+        /// Allocation-free iteration from top to bottom.
+        /// </summary>
+        public void ForEach(Action<T> action)
+        {
+            if (action == null) return;
+
+            T[] items = _items;
+            for (int i = _size - 1; i >= 0; i--)
+            {
+                action(items[i]);
+            }
+        }
+
+        /// <summary>
+        /// Allocation-free iteration with index (0 = top).
+        /// </summary>
+        public void ForEachWithIndex(Action<T, int> action)
+        {
+            if (action == null) return;
+
+            T[] items = _items;
+            int idx = 0;
+            for (int i = _size - 1; i >= 0; i--)
+            {
+                action(items[i], idx);
+                idx++;
+            }
+        }
+
+        /// <summary>
+        /// Get item without bounds checking. Index is from bottom (array index).
+        /// </summary>
+        public T GetUnchecked(int index) => _items[index];
+
+        /// <summary>
+        /// Set item without bounds checking. Index is from bottom (array index).
+        /// </summary>
+        public void SetUnchecked(int index, T value) => _items[index] = value;
+
+        /// <summary>
+        /// Direct access to backing array. Length may exceed Count.
+        /// </summary>
+        public T[] GetBackingArray() => _items;
+
+        #endregion
     }
 }

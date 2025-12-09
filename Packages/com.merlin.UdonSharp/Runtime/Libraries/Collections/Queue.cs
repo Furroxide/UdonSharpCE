@@ -20,6 +20,12 @@ namespace UdonSharp.Lib.Internal.Collections
             _index = -1;
             _current = default;
         }
+
+        public void Reset()
+        {
+            _index = -1;
+            _current = default;
+        }
         
         public bool MoveNext()
         {
@@ -50,6 +56,7 @@ namespace UdonSharp.Lib.Internal.Collections
         internal T[] _items;
         internal int _size;
         internal int _head;
+        private QueueIterator<T> _cachedIterator;
         
         public int Count => _size;
         
@@ -207,16 +214,99 @@ namespace UdonSharp.Lib.Internal.Collections
             return false;
         }
         
-        public QueueIterator<T> GetEnumerator()
-        {
-            return new QueueIterator<T>(this);
-        }
-        
         public void Clear()
         {
             Array.Clear(_items, 0, _items.Length);
             _size = 0;
             _head = 0;
+        }
+
+        #region Performance Helpers
+
+        /// <summary>
+        /// Allocation-free iteration over items in queue order.
+        /// </summary>
+        public void ForEach(Action<T> action)
+        {
+            if (action == null) return;
+
+            T[] items = _items;
+            int size = _size;
+            int head = _head;
+            int length = items.Length;
+
+            for (int i = 0; i < size; i++)
+            {
+                action(items[(head + i) % length]);
+            }
+        }
+
+        /// <summary>
+        /// Allocation-free iteration with queue index (0 = front).
+        /// </summary>
+        public void ForEachWithIndex(Action<T, int> action)
+        {
+            if (action == null) return;
+
+            T[] items = _items;
+            int size = _size;
+            int head = _head;
+            int length = items.Length;
+
+            for (int i = 0; i < size; i++)
+            {
+                action(items[(head + i) % length], i);
+            }
+        }
+
+        /// <summary>
+        /// Allocation-free iteration that stops when predicate returns false.
+        /// </summary>
+        public void ForEachUntil(Func<T, bool> predicate)
+        {
+            if (predicate == null) return;
+
+            T[] items = _items;
+            int size = _size;
+            int head = _head;
+            int length = items.Length;
+
+            for (int i = 0; i < size; i++)
+            {
+                if (!predicate(items[(head + i) % length])) return;
+            }
+        }
+
+        /// <summary>
+        /// Get item without bounds checking. Index is relative to queue front.
+        /// </summary>
+        public T GetUnchecked(int index) => _items[(_head + index) % _items.Length];
+
+        /// <summary>
+        /// Set item without bounds checking. Index is relative to queue front.
+        /// </summary>
+        public void SetUnchecked(int index, T value) => _items[(_head + index) % _items.Length] = value;
+
+        /// <summary>
+        /// Direct access to backing array (ring buffer). Use Count and HeadIndex to navigate.
+        /// </summary>
+        public T[] GetBackingArray() => _items;
+
+        /// <summary>
+        /// Current head index within backing array (for advanced scenarios).
+        /// </summary>
+        public int HeadIndex => _head;
+
+        #endregion
+
+        public QueueIterator<T> GetEnumerator()
+        {
+            if (_cachedIterator == null)
+                _cachedIterator = new QueueIterator<T>(this);
+            else
+                _cachedIterator.Reset();
+
+            return _cachedIterator;
         }
     }
 }

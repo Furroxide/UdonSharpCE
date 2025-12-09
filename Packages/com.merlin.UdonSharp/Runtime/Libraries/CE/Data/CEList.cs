@@ -18,6 +18,7 @@ namespace UdonSharp.CE.Data
         // Internal to allow CEListIterator to access without bounds checking
         internal T[] _items;
         internal int _size;
+        private CEListIterator<T> _cachedIterator;
 
         #region Constructors
 
@@ -230,6 +231,73 @@ namespace UdonSharp.CE.Data
 
         #endregion
 
+        #region Performance Helpers
+
+        /// <summary>
+        /// Get item without bounds checking. Only use when index is guaranteed valid.
+        /// </summary>
+        public T GetUnchecked(int index) => _items[index];
+
+        /// <summary>
+        /// Set item without bounds checking. Only use when index is guaranteed valid.
+        /// </summary>
+        public void SetUnchecked(int index, T value) => _items[index] = value;
+
+        /// <summary>
+        /// Direct access to backing array. Length may exceed Count; use Count to bound.
+        /// </summary>
+        public T[] GetBackingArray() => _items;
+
+        /// <summary>
+        /// Allocation-free iteration over items (hot path).
+        /// </summary>
+        public void ForEach(Action<T> action)
+        {
+            if (action == null) return;
+
+            T[] items = _items;
+            int size = _size;
+
+            for (int i = 0; i < size; i++)
+            {
+                action(items[i]);
+            }
+        }
+
+        /// <summary>
+        /// Allocation-free iteration with index.
+        /// </summary>
+        public void ForEachWithIndex(Action<T, int> action)
+        {
+            if (action == null) return;
+
+            T[] items = _items;
+            int size = _size;
+
+            for (int i = 0; i < size; i++)
+            {
+                action(items[i], i);
+            }
+        }
+
+        /// <summary>
+        /// Allocation-free iteration that stops when predicate returns false.
+        /// </summary>
+        public void ForEachUntil(Func<T, bool> predicate)
+        {
+            if (predicate == null) return;
+
+            T[] items = _items;
+            int size = _size;
+
+            for (int i = 0; i < size; i++)
+            {
+                if (!predicate(items[i])) return;
+            }
+        }
+
+        #endregion
+
         #region DataList Bridge Methods
 
         /// <summary>
@@ -415,7 +483,13 @@ namespace UdonSharp.CE.Data
 
         public IEnumerator GetEnumerator()
         {
-            return new CEListIterator<T>(this);
+            // Cache and reuse iterator to avoid allocation (safe because Udon is single-threaded)
+            if (_cachedIterator == null)
+                _cachedIterator = new CEListIterator<T>(this);
+            else
+                _cachedIterator.Reset();
+
+            return _cachedIterator;
         }
 
         #endregion

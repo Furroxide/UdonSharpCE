@@ -220,7 +220,60 @@ namespace UdonSharpEditor
 
             _programAssetLookup.TryGetValue(programScript, out var foundProgramAsset);
 
+            // Auto-create program asset if not found and script is a valid UdonSharpBehaviour
+            if (foundProgramAsset == null && programScript != null)
+            {
+                foundProgramAsset = TryCreateProgramAssetForScript(programScript);
+            }
+
             return foundProgramAsset;
+        }
+        
+        /// <summary>
+        /// Attempts to create a UdonSharpProgramAsset for a script that doesn't have one.
+        /// </summary>
+        private static UdonSharpProgramAsset TryCreateProgramAssetForScript(MonoScript script)
+        {
+            if (script == null) return null;
+            
+            Type scriptClass = script.GetClass();
+            if (scriptClass == null) return null;
+            
+            // Only create program assets for UdonSharpBehaviour subclasses
+            if (!typeof(UdonSharpBehaviour).IsAssignableFrom(scriptClass))
+                return null;
+            
+            // Don't create for abstract classes or the base class itself
+            if (scriptClass.IsAbstract || scriptClass == typeof(UdonSharpBehaviour))
+                return null;
+            
+            string scriptPath = UnityEditor.AssetDatabase.GetAssetPath(script);
+            if (string.IsNullOrEmpty(scriptPath)) return null;
+            
+            // Create the program asset path next to the script
+            string assetPath = System.IO.Path.ChangeExtension(scriptPath, ".asset");
+            
+            // Check if an asset already exists at this path
+            if (UnityEditor.AssetDatabase.LoadAssetAtPath<UdonSharpProgramAsset>(assetPath) != null)
+                return null;
+            
+            UdonSharpUtils.Log($"Auto-creating program asset for {scriptPath}");
+            
+            UdonSharpProgramAsset newProgramAsset = UnityEngine.ScriptableObject.CreateInstance<UdonSharpProgramAsset>();
+            newProgramAsset.sourceCsScript = script;
+            
+            UnityEditor.AssetDatabase.CreateAsset(newProgramAsset, assetPath);
+            UnityEditor.AssetDatabase.SaveAssets();
+            
+            // Update the lookup cache
+            _programAssetLookup[script] = newProgramAsset;
+            if (scriptClass != null)
+                _programAssetTypeLookup[scriptClass] = newProgramAsset;
+            
+            // Clear the global program asset cache to pick up the new asset
+            UdonSharpProgramAsset.ClearProgramAssetCache();
+            
+            return newProgramAsset;
         }
 
         /// <summary>
@@ -982,13 +1035,20 @@ namespace UdonSharpEditor
             {
                 backingBehaviour.programSource = programAsset;
                 if (backingBehaviour.programSource == null)
+                {
                     UdonSharpUtils.LogError($"Unable to find valid U# program asset associated with script '{behaviour}'", behaviour);
+                    return; // Cannot continue setup without a valid program asset
+                }
                 
                 UdonSharpUtils.SetDirty(backingBehaviour);
             }
 
             if (_serializedProgramAssetField.GetValue(backingBehaviour) == null)
             {
+                // Double-check programAsset is valid before accessing its properties
+                if (programAsset == null)
+                    return;
+                    
                 SerializedObject componentAsset = new SerializedObject(backingBehaviour);
                 SerializedProperty serializedProgramAssetProperty = componentAsset.FindProperty("serializedProgramAsset");
 

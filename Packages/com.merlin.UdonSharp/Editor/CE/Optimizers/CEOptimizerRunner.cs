@@ -41,6 +41,7 @@ namespace UdonSharp.CE.Editor.Optimizers
             var optimizerList = new List<ICompileTimeOptimizer>
             {
                 // Priority 0-99: Early optimizations
+                new CELoggerTransformOptimizer(),  // Priority 5 - Transform CELogger calls before other optimizations
                 new ConstantFoldingOptimizer(),
 
                 // Priority 100-199: Standard optimizations

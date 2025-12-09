@@ -1,10 +1,10 @@
 # CE Runtime Performance — Technical Proposal
 
-*Automatic Performance Improvements Without Developer Effort*
+_Automatic Performance Improvements Without Developer Effort_
 
-**Version:** 2.0  
+**Version:** 2.1  
 **Date:** December 2025  
-**Status:** Proposal  
+**Status:** Phase 1 Complete ✅ — All library optimizations shipped; compiler pipeline (Phases 2-4) pending
 
 ---
 
@@ -47,14 +47,14 @@ The guiding principle: **maximum impact with minimum developer effort**. Users s
 
 ### Expected Impact
 
-| Category | Improvement | Developer Effort |
-|----------|-------------|------------------|
-| Collection operations | 20-50% faster | None |
-| ECS query iteration | 30-60% faster | None |
-| Hash-based lookups | 15-25% faster | None |
-| Sync bandwidth | 30-70% reduction | None (auto) to minimal (hints) |
-| Instruction count | 10-25% reduction | None |
-| Memory allocations | 40-60% reduction | None to minimal |
+| Category              | Improvement      | Developer Effort               |
+| --------------------- | ---------------- | ------------------------------ |
+| Collection operations | 20-50% faster    | None                           |
+| ECS query iteration   | 30-60% faster    | None                           |
+| Hash-based lookups    | 15-25% faster    | None                           |
+| Sync bandwidth        | 30-70% reduction | None (auto) to minimal (hints) |
+| Instruction count     | 10-25% reduction | None                           |
+| Memory allocations    | 40-60% reduction | None to minimal                |
 
 ---
 
@@ -67,6 +67,7 @@ These optimizations improve CE's built-in libraries. **All users benefit automat
 **Problem**: All hash-based collections use `Mathf.Abs(hashCode % capacity)` to compute bucket indices. `Mathf.Abs()` is an extern method call in Udon — significantly more expensive than bitwise operations.
 
 **Affected Files**:
+
 - `Collections/Dictionary.cs` (7 occurrences)
 - `Collections/HashSet.cs` (4 occurrences)
 - `CE/Data/CEDictionary.cs` (2 occurrences)
@@ -116,24 +117,24 @@ private int _pendingDestroyCount;
 private void ProcessPendingDestructions()
 {
     if (_pendingDestroyCount == 0) return;  // Early exit - common case
-    
+
     for (int i = 0; i < _pendingDestroyCount; i++)
     {
         int entityId = _pendingDestroyList[i];
         ProcessDestruction(entityId);
     }
-    
+
     _pendingDestroyCount = 0;
 }
 
 public void DestroyEntityDeferred(int entityId)
 {
     _entityStates[entityId] = EntityState.PendingDestroy;
-    
+
     // Add to pending list
     if (_pendingDestroyCount >= _pendingDestroyList.Length)
         ExpandPendingList();
-    
+
     _pendingDestroyList[_pendingDestroyCount++] = entityId;
 }
 ```
@@ -181,7 +182,7 @@ public void ForEach(Action<int> action)
     int count = _world.EntityCount;
     int required = _requiredMask;
     int excluded = _excludedMask;
-    
+
     for (int i = 0; i < count; i++)
     {
         // Inlined checks - no method calls
@@ -189,7 +190,7 @@ public void ForEach(Action<int> action)
         int mask = masks[i];
         if ((mask & required) != required) continue;
         if ((mask & excluded) != 0) continue;
-        
+
         action(i);
     }
 }
@@ -228,13 +229,13 @@ public struct PoolHandle<T>
 {
     public readonly int Index;
     public readonly T Object;
-    
+
     internal PoolHandle(int index, T obj)
     {
         Index = index;
         Object = obj;
     }
-    
+
     public bool IsValid => Index >= 0;
     public static PoolHandle<T> Invalid => new PoolHandle<T>(-1, default);
 }
@@ -246,7 +247,7 @@ public PoolHandle<T> AcquireHandle()
     {
         if (!TryExpand()) return PoolHandle<T>.Invalid;
     }
-    
+
     int index = _availableIndices[--_availableCount];
     _inUse[index] = true;
     return new PoolHandle<T>(index, _pool[index]);
@@ -319,6 +320,7 @@ public T[] GetBackingArray() => _items;
 ```
 
 **Affected Classes**:
+
 - `List<T>` / `CEList<T>`
 - `Dictionary<K,V>` / `CEDictionary<K,V>` (for values array)
 - `Queue<T>` / `Stack<T>`
@@ -402,7 +404,7 @@ public ListIterator GetEnumerator()
         _cachedIterator = new ListIterator(this);
     else
         _cachedIterator.Reset();
-    
+
     return _cachedIterator;
 }
 ```
@@ -420,14 +422,14 @@ public ListIterator GetEnumerator()
 private int FindKeyIndex(TKey key)
 {
     int index = (key.GetHashCode() & 0x7FFFFFFF) % _capacity;
-    
+
     while (_occupied[index])  // Stops at first empty slot!
     {
         if (_keys[index].Equals(key))
             return index;
         index = (index + 1) % _capacity;
     }
-    
+
     return -1;  // May incorrectly return -1 if hole exists before target
 }
 
@@ -436,10 +438,10 @@ public bool Remove(TKey key)
 {
     int index = FindKeyIndex(key);
     if (index < 0) return false;
-    
+
     _occupied[index] = false;
     _count--;
-    
+
     RehashAfterRemoval();  // O(n) every removal!
     return true;
 }
@@ -459,16 +461,16 @@ private int FindKeyIndex(TKey key)
 {
     int index = (key.GetHashCode() & 0x7FFFFFFF) % _capacity;
     int startIndex = index;
-    
+
     while (_slotState[index] != EMPTY)  // Continue past tombstones
     {
         if (_slotState[index] == OCCUPIED && _keys[index].Equals(key))
             return index;
-        
+
         index = (index + 1) % _capacity;
         if (index == startIndex) break;  // Full loop
     }
-    
+
     return -1;
 }
 
@@ -476,15 +478,15 @@ public bool Remove(TKey key)
 {
     int index = FindKeyIndex(key);
     if (index < 0) return false;
-    
+
     _slotState[index] = TOMBSTONE;  // Mark as tombstone, don't rehash
     _count--;
     _tombstoneCount++;
-    
+
     // Only rehash when tombstones exceed threshold
     if (_tombstoneCount > _capacity / 4)
         Rehash();
-    
+
     return true;
 }
 
@@ -492,24 +494,25 @@ private int FindInsertIndex(TKey key)
 {
     int index = (key.GetHashCode() & 0x7FFFFFFF) % _capacity;
     int firstTombstone = -1;
-    
+
     while (_slotState[index] == OCCUPIED)
     {
         if (_keys[index].Equals(key))
             return index;  // Key exists
-        
+
         index = (index + 1) % _capacity;
     }
-    
+
     // Can insert at tombstone or empty slot
     if (_slotState[index] == TOMBSTONE && firstTombstone < 0)
         firstTombstone = index;
-    
+
     return firstTombstone >= 0 ? firstTombstone : index;
 }
 ```
 
-**Impact**: 
+**Impact**:
+
 - **Correctness**: Fixes bug where lookups fail after deletions
 - **Performance**: Removal becomes O(1) amortized instead of O(n)
 
@@ -582,6 +585,7 @@ int flags = 7;
 ```
 
 **Patterns Detected**:
+
 - Arithmetic on literals: `2 * 3` → `6`
 - Const field references: `MY_CONST * 2` → evaluated
 - Math functions with constant args: `Mathf.Sqrt(4)` → `2`
@@ -598,14 +602,14 @@ int flags = 7;
 void Update()
 {
     DoImportantWork();
-    
+
     if (false)
     {
         DoDebugStuff();  // Never executes
     }
-    
+
     return;
-    
+
     CleanupCode();  // Unreachable
 }
 
@@ -617,6 +621,7 @@ void Update()
 ```
 
 **Patterns Detected**:
+
 - `if (false)` / `if (true)` branches
 - Code after unconditional `return`/`break`/`continue`
 - Unused variable assignments (when variable never read)
@@ -666,6 +671,7 @@ corners[3] = transform.TransformPoint(localCorners[3]);
 ```
 
 **Criteria for Automatic Unrolling**:
+
 - Iteration count is constant
 - Iteration count ≤ 4
 - Loop body is simple (≤ 5 statements)
@@ -695,6 +701,7 @@ void Update()
 ```
 
 **Criteria for Automatic Inlining**:
+
 - Method body is single expression or ≤ 2 statements
 - Method is called ≥ 2 times
 - No recursion
@@ -732,12 +739,12 @@ private byte health
 
 **Packing Rules**:
 
-| Pattern | Packing | Sync Reduction |
-|---------|---------|----------------|
-| 2-4 adjacent `byte` | → `uint` | 50-75% |
-| 2 adjacent `ushort` | → `uint` | 50% |
-| 2-8 adjacent `bool` | → `byte` | 50-87.5% |
-| 9-32 adjacent `bool` | → `uint` | 87.5-96.9% |
+| Pattern              | Packing  | Sync Reduction |
+| -------------------- | -------- | -------------- |
+| 2-4 adjacent `byte`  | → `uint` | 50-75%         |
+| 2 adjacent `ushort`  | → `uint` | 50%            |
+| 2-8 adjacent `bool`  | → `byte` | 50-87.5%       |
+| 9-32 adjacent `bool` | → `uint` | 87.5-96.9%     |
 
 **Disable If Needed**:
 
@@ -780,17 +787,17 @@ public override void OnPreSerialization()
         _ce_position_last = position;
         _ce_position_lastTime = Time.time;
     }
-    
+
     // Similar for rotation...
 }
 ```
 
 **Default Thresholds**:
 
-| Type | Movement Threshold | Time Threshold |
-|------|-------------------|----------------|
-| Vector3 | 0.01 units (1cm) | 5 seconds |
-| Quaternion | 0.01 radians (~0.5°) | 5 seconds |
+| Type       | Movement Threshold   | Time Threshold |
+| ---------- | -------------------- | -------------- |
+| Vector3    | 0.01 units (1cm)     | 5 seconds      |
+| Quaternion | 0.01 radians (~0.5°) | 5 seconds      |
 
 **Disable If Needed**:
 
@@ -824,19 +831,19 @@ public class Bullet : UdonSharpBehaviour
 {
     public float speed;
     private Vector3 direction;
-    
+
     // Called when acquired from pool
     public void CEOnAcquire()
     {
         gameObject.SetActive(true);
     }
-    
+
     // Called when returned to pool
     public void CEOnRelease()
     {
         gameObject.SetActive(false);
     }
-    
+
     public void Fire(Vector3 dir)
     {
         direction = dir.normalized;
@@ -847,14 +854,14 @@ public class Bullet : UdonSharpBehaviour
 public class Gun : UdonSharpBehaviour
 {
     [SerializeField] private Bullet_CEPool bulletPool;
-    
+
     public void Shoot()
     {
         var handle = bulletPool.AcquireHandle();
         if (handle.IsValid)
         {
             handle.Object.Fire(transform.forward);
-            
+
             // Return after 5 seconds
             SendCustomEventDelayedSeconds(nameof(ReturnBullet), 5f);
         }
@@ -864,12 +871,12 @@ public class Gun : UdonSharpBehaviour
 
 **Parameters**:
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `initialSize` | 10 | Starting pool size |
-| `maxSize` | -1 | Maximum size (-1 = unlimited) |
-| `allowExpansion` | true | Can grow beyond initial size |
-| `expansionSize` | 5 | Objects added when expanding |
+| Parameter        | Default | Description                   |
+| ---------------- | ------- | ----------------------------- |
+| `initialSize`    | 10      | Starting pool size            |
+| `maxSize`        | -1      | Maximum size (-1 = unlimited) |
+| `allowExpansion` | true    | Can grow beyond initial size  |
+| `expansionSize`  | 5       | Objects added when expanding  |
 
 ### 4.2 Sync Compression
 
@@ -893,20 +900,20 @@ public class Gun : UdonSharpBehaviour
 
 **Compression Modes**:
 
-| Mode | Description | Precision Loss |
-|------|-------------|----------------|
-| `Half` | 16-bit float | ~3 decimal digits |
-| `Range` | Map to integer range | Configurable |
-| `Centimeter` | Round to 0.01 | ±0.5cm |
-| `Millimeter` | Round to 0.001 | ±0.5mm |
-| `Degree` | Round to 1° | ±0.5° |
+| Mode         | Description          | Precision Loss    |
+| ------------ | -------------------- | ----------------- |
+| `Half`       | 16-bit float         | ~3 decimal digits |
+| `Range`      | Map to integer range | Configurable      |
+| `Centimeter` | Round to 0.01        | ±0.5cm            |
+| `Millimeter` | Round to 0.001       | ±0.5mm            |
+| `Degree`     | Round to 1°          | ±0.5°             |
 
 **Bandwidth Reduction**:
 
-| Type | Uncompressed | Half | Range (8-bit) |
-|------|--------------|------|---------------|
-| float | 32 bits | 16 bits | 8 bits |
-| Vector3 | 96 bits | 48 bits | 24 bits |
+| Type    | Uncompressed | Half    | Range (8-bit) |
+| ------- | ------------ | ------- | ------------- |
+| float   | 32 bits      | 16 bits | 8 bits        |
+| Vector3 | 96 bits      | 48 bits | 24 bits       |
 
 ### 4.3 Event Batching
 
@@ -978,13 +985,13 @@ public void CriticalMethod() { /* ... */ }
 
 When automatic optimizations cause issues, these attributes disable them:
 
-| Attribute | Effect |
-|-----------|--------|
-| `[CENoOptimize]` | Disable ALL CE optimizations on member/class |
-| `[CENoPackSync]` | Disable sync packing for variable/class |
-| `[CEDeltaSync(false)]` | Disable delta sync for variable |
-| `[CENoInline]` | Prevent method from being inlined |
-| `[CENoUnroll]` | Prevent loop from being unrolled |
+| Attribute              | Effect                                       |
+| ---------------------- | -------------------------------------------- |
+| `[CENoOptimize]`       | Disable ALL CE optimizations on member/class |
+| `[CENoPackSync]`       | Disable sync packing for variable/class      |
+| `[CEDeltaSync(false)]` | Disable delta sync for variable              |
+| `[CENoInline]`         | Prevent method from being inlined            |
+| `[CENoUnroll]`         | Prevent loop from being unrolled             |
 
 **Class-level example**:
 
@@ -1062,59 +1069,124 @@ String memory: -75%
 
 **High priority, low risk, immediate benefit**:
 
-| Task | Effort | Impact |
-|------|--------|--------|
+| Task                          | Effort  | Impact                       |
+| ----------------------------- | ------- | ---------------------------- |
 | Hash index fix (13 locations) | 2 hours | All Dictionary/HashSet users |
-| CEDictionary tombstone fix | 4 hours | Correctness + performance |
-| CEWorld pending destruction | 4 hours | All ECS users |
-| CEQuery hot path optimization | 6 hours | All ECS users |
-| Collection unchecked access | 4 hours | Power users |
-| Iterator allocation reduction | 6 hours | All collection users |
-| CEPool handle API | 4 hours | All pool users |
+| CEDictionary tombstone fix    | 4 hours | Correctness + performance    |
+| CEWorld pending destruction   | 4 hours | All ECS users                |
+| CEQuery hot path optimization | 6 hours | All ECS users                |
+| Collection unchecked access   | 4 hours | Power users                  |
+| Iterator allocation reduction | 6 hours | All collection users         |
+| CEPool handle API             | 4 hours | All pool users               |
 
-**Deliverable**: CE library update, no compiler changes needed.
+**Status:** ✅ Complete (all library optimizations shipped)
+
+**Checklist:**
+
+- [x] Hash index mask fix across Dictionary/HashSet (12 locations: 8 in Dictionary, 4 in HashSet)
+- [x] CEDictionary tombstone fix (SlotEmpty/SlotOccupied/SlotTombstone states, threshold-based rehash)
+- [x] CEWorld pending destruction pending-list flow
+- [x] CEQuery direct-array hot paths
+- [x] Collection unchecked/backing-array access helpers (List, CEList, Queue, Stack)
+- [x] Iterator allocation reduction + cached iterators (List, CEList, Queue, Stack)
+- [x] CEPool handle-based O(1) release API (PoolHandle<T>, AcquireHandle, Release(handle))
+- [x] Iterator caching for CEList (matches List/Queue/Stack pattern)
+
+**Deliverable**: CE library update — **COMPLETE**.
 
 ### Phase 2: Automatic Compiler Optimizations (Weeks 4-7)
 
-| Task | Effort | Impact |
-|------|--------|--------|
+| Task                           | Effort | Impact     |
+| ------------------------------ | ------ | ---------- |
 | Roslyn analyzer infrastructure | 1 week | Foundation |
-| Constant folding | 3 days | All users |
-| Dead code elimination | 3 days | All users |
-| String interning | 3 days | All users |
-| Small loop unrolling | 2 days | All users |
-| Tiny method inlining | 3 days | All users |
+| Constant folding               | 3 days | All users  |
+| Dead code elimination          | 3 days | All users  |
+| String interning               | 3 days | All users  |
+| Small loop unrolling           | 2 days | All users  |
+| Tiny method inlining           | 3 days | All users  |
+
+**Status:** Not started (compiler work remains proposal-stage)
+
+**Checklist:**
+
+- [ ] Roslyn analyzer infrastructure
+- [ ] Constant folding
+- [ ] Dead code elimination
+- [ ] String interning
+- [ ] Small loop unrolling
+- [ ] Tiny method inlining
 
 **Deliverable**: Automatic optimizations enabled by default.
 
 ### Phase 3: Smart Default Optimizations (Weeks 8-11)
 
-| Task | Effort | Impact |
-|------|--------|--------|
-| Auto sync packing | 1 week | Network-heavy worlds |
-| Auto delta sync | 1 week | Position/rotation sync |
-| Disable attributes | 2 days | Edge cases |
-| Optimization reports | 3 days | Developer visibility |
+| Task                 | Effort | Impact                 |
+| -------------------- | ------ | ---------------------- |
+| Auto sync packing    | 1 week | Network-heavy worlds   |
+| Auto delta sync      | 1 week | Position/rotation sync |
+| Disable attributes   | 2 days | Edge cases             |
+| Optimization reports | 3 days | Developer visibility   |
+
+**Status:** Not started (blocked on compiler foundations)
+
+**Checklist:**
+
+- [ ] Auto sync packing
+- [ ] Auto delta sync
+- [ ] Disable/escape hatch attributes
+- [ ] Optimization reports surfaced in editor/CI
 
 **Deliverable**: Smart defaults with escape hatches.
 
 ### Phase 4: Opt-in Features (Weeks 12-16)
 
-| Task | Effort | Impact |
-|------|--------|--------|
+| Task                  | Effort  | Impact              |
+| --------------------- | ------- | ------------------- |
 | [CEPooled] generation | 2 weeks | Object-heavy worlds |
-| [CECompressSync] | 1 week | Bandwidth-critical |
-| [CEBatchEvents] | 3 days | Event-heavy worlds |
-| [CEDebugOnly] | 2 days | Debug code |
+| [CECompressSync]      | 1 week  | Bandwidth-critical  |
+| [CEBatchEvents]       | 3 days  | Event-heavy worlds  |
+| [CEDebugOnly]         | 2 days  | Debug code          |
+
+**Status:** Not started (awaiting completion of Phase 2/3)
+
+**Checklist:**
+
+- [ ] [CEPooled] generation
+- [ ] [CECompressSync]
+- [ ] [CEBatchEvents]
+- [ ] [CEDebugOnly]
 
 **Deliverable**: Full opt-in feature set.
 
 ### Phase 5: Testing & Polish (Weeks 17-20)
 
-- Comprehensive test suite
-- Real-world validation with partner creators
-- Documentation
-- Performance benchmarks
+**Status:** Not started (dependent on Phases 2-4)
+
+**Checklist:**
+
+- [ ] Comprehensive test suite
+- [ ] Real-world validation with partner creators
+- [ ] Documentation
+- [ ] Performance benchmarks
+
+---
+
+## Current Progress (Dec 2025)
+
+- **Phase 1 (library) — ✅ Complete:** All library optimizations shipped:
+  - CEWorld pending-destroy list (O(1) early exit when no pending)
+  - CEQuery direct-array hot paths (no method calls in iteration)
+  - CEPool handle-based O(1) release (PoolHandle<T> struct)
+  - CEDictionary tombstone deletion (SlotEmpty/SlotOccupied/SlotTombstone states, threshold-based rehash)
+  - Dictionary/HashSet bitwise hash masks (`& 0x7FFFFFFF` instead of `Mathf.Abs`)
+  - Unchecked/backing-array access for List, CEList, Queue, Stack
+  - Allocation-free ForEach iteration methods
+  - Cached iterators to avoid foreach allocations
+- **Phase 2 (automatic compiler) — Not started:** Proposal-only; constant folding, DCE, string interning, tiny inlining, small-loop unroll still to implement in the compiler pipeline.
+- **Phase 3 (smart defaults) — Not started:** Auto sync packing/delta sync, disable attributes, and optimization reports queued behind compiler foundation.
+- **Phase 4 (opt-in features) — Not started:** [CEPooled], [CECompressSync], [CEBatchEvents], [CEDebugOnly] pending after smart defaults.
+- **Phase 5 (testing & polish) — Not started:** Comprehensive tests, partner validation, documentation, and perf benchmarks to follow feature delivery.
+- **Validation harness**: Still to wire up golden assembly diffs and CI microbenchmarks described in Part 9.
 
 ---
 
@@ -1122,11 +1194,11 @@ String memory: -75%
 
 ### Backward Compatibility
 
-| Scenario | Behavior |
-|----------|----------|
-| No CE attributes | Code compiles with automatic optimizations |
-| Existing projects | Work unchanged, gain automatic benefits |
-| Disable all optimizations | `[CENoOptimize]` on class |
+| Scenario                  | Behavior                                   |
+| ------------------------- | ------------------------------------------ |
+| No CE attributes          | Code compiles with automatic optimizations |
+| Existing projects         | Work unchanged, gain automatic benefits    |
+| Disable all optimizations | `[CENoOptimize]` on class                  |
 
 ### Forward Compatibility
 
@@ -1138,12 +1210,71 @@ CE optimizations designed for stability:
 
 ### Interoperability
 
-| Tool | Compatibility |
-|------|---------------|
-| UdonSharp 1.x | ✅ Required base |
-| VRCFury | ✅ No conflicts |
-| ClientSim | ✅ Optimized code runs same |
-| Existing prefabs | ✅ Work unchanged |
+| Tool             | Compatibility               |
+| ---------------- | --------------------------- |
+| UdonSharp 1.x    | ✅ Required base            |
+| VRCFury          | ✅ No conflicts             |
+| ClientSim        | ✅ Optimized code runs same |
+| Existing prefabs | ✅ Work unchanged           |
+
+---
+
+## Part 9: Validation, Rollout, and Risk Management
+
+### 9.1 Benchmark & Validation Plan
+
+| Area        | Scenario                                                                                              | Success Criteria                                                               |
+| ----------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Collections | 100k operations per method (`Add`, `Contains`, `Remove`) on `List`, `Dictionary`, `HashSet`, `CEPool` | ≥20% speedup vs baseline, zero behavior regressions                            |
+| ECS         | CEWorld with 1k / 5k entities, 3-component queries, 30% churn                                         | ≥30% faster query iteration, pending-destroy path costs ~0 in idle case        |
+| Sync        | 32 small sync fields, 8 bools, 4 Vector3/Quaternion under auto-pack/delta                             | ≥50% bandwidth reduction, no desync or callback regressions                    |
+| Compiler    | Golden C# fixtures compiled with and without CE transforms                                            | Bytecode identical for disabled features; optimized variants match expected IR |
+| Memory      | Object pool acquire/release under churn (10k ops)                                                     | ≤60% allocations vs baseline; no leaks                                         |
+
+Validation harness:
+
+- **Editor**: Deterministic playmode tests using CE.DevTools profilers (frame timing + allocation counters).
+- **Headless**: CLI microbenchmarks run via CI to produce before/after CSVs.
+- **Network**: Bandwidth Analyzer scenes with simulated 200ms latency / 5% loss to verify delta/packing wins and stability.
+
+### 9.2 Regression Safety Nets
+
+- **Golden Compilation Tests**: Snapshot IL/Udon assembly for representative scripts; diff to detect unintended rewrites.
+- **Analyzer Coverage**: Unit tests for Roslyn rules that trigger sync packing/delta sync/inlining to avoid false positives.
+- **Runtime Canaries**: Optional `[CERuntimeAssert]` helper (editor-only) to verify collection invariants (dictionary tombstones, pool occupancy).
+- **Fallback Switches**: Global project setting `CE Runtime Optimizations: Off/Auto/Strict` (defaults to Auto) and per-class `[CENoOptimize]`.
+- **Shadow Mode**: Editor toggle to run both optimized and unoptimized sync serialization in parallel and compare payload hashes (dev-only).
+
+### 9.3 Rollout Strategy
+
+1. **Phase 1 (Weeks 1-3)** — ✅ Library changes shipped and enabled by default.
+2. **Phase 2 (Weeks 4-7)** — Compiler automatic passes enabled; reports surface applied rewrites; fallback switch documented.
+3. **Phase 3 (Weeks 8-11)** — Smart defaults (packing/delta) ship disabled in CI until green on benchmark + partner worlds, then enabled by default.
+4. **Phase 4+** — Opt-in attributes released with samples; no behavioural change unless attribute present.
+
+Success gates to advance phases:
+
+- No correctness regressions in golden scenes (functional tests + late-join).
+- Benchmarks meet success criteria in 9.1.
+- Partner world sign-off: build + client test with CE enabled.
+
+### 9.4 Risks & Mitigations
+
+| Risk                                                   | Impact                                           | Mitigation                                                                                          |
+| ------------------------------------------------------ | ------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| Sync packing breaks `FieldChangeCallback` expectations | Missed callbacks or unexpected grouping          | Auto-disable packing when callback detected; document `[CENoPackSync]`                              |
+| Delta sync hides intentional micro-movements           | Visual drift or stale state                      | Adjustable thresholds; `[CEDeltaSync(false)]` escape hatch; per-variable overrides                  |
+| Tombstone fix changes iteration order                  | Subtle behavior change for code relying on order | Document non-ordered semantics; add analyzer warning for order-dependent usage patterns             |
+| Inlining/unrolling increases code size                 | Larger assembly may hit limits                   | Cap unroll iterations; skip on large bodies; report code size deltas                                |
+| Pool handle misuse (releasing invalid handle)          | Silent object loss                               | Handle validity checks in debug builds; optional runtime asserts; keep legacy API for compatibility |
+| Cross-version prefabs with official UdonSharp          | Install/compile conflicts                        | VPM `conflicts` + `provides` metadata; README warning; automated validator in DevTools              |
+
+### 9.5 Owner & Checkpoints
+
+- **Perf Lead:** CE.Perf maintainer (owns library changes + ECS benchmarks)
+- **Compiler Lead:** CE compiler maintainer (owns Roslyn passes + golden tests)
+- **QA/Validation:** DevTools maintainer (owns harnesses + reports)
+- **Checkpoints:** Weekly perf report (ops/sec, bandwidth, allocations), plus milestone demos at end of each phase.
 
 ---
 
@@ -1151,30 +1282,30 @@ CE optimizations designed for stability:
 
 ### What Happens Automatically
 
-| Optimization | Trigger | Benefit |
-|--------------|---------|---------|
-| Hash index fix | Always | Faster Dictionary/HashSet |
-| CEWorld pending list | Always | Faster when no destructions |
-| CEQuery inlining | Always | Faster ECS queries |
-| Constant folding | Constant expressions | Fewer instructions |
-| Dead code removal | Unreachable code | Smaller programs |
-| String interning | Duplicate strings | Less memory |
-| Loop unrolling | Small fixed loops | Less overhead |
-| Method inlining | Tiny methods | Fewer calls |
-| Sync packing | Adjacent small sync vars | Less bandwidth |
-| Delta sync | Vector3/Quaternion sync | Less bandwidth |
+| Optimization         | Trigger                  | Benefit                     |
+| -------------------- | ------------------------ | --------------------------- |
+| Hash index fix       | Always                   | Faster Dictionary/HashSet   |
+| CEWorld pending list | Always                   | Faster when no destructions |
+| CEQuery inlining     | Always                   | Faster ECS queries          |
+| Constant folding     | Constant expressions     | Fewer instructions          |
+| Dead code removal    | Unreachable code         | Smaller programs            |
+| String interning     | Duplicate strings        | Less memory                 |
+| Loop unrolling       | Small fixed loops        | Less overhead               |
+| Method inlining      | Tiny methods             | Fewer calls                 |
+| Sync packing         | Adjacent small sync vars | Less bandwidth              |
+| Delta sync           | Vector3/Quaternion sync  | Less bandwidth              |
 
 ### What Requires Attributes
 
-| Feature | Attribute | When to Use |
-|---------|-----------|-------------|
-| Object pooling | `[CEPooled]` | Many instantiate/destroy |
-| Sync compression | `[CECompressSync]` | Bandwidth-critical floats |
-| Event batching | `[CEBatchEvents]` | Many events at once |
-| Debug stripping | `[CEDebugOnly]` | Debug-only code |
-| Disable packing | `[CENoPackSync]` | Need individual callbacks |
-| Disable delta | `[CEDeltaSync(false)]` | Need every update |
-| Disable all | `[CENoOptimize]` | Exact control needed |
+| Feature          | Attribute              | When to Use               |
+| ---------------- | ---------------------- | ------------------------- |
+| Object pooling   | `[CEPooled]`           | Many instantiate/destroy  |
+| Sync compression | `[CECompressSync]`     | Bandwidth-critical floats |
+| Event batching   | `[CEBatchEvents]`      | Many events at once       |
+| Debug stripping  | `[CEDebugOnly]`        | Debug-only code           |
+| Disable packing  | `[CENoPackSync]`       | Need individual callbacks |
+| Disable delta    | `[CEDeltaSync(false)]` | Need every update         |
+| Disable all      | `[CENoOptimize]`       | Exact control needed      |
 
 ---
 
@@ -1182,26 +1313,175 @@ CE optimizations designed for stability:
 
 ### Library Optimizations
 
-| Operation | Before | After | Speedup |
-|-----------|--------|-------|---------|
-| Dictionary.Add | 1.0x | 1.2x | 20% |
-| Dictionary.TryGetValue | 1.0x | 1.25x | 25% |
-| Dictionary.Remove | 1.0x (O(n) rehash) | 2-5x (O(1) tombstone) | 100-400% |
-| HashSet.Contains | 1.0x | 1.2x | 20% |
-| CEQuery.ForEach (1000 entities) | 1.0x | 1.5x | 50% |
-| CEWorld.ProcessPending (0 pending) | 1.0x | 100x+ | 10000%+ |
-| CEPool.Release | 1.0x (O(n)) | 10x+ (O(1)) | 1000%+ |
-| List foreach | 1.0x | 1.3x | 30% (no allocation) |
+| Operation                          | Before             | After                 | Speedup             |
+| ---------------------------------- | ------------------ | --------------------- | ------------------- |
+| Dictionary.Add                     | 1.0x               | 1.2x                  | 20%                 |
+| Dictionary.TryGetValue             | 1.0x               | 1.25x                 | 25%                 |
+| Dictionary.Remove                  | 1.0x (O(n) rehash) | 2-5x (O(1) tombstone) | 100-400%            |
+| HashSet.Contains                   | 1.0x               | 1.2x                  | 20%                 |
+| CEQuery.ForEach (1000 entities)    | 1.0x               | 1.5x                  | 50%                 |
+| CEWorld.ProcessPending (0 pending) | 1.0x               | 100x+                 | 10000%+             |
+| CEPool.Release                     | 1.0x (O(n))        | 10x+ (O(1))           | 1000%+              |
+| List foreach                       | 1.0x               | 1.3x                  | 30% (no allocation) |
 
 ### Compiler Optimizations
 
-| Scenario | Bandwidth | Instructions |
-|----------|-----------|--------------|
-| 4 byte sync vars | -75% | - |
-| 8 bool sync vars | -87.5% | - |
-| Vector3 + Quaternion sync | -40-60% | - |
-| Typical script | - | -15-25% |
+| Scenario                  | Bandwidth | Instructions |
+| ------------------------- | --------- | ------------ |
+| 4 byte sync vars          | -75%      | -            |
+| 8 bool sync vars          | -87.5%    | -            |
+| Vector3 + Quaternion sync | -40-60%   | -            |
+| Typical script            | -         | -15-25%      |
 
 ---
 
-*Proposal End*
+## Appendix C: Phase 1 API Reference
+
+These APIs are shipped and available for use.
+
+### CEPool<T> — O(1) Release API
+
+```csharp
+// Struct returned by AcquireHandle() for O(1) release
+public struct PoolHandle<T> where T : class
+{
+    public readonly int Index;      // Pool index
+    public readonly T Object;       // The pooled object
+    public bool IsValid { get; }    // True if handle is valid
+    public static PoolHandle<T> Invalid { get; }  // Invalid handle constant
+}
+
+// CEPool<T> methods
+PoolHandle<T> AcquireHandle();     // Returns handle for O(1) release
+bool Release(PoolHandle<T> handle); // O(1) release by handle
+bool Release(T obj);               // O(n) release by object (legacy)
+bool ReleaseByIndex(int index);    // O(1) release by known index
+```
+
+**Usage Example:**
+
+```csharp
+// Recommended: O(1) release pattern
+var handle = bulletPool.AcquireHandle();
+if (handle.IsValid)
+{
+    Bullet bullet = handle.Object;
+    bullet.Fire(direction);
+
+    // Later: O(1) release
+    bulletPool.Release(handle);
+}
+```
+
+### Collection Unchecked Access
+
+Available on `List<T>`, `CEList<T>`, `Queue<T>`, `Stack<T>`:
+
+```csharp
+T GetUnchecked(int index);          // No bounds check
+void SetUnchecked(int index, T v);  // No bounds check
+T[] GetBackingArray();              // Direct array access
+```
+
+**Usage Example:**
+
+```csharp
+// Hot loop with guaranteed bounds
+var enemies = GetEnemies();
+int count = enemies.Count;
+for (int i = 0; i < count; i++)
+{
+    enemies.GetUnchecked(i).Update();  // 10-20% faster
+}
+```
+
+### Allocation-Free Iteration
+
+Available on `List<T>`, `CEList<T>`, `Queue<T>`, `Stack<T>`:
+
+```csharp
+void ForEach(Action<T> action);              // Iterate all items
+void ForEachWithIndex(Action<T, int> action); // With index
+void ForEachUntil(Func<T, bool> predicate);  // Until predicate false
+```
+
+**Usage Example:**
+
+```csharp
+// No allocation (unlike foreach)
+enemies.ForEach(e => e.TakeDamage(10));
+
+// With early exit
+enemies.ForEachUntil(e => {
+    if (e.IsDead) return false;  // Stop iteration
+    e.Update();
+    return true;
+});
+```
+
+### CEDictionary<TKey, TValue> — Tombstone Deletion
+
+Tombstone deletion is automatic. `Remove()` is now O(1) amortized instead of O(n):
+
+```csharp
+bool Remove(TKey key);  // Now O(1) amortized with tombstones
+```
+
+**Internal Implementation:**
+
+- Deleted slots marked as tombstones (not empty)
+- Lookups continue past tombstones
+- Automatic rehash when tombstones exceed 25% of capacity
+- Tombstones cleared during rehash
+
+### CEQuery — Direct Array Hot Paths
+
+Query iteration is automatically optimized. No API changes needed:
+
+```csharp
+// All these are faster due to internal direct array access
+int count = query.Count();
+int firstId = query.First();
+int matchCount = query.Execute(resultArray);
+query.ForEach(id => ProcessEntity(id));
+```
+
+### CEWorld — Pending Destruction Optimization
+
+Deferred destruction is automatically optimized. No API changes needed:
+
+```csharp
+// Still call the same API
+world.DestroyEntityDeferred(entityId);
+
+// ProcessPendingDestructions() is now O(1) when no pending
+// Previously was O(n) scanning all entities every tick
+```
+
+---
+
+## Appendix D: Migration Notes
+
+### From Pre-CE Collections
+
+If migrating from standard UdonSharp collections to CE collections:
+
+| Old Pattern               | New Pattern              | Benefit         |
+| ------------------------- | ------------------------ | --------------- |
+| `foreach (var x in list)` | `list.ForEach(x => ...)` | No allocation   |
+| `list[i]` in hot loops    | `list.GetUnchecked(i)`   | No bounds check |
+| `pool.Release(obj)`       | `pool.Release(handle)`   | O(1) vs O(n)    |
+
+### Backward Compatibility
+
+All changes are backward compatible:
+
+- Old `foreach` loops still work (with allocation)
+- Old `Release(obj)` still works (with O(n) search)
+- Old indexed access still works (with bounds check)
+
+No code changes required to benefit from internal optimizations (hash index fix, tombstone deletion, pending destruction list, query hot paths).
+
+---
+
+_Proposal End_

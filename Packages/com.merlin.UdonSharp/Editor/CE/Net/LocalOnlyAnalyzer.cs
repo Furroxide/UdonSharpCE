@@ -50,10 +50,20 @@ namespace UdonSharp.CE.Editor.Analyzers
         {
             var diagnostics = new List<AnalyzerDiagnostic>();
 
+            if (type == null || context == null)
+                return diagnostics;
+
             // Build a set of LocalOnly method names for this type
             var localOnlyMethods = new Dictionary<string, LocalOnlyAttribute>();
-            foreach (var method in type.GetMembers<MethodSymbol>(context))
+            var memberMethods = type.GetMembers<MethodSymbol>(context);
+            if (memberMethods == null)
+                return diagnostics;
+                
+            foreach (var method in memberMethods)
             {
+                if (method == null)
+                    continue;
+                    
                 var localOnlyAttr = method.GetAttribute<LocalOnlyAttribute>();
                 if (localOnlyAttr != null)
                 {
@@ -67,9 +77,13 @@ namespace UdonSharp.CE.Editor.Analyzers
 
             // Check all methods for SendCustomNetworkEvent calls
             var methods = type.GetMembers<MethodSymbol>(context);
+            if (methods == null)
+                return diagnostics;
 
             foreach (MethodSymbol method in methods)
             {
+                if (method == null)
+                    continue;
                 var syntaxRefs = method.RoslynSymbol?.DeclaringSyntaxReferences;
                 if (syntaxRefs == null || syntaxRefs.Value.Length == 0)
                     continue;
