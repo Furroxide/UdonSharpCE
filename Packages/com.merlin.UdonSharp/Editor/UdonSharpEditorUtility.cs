@@ -1280,6 +1280,32 @@ namespace UdonSharpEditor
         }
 
         /// <summary>
+        /// Checks if serialization can be performed on the given proxy behaviour.
+        /// Returns true if serialization is safe to call, false if it would fail due to outdated scripts.
+        /// </summary>
+        /// <param name="proxy"></param>
+        /// <returns></returns>
+        [PublicAPI]
+        public static bool CanSerializeProxy(UdonSharpBehaviour proxy)
+        {
+            if (proxy == null)
+                return false;
+
+            UdonSharpProgramAsset programAsset = GetUdonSharpProgramAsset(proxy);
+            
+            if (programAsset == null)
+                return false;
+
+            if (programAsset.ScriptVersion < UdonSharpProgramVersion.CurrentVersion)
+                return false;
+
+            if (programAsset.CompiledVersion < UdonSharpProgramVersion.CurrentVersion)
+                return false;
+
+            return true;
+        }
+
+        /// <summary>
         /// Copies the state of the proxy to its backing UdonBehaviour
         /// </summary>
         /// <param name="proxy"></param>

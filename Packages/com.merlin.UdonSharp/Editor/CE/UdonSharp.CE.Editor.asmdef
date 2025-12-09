@@ -4,7 +4,8 @@
         "UdonSharp.CE.Runtime",
         "UdonSharp.Editor",
         "UdonSharp.Runtime",
-        "VRC.Udon"
+        "VRC.Udon",
+        "VRC.Udon.Editor"
     ],
     "includePlatforms": [
         "Editor"
@@ -15,7 +16,9 @@
     "precompiledReferences": [
         "Microsoft.CodeAnalysis.dll",
         "Microsoft.CodeAnalysis.CSharp.dll",
-        "System.Collections.Immutable.dll"
+        "System.Collections.Immutable.dll",
+        "VRCSDKBase.dll",
+        "VRCSDK3.dll"
     ],
     "autoReferenced": true,
     "defineConstraints": [],

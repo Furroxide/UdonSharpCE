@@ -742,7 +742,11 @@ namespace UdonSharpEditor
                     if (!skipSerialize && EditorApplication.isPlaying) // We only need this copy in play mode since U# now goes off the behaviour data for setting up UdonBehaviours
                     {
                         foreach (Object targetProxy in targets)
-                            UdonSharpEditorUtility.CopyUdonToProxy((UdonSharpBehaviour)targetProxy, ProxySerializationPolicy.All);
+                        {
+                            UdonSharpBehaviour proxy = (UdonSharpBehaviour)targetProxy;
+                            if (UdonSharpEditorUtility.CanSerializeProxy(proxy))
+                                UdonSharpEditorUtility.CopyUdonToProxy(proxy, ProxySerializationPolicy.All);
+                        }
                     }
                 
                     if (_userEditor)
@@ -753,7 +757,11 @@ namespace UdonSharpEditor
                     if (!skipSerialize && EditorApplication.isPlaying)
                     {
                         foreach (Object targetProxy in targets)
-                            UdonSharpEditorUtility.CopyProxyToUdon((UdonSharpBehaviour)targetProxy, ProxySerializationPolicy.All);
+                        {
+                            UdonSharpBehaviour proxy = (UdonSharpBehaviour)targetProxy;
+                            if (UdonSharpEditorUtility.CanSerializeProxy(proxy))
+                                UdonSharpEditorUtility.CopyProxyToUdon(proxy, ProxySerializationPolicy.All);
+                        }
                     }
                 }
                 finally

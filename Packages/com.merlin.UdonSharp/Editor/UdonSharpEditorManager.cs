@@ -80,7 +80,8 @@ namespace UdonSharpEditor
                         
                         if (backingBehaviour)
                         {
-                            UdonSharpEditorUtility.CopyProxyToUdon(behaviour, ProxySerializationPolicy.RootOnly);
+                            if (UdonSharpEditorUtility.CanSerializeProxy(behaviour))
+                                UdonSharpEditorUtility.CopyProxyToUdon(behaviour, ProxySerializationPolicy.RootOnly);
 
                             allBehaviours.Add(backingBehaviour);
                         }
