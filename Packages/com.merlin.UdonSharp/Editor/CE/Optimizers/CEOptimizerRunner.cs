@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using UdonSharp.CE.Editor.Async;
 using UdonSharp.Compiler;
 using UnityEditor;
 using UnityEngine;
@@ -41,14 +42,18 @@ namespace UdonSharp.CE.Editor.Optimizers
             var optimizerList = new List<ICompileTimeOptimizer>
             {
                 // Priority 0-99: Early optimizations
+                new AsyncMethodTransformOptimizer(), // Priority 1 - Transform async/await FIRST before anything else
                 new ActionToCallbackTransformer(), // Priority 3 - Transform Action delegates to CECallback before other optimizations
                 new CELoggerTransformOptimizer(),  // Priority 5 - Transform CELogger calls before other optimizations
-                new ConstantFoldingOptimizer(),
+                new ConstantFoldingOptimizer(),    // Priority 10
 
                 // Priority 100-199: Standard optimizations
-                new DeadCodeEliminationOptimizer(),
-                new SmallLoopUnrollingOptimizer(),
-                new TinyMethodInliningOptimizer(),
+                new DeadCodeEliminationOptimizer(),           // Priority 100
+                new LoopInvariantCodeMotionOptimizer(),       // Priority 105 - Hoist invariants before other loop opts
+                new SmallLoopUnrollingOptimizer(),            // Priority 110
+                new CommonSubexpressionEliminationOptimizer(), // Priority 115 - CSE after loop opts
+                new TinyMethodInliningOptimizer(),            // Priority 118
+                new ExternCallCachingOptimizer(),             // Priority 120 - Cache extern calls
 
                 // Priority 200+: Late optimizations
                 new StringInterningOptimizer(),
