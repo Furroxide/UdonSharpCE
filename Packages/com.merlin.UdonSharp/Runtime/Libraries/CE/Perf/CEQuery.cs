@@ -178,24 +178,23 @@ namespace UdonSharp.CE.Perf
 
         /// <summary>
         /// Counts entities matching this query.
-        /// Optimized with direct array access.
+        /// Uses dense active list for O(activeCount) iteration.
         /// </summary>
         /// <returns>Number of matching entities.</returns>
         public int Count()
         {
-            // Direct array access for hot path optimization
-            EntityState[] states = _world.GetEntityStates();
+            // Use dense active list for O(activeCount) iteration
+            int[] activeList = _world.ActiveEntities;
+            int activeCount = _world.ActiveEntityCount;
             int[] masks = _world.GetComponentMasks();
-            int maxEntities = _world.MaxEntities;
             int required = _requiredMask;
             int excluded = _excludedMask;
             
             int count = 0;
-            for (int i = 0; i < maxEntities; i++)
+            for (int i = 0; i < activeCount; i++)
             {
-                // Inlined checks - no method calls
-                if (states[i] != EntityState.Active) continue;
-                int mask = masks[i];
+                int entityId = activeList[i];
+                int mask = masks[entityId];
                 if ((mask & required) != required) continue;
                 if ((mask & excluded) != 0) continue;
                 count++;
@@ -206,7 +205,7 @@ namespace UdonSharp.CE.Perf
 
         /// <summary>
         /// Executes the query and fills the result array with matching entity IDs.
-        /// Optimized with direct array access.
+        /// Uses dense active list for O(activeCount) iteration.
         /// </summary>
         /// <param name="result">Array to fill with matching entity IDs.</param>
         /// <returns>Number of matching entities.</returns>
@@ -214,24 +213,23 @@ namespace UdonSharp.CE.Perf
         {
             if (result == null) return 0;
 
-            // Direct array access for hot path optimization
-            EntityState[] states = _world.GetEntityStates();
+            // Use dense active list for O(activeCount) iteration
+            int[] activeList = _world.ActiveEntities;
+            int activeCount = _world.ActiveEntityCount;
             int[] masks = _world.GetComponentMasks();
-            int maxEntities = _world.MaxEntities;
             int required = _requiredMask;
             int excluded = _excludedMask;
             int maxCount = result.Length;
 
             int count = 0;
-            for (int i = 0; i < maxEntities && count < maxCount; i++)
+            for (int i = 0; i < activeCount && count < maxCount; i++)
             {
-                // Inlined checks - no method calls
-                if (states[i] != EntityState.Active) continue;
-                int mask = masks[i];
+                int entityId = activeList[i];
+                int mask = masks[entityId];
                 if ((mask & required) != required) continue;
                 if ((mask & excluded) != 0) continue;
                 
-                result[count] = i;
+                result[count] = entityId;
                 count++;
             }
 
@@ -240,27 +238,26 @@ namespace UdonSharp.CE.Perf
 
         /// <summary>
         /// Gets the first entity matching this query.
-        /// Optimized with direct array access.
+        /// Uses dense active list for O(activeCount) iteration.
         /// </summary>
         /// <returns>Entity ID, or CEWorld.InvalidEntity if none match.</returns>
         public int First()
         {
-            // Direct array access for hot path optimization
-            EntityState[] states = _world.GetEntityStates();
+            // Use dense active list for O(activeCount) iteration
+            int[] activeList = _world.ActiveEntities;
+            int activeCount = _world.ActiveEntityCount;
             int[] masks = _world.GetComponentMasks();
-            int maxEntities = _world.MaxEntities;
             int required = _requiredMask;
             int excluded = _excludedMask;
 
-            for (int i = 0; i < maxEntities; i++)
+            for (int i = 0; i < activeCount; i++)
             {
-                // Inlined checks - no method calls
-                if (states[i] != EntityState.Active) continue;
-                int mask = masks[i];
+                int entityId = activeList[i];
+                int mask = masks[entityId];
                 if ((mask & required) != required) continue;
                 if ((mask & excluded) != 0) continue;
                 
-                return i;
+                return entityId;
             }
 
             return CEWorld.InvalidEntity;
@@ -281,57 +278,55 @@ namespace UdonSharp.CE.Perf
 
         /// <summary>
         /// Iterates over all matching entities.
-        /// Optimized with direct array access - 30-60% faster than method call per entity.
+        /// Uses dense active list for O(activeCount) iteration.
         /// </summary>
         /// <param name="action">Action called for each matching entity ID.</param>
         public void ForEach(Action<int> action)
         {
             if (action == null) return;
 
-            // Direct array access for hot path optimization
-            EntityState[] states = _world.GetEntityStates();
+            // Use dense active list for O(activeCount) iteration
+            int[] activeList = _world.ActiveEntities;
+            int activeCount = _world.ActiveEntityCount;
             int[] masks = _world.GetComponentMasks();
-            int maxEntities = _world.MaxEntities;
             int required = _requiredMask;
             int excluded = _excludedMask;
 
-            for (int i = 0; i < maxEntities; i++)
+            for (int i = 0; i < activeCount; i++)
             {
-                // Inlined checks - no method calls
-                if (states[i] != EntityState.Active) continue;
-                int mask = masks[i];
+                int entityId = activeList[i];
+                int mask = masks[entityId];
                 if ((mask & required) != required) continue;
                 if ((mask & excluded) != 0) continue;
                 
-                action(i);
+                action(entityId);
             }
         }
 
         /// <summary>
         /// Iterates over all matching entities with early exit support.
-        /// Optimized with direct array access.
+        /// Uses dense active list for O(activeCount) iteration.
         /// </summary>
         /// <param name="action">Function called for each entity. Return false to stop iteration.</param>
         public void ForEachWhile(Func<int, bool> action)
         {
             if (action == null) return;
 
-            // Direct array access for hot path optimization
-            EntityState[] states = _world.GetEntityStates();
+            // Use dense active list for O(activeCount) iteration
+            int[] activeList = _world.ActiveEntities;
+            int activeCount = _world.ActiveEntityCount;
             int[] masks = _world.GetComponentMasks();
-            int maxEntities = _world.MaxEntities;
             int required = _requiredMask;
             int excluded = _excludedMask;
 
-            for (int i = 0; i < maxEntities; i++)
+            for (int i = 0; i < activeCount; i++)
             {
-                // Inlined checks - no method calls
-                if (states[i] != EntityState.Active) continue;
-                int mask = masks[i];
+                int entityId = activeList[i];
+                int mask = masks[entityId];
                 if ((mask & required) != required) continue;
                 if ((mask & excluded) != 0) continue;
                 
-                if (!action(i))
+                if (!action(entityId))
                 {
                     return;
                 }

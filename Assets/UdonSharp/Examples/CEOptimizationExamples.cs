@@ -16,9 +16,12 @@ namespace UdonSharp.CE.Examples
     public class CEOptimizationExamples : UdonSharpBehaviour
     {
         // ════════════════════════════════════════════════════════════════════
-        // OPTIMIZATION 1: CONSTANT FOLDING (CEOPT001)
+        // OPTIMIZATION: CONSTANT FOLDING
         // ════════════════════════════════════════════════════════════════════
         // Evaluates constant expressions at compile time, eliminating runtime math.
+        // 
+        // Note: Now handled by the Binder's ConstantExpressionOptimizer and
+        // StrengthReductionPass at the binary level for optimal results.
         // 
         // Benefits:
         // - Fewer Udon instructions
@@ -73,9 +76,13 @@ namespace UdonSharp.CE.Examples
         }
 
         // ════════════════════════════════════════════════════════════════════
-        // OPTIMIZATION 2: DEAD CODE ELIMINATION (CEOPT002)  
+        // OPTIMIZATION: DEAD CODE ELIMINATION
         // ════════════════════════════════════════════════════════════════════
         // Removes code that can never execute, reducing program size.
+        //
+        // Note: Now handled by binary-level optimization passes including
+        // PeepholeOptimizationPass and DeadCodeEliminationPass for thorough
+        // CFG-based analysis.
         //
         // Benefits:
         // - Smaller compiled programs
@@ -161,7 +168,7 @@ namespace UdonSharp.CE.Examples
         private void DoMoreWork() { }
 
         // ════════════════════════════════════════════════════════════════════
-        // OPTIMIZATION 3: SMALL LOOP UNROLLING (CEOPT003)
+        // OPTIMIZATION 1: SMALL LOOP UNROLLING (CEOPT003)
         // ════════════════════════════════════════════════════════════════════
         // Replaces small fixed-iteration loops with straight-line code.
         //
@@ -243,7 +250,7 @@ namespace UdonSharp.CE.Examples
         private float CalculateAxisValue(int axis) => axis * 10.0f;
 
         // ════════════════════════════════════════════════════════════════════
-        // OPTIMIZATION 4: TINY METHOD INLINING (CEOPT004)
+        // OPTIMIZATION 2: TINY METHOD INLINING (CEOPT004)
         // ════════════════════════════════════════════════════════════════════
         // Replaces calls to very small methods with their body.
         //
@@ -310,7 +317,7 @@ namespace UdonSharp.CE.Examples
         private float Length(float x, float y) => Mathf.Sqrt(Square(x) + Square(y));
 
         // ════════════════════════════════════════════════════════════════════
-        // OPTIMIZATION 5: STRING INTERNING (CEOPT005)
+        // OPTIMIZATION 3: STRING INTERNING (CEOPT005)
         // ════════════════════════════════════════════════════════════════════
         // Identifies duplicate string literals across your codebase.
         //

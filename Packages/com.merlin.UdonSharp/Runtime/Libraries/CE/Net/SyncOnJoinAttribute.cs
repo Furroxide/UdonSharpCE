@@ -97,7 +97,7 @@ namespace UdonSharp.CE.Net
     ///
     /// public void DeserializeGameState(string data)
     /// {
-    ///     currentState = JsonUtility.FromJson&lt;GameState&gt;(data);
+    ///     currentState = JsonUtility.FromJson<GameState>(data);
     /// }
     /// </code>
     /// </example>

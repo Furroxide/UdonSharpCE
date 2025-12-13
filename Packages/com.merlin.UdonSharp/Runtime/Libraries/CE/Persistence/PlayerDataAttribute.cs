@@ -21,9 +21,9 @@ namespace UdonSharp.CE.Persistence
     /// }
     ///
     /// // Registration (Phase 2 - manual):
-    /// CEPersistence.Register&lt;PlayerSaveData&gt;(
-    ///     toData: data =&gt; { /* conversion */ },
-    ///     fromData: dict =&gt; { /* conversion */ },
+    /// CEPersistence.Register<PlayerSaveData>(
+    ///     toData: data => { /* conversion */ },
+    ///     fromData: dict => { /* conversion */ },
     ///     key: "rpg_save",
     ///     version: 1
     /// );

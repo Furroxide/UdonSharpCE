@@ -53,6 +53,48 @@ namespace UdonSharp.CE.Editor.Optimizers
         }
 
         /// <summary>
+        /// Checks if a node is inside a type or method marked with [CEPreserveAction].
+        /// </summary>
+        private static bool IsInPreserveActionScope(SyntaxNode node)
+        {
+            var current = node.Parent;
+            while (current != null)
+            {
+                // Check type declarations (class, struct)
+                if (current is TypeDeclarationSyntax typeDecl)
+                {
+                    if (HasPreserveActionAttribute(typeDecl.AttributeLists))
+                        return true;
+                }
+                // Check method declarations
+                else if (current is MethodDeclarationSyntax methodDecl)
+                {
+                    if (HasPreserveActionAttribute(methodDecl.AttributeLists))
+                        return true;
+                }
+                current = current.Parent;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Checks if an attribute list contains [CEPreserveAction].
+        /// </summary>
+        private static bool HasPreserveActionAttribute(SyntaxList<AttributeListSyntax> attributeLists)
+        {
+            foreach (var attrList in attributeLists)
+            {
+                foreach (var attr in attrList.Attributes)
+                {
+                    var name = attr.Name.ToString();
+                    if (name == "CEPreserveAction" || name == "CEPreserveActionAttribute")
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
         /// Ensures the UdonSharp.CE.Core using directive is present in the file.
         /// </summary>
         private SyntaxNode EnsureUsingDirective(SyntaxNode root)
@@ -108,6 +150,12 @@ namespace UdonSharp.CE.Editor.Optimizers
                     // Check if this is a type reference (not a variable named Action)
                     if (IsTypeReference(node))
                     {
+                        // Skip if inside [CEPreserveAction] scope
+                        if (IsInPreserveActionScope(node))
+                        {
+                            return base.VisitIdentifierName(node);
+                        }
+
                         RecordTransformation(node, "Type reference: Action → CECallback");
                         ChangesMade = true;
                         return SyntaxFactory.IdentifierName("CECallback")
@@ -126,6 +174,12 @@ namespace UdonSharp.CE.Editor.Optimizers
                 // Transform "System.Action" to "CECallback"
                 if (node.ToString() == "System.Action")
                 {
+                    // Skip if inside [CEPreserveAction] scope
+                    if (IsInPreserveActionScope(node))
+                    {
+                        return base.VisitQualifiedName(node);
+                    }
+
                     RecordTransformation(node, "Type reference: System.Action → CECallback");
                     ChangesMade = true;
                     return SyntaxFactory.IdentifierName("CECallback")

@@ -1,3 +1,5 @@
+using System;
+using System.Runtime.CompilerServices;
 using JetBrains.Annotations;
 
 namespace UdonSharp.CE.Async
@@ -7,7 +9,7 @@ namespace UdonSharp.CE.Async
     /// </summary>
     /// <typeparam name="T">The type of the result value.</typeparam>
     /// <remarks>
-    /// UdonTask&lt;T&gt; extends UdonTask to support returning values from async methods.
+    /// UdonTask{T} extends UdonTask to support returning values from async methods.
     /// The result is stored in a generated field and available after completion.
     ///
     /// Note: Due to Udon limitations with generics, some complex generic scenarios
@@ -17,7 +19,7 @@ namespace UdonSharp.CE.Async
     /// <code>
     /// public class DataLoader : UdonSharpBehaviour
     /// {
-    ///     public async UdonTask&lt;int&gt; CalculateAsync(int input)
+    ///     public async UdonTask<int> CalculateAsync(int input)
     ///     {
     ///         await UdonTask.Delay(1f);  // Simulate async work
     ///         return input * 2;
@@ -35,6 +37,7 @@ namespace UdonSharp.CE.Async
     /// </code>
     /// </example>
     [PublicAPI]
+    [AsyncMethodBuilder(typeof(AsyncUdonTaskMethodBuilder<>))]
     public struct UdonTask<T>
     {
         /// <summary>
@@ -153,6 +156,30 @@ namespace UdonSharp.CE.Async
         }
 
         /// <summary>
+        /// Creates a faulted task from an exception.
+        /// </summary>
+        /// <param name="exception">The exception that caused the fault.</param>
+        /// <returns>A task in the Faulted state.</returns>
+        public static UdonTask<T> FromException(Exception exception)
+        {
+            return new UdonTask<T>
+            {
+                _status = TaskStatus.Faulted,
+                _error = exception?.Message ?? "Unknown error"
+            };
+        }
+
+        /// <summary>
+        /// Gets an awaiter for this task.
+        /// This enables the async/await pattern for UdonTask{T}.
+        /// </summary>
+        /// <returns>An awaiter that can be used to await this task.</returns>
+        public UdonTaskAwaiter<T> GetAwaiter()
+        {
+            return new UdonTaskAwaiter<T>(this);
+        }
+
+        /// <summary>
         /// Marks this task as completed with the specified result.
         /// </summary>
         internal void SetResult(T result)
@@ -180,7 +207,7 @@ namespace UdonSharp.CE.Async
 
         /// <summary>
         /// Implicit conversion to non-generic UdonTask.
-        /// Allows using UdonTask&lt;T&gt; where UdonTask is expected.
+        /// Allows using UdonTask{T} where UdonTask is expected.
         /// </summary>
         public static implicit operator UdonTask(UdonTask<T> task)
         {

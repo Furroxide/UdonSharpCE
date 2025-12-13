@@ -49,37 +49,37 @@ _A Comprehensive Reference for UdonSharp Community Edition_
 
 UdonSharpCE treats **Merlin's 1.2-beta1** as the minimum baseline. This provides:
 
-| Feature | Status |
-|---------|--------|
-| Non-UdonSharpBehaviour class support | ✅ Included |
-| Generic types | ✅ Included |
+| Feature                                                                                  | Status      |
+| ---------------------------------------------------------------------------------------- | ----------- |
+| Non-UdonSharpBehaviour class support                                                     | ✅ Included |
+| Generic types                                                                            | ✅ Included |
 | Built-in collections: `List<T>`, `Dictionary<K,V>`, `HashSet<T>`, `Queue<T>`, `Stack<T>` | ✅ Included |
-| Operator overloading | ✅ Included |
-| Custom type serialization (persistence-compatible) | ✅ Included |
+| Operator overloading                                                                     | ✅ Included |
+| Custom type serialization (persistence-compatible)                                       | ✅ Included |
 
 **Known limitations inherited from 1.2-beta1:**
 
-| Limitation | Status |
-|------------|--------|
-| No inheritance on non-behaviour types | ❌ Not supported |
-| No native struct support | ❌ Workarounds used |
-| No true static fields | ❌ Emulated per-behaviour-type |
+| Limitation                            | Status                         |
+| ------------------------------------- | ------------------------------ |
+| No inheritance on non-behaviour types | ❌ Not supported               |
+| No native struct support              | ❌ Workarounds used            |
+| No true static fields                 | ❌ Emulated per-behaviour-type |
 
 ### Key Differentiators from Official SDK UdonSharp
 
-| Capability | Official SDK | Merlin 1.2-beta1 | UdonSharp CE |
-|------------|--------------|------------------|--------------|
-| Generic types | ❌ | ✅ | ✅ |
-| Non-behaviour classes | ❌ | ✅ | ✅ |
-| Built-in collections | ❌ | ✅ | ✅ Enhanced |
-| Async/await syntax | ❌ | ❌ | ✅ |
-| ECS-Lite framework | ❌ | ❌ | ✅ |
-| Typed networking attributes | ❌ | ❌ | ✅ |
-| Persistence ORM | ❌ | ❌ | ✅ |
-| Procedural generation | ❌ | ❌ | ✅ |
-| Compile-time analyzers | ❌ | ❌ | ✅ |
-| Editor debugging tools | ❌ | ❌ | ✅ |
-| VPM distribution | ❌ (embedded) | ❌ (manual) | ✅ |
+| Capability                  | Official SDK  | Merlin 1.2-beta1 | UdonSharp CE |
+| --------------------------- | ------------- | ---------------- | ------------ |
+| Generic types               | ❌            | ✅               | ✅           |
+| Non-behaviour classes       | ❌            | ✅               | ✅           |
+| Built-in collections        | ❌            | ✅               | ✅ Enhanced  |
+| Async/await syntax          | ❌            | ❌               | ✅           |
+| ECS-Lite framework          | ❌            | ❌               | ✅           |
+| Typed networking attributes | ❌            | ❌               | ✅           |
+| Persistence ORM             | ❌            | ❌               | ✅           |
+| Procedural generation       | ❌            | ❌               | ✅           |
+| Compile-time analyzers      | ❌            | ❌               | ✅           |
+| Editor debugging tools      | ❌            | ❌               | ✅           |
+| VPM distribution            | ❌ (embedded) | ❌ (manual)      | ✅           |
 
 ---
 
@@ -103,30 +103,30 @@ UdonSharpCE treats **Merlin's 1.2-beta1** as the minimum baseline. This provides
 
 ### Module Summary
 
-| Module | Purpose | Status |
-|--------|---------|--------|
-| **CE.Data** | Type-safe data abstractions bridging collections to Data Containers | ✅ Complete |
-| **CE.Async** | Async/await workflows compiled to state machines | ✅ Complete |
-| **CE.Net** | Typed RPC and sync with compile-time analysis | ✅ Complete |
-| **CE.Persistence** | Attribute-based mapping to PlayerData/PlayerObject | ✅ Complete |
-| **CE.DevTools** | Debug console, profiler, analyzers, editor tools | ✅ Complete |
-| **CE.Perf** | ECS-Lite, object pooling, spatial partitioning | ✅ Complete |
-| **CE.Procgen** | Deterministic procedural generation | ✅ Complete |
-| **CE.GraphBridge** | Expose CE systems to Udon Graph users | ✅ Complete |
+| Module             | Purpose                                                             | Status      |
+| ------------------ | ------------------------------------------------------------------- | ----------- |
+| **CE.Data**        | Type-safe data abstractions bridging collections to Data Containers | ✅ Complete |
+| **CE.Async**       | Async/await workflows compiled to state machines                    | ✅ Complete |
+| **CE.Net**         | Typed RPC and sync with compile-time analysis                       | ✅ Complete |
+| **CE.Persistence** | Attribute-based mapping to PlayerData/PlayerObject                  | ✅ Complete |
+| **CE.DevTools**    | Debug console, profiler, analyzers, editor tools                    | ✅ Complete |
+| **CE.Perf**        | ECS-Lite, object pooling, spatial partitioning                      | ✅ Complete |
+| **CE.Procgen**     | Deterministic procedural generation                                 | ✅ Complete |
+| **CE.GraphBridge** | Expose CE systems to Udon Graph users                               | ✅ Complete |
 
 ### VPM Package Reference
 
-| Package ID | Display Name | Dependencies |
-|------------|--------------|--------------|
-| `com.charlvs.udonsharpce` | UdonSharp Community Edition | VRChat Worlds SDK |
-| `com.charlvs.udonsharpce.devtools` | CE.DevTools | Core |
-| `com.charlvs.udonsharpce.data` | CE.Data | Core |
-| `com.charlvs.udonsharpce.persist` | CE.Persistence | Core, CE.Data |
-| `com.charlvs.udonsharpce.async` | CE.Async | Core |
-| `com.charlvs.udonsharpce.net` | CE.Net | Core |
-| `com.charlvs.udonsharpce.perf` | CE.Perf | Core |
-| `com.charlvs.udonsharpce.procgen` | CE.Procgen | Core, CE.Perf |
-| `com.charlvs.udonsharpce.graphbridge` | CE.GraphBridge | Core |
+| Package ID                            | Display Name                | Dependencies      |
+| ------------------------------------- | --------------------------- | ----------------- |
+| `com.charlvs.udonsharpce`             | UdonSharp Community Edition | VRChat Worlds SDK |
+| `com.charlvs.udonsharpce.devtools`    | CE.DevTools                 | Core              |
+| `com.charlvs.udonsharpce.data`        | CE.Data                     | Core              |
+| `com.charlvs.udonsharpce.persist`     | CE.Persistence              | Core, CE.Data     |
+| `com.charlvs.udonsharpce.async`       | CE.Async                    | Core              |
+| `com.charlvs.udonsharpce.net`         | CE.Net                      | Core              |
+| `com.charlvs.udonsharpce.perf`        | CE.Perf                     | Core              |
+| `com.charlvs.udonsharpce.procgen`     | CE.Procgen                  | Core, CE.Perf     |
+| `com.charlvs.udonsharpce.graphbridge` | CE.GraphBridge              | Core              |
 
 ---
 
@@ -134,77 +134,78 @@ UdonSharpCE treats **Merlin's 1.2-beta1** as the minimum baseline. This provides
 
 ### Language Features
 
-| Feature | Standard Udon | Official U# | Merlin 1.2b1 | CE |
-|---------|--------------|-------------|--------------|-----|
-| C# syntax | ❌ | ✅ | ✅ | ✅ |
-| Classes | ❌ | ✅ Behaviour only | ✅ Any class | ✅ Any class |
-| Generics | ❌ | ❌ | ✅ | ✅ |
-| Generic constraints | ❌ | ❌ | ✅ | ✅ |
-| Operator overloading | ❌ | ❌ | ✅ | ✅ |
-| Async/await | ❌ | ❌ | ❌ | ✅ |
-| Extension methods | ❌ | ✅ | ✅ | ✅ |
-| Lambda expressions | ❌ | ✅ Limited | ✅ Limited | ✅ Limited |
-| LINQ | ❌ | ❌ | ❌ | ❌ |
+| Feature              | Standard Udon | Official U#       | Merlin 1.2b1 | CE           |
+| -------------------- | ------------- | ----------------- | ------------ | ------------ |
+| C# syntax            | ❌            | ✅                | ✅           | ✅           |
+| Classes              | ❌            | ✅ Behaviour only | ✅ Any class | ✅ Any class |
+| Generics             | ❌            | ❌                | ✅           | ✅           |
+| Generic constraints  | ❌            | ❌                | ✅           | ✅           |
+| Operator overloading | ❌            | ❌                | ✅           | ✅           |
+| Object initializers  | ❌            | ❌                | ❌           | ✅           |
+| Async/await          | ❌            | ❌                | ❌           | ✅           |
+| Extension methods    | ❌            | ✅                | ✅           | ✅           |
+| Lambda expressions   | ❌            | ✅ Limited        | ✅ Limited   | ✅ Limited   |
+| LINQ                 | ❌            | ❌                | ❌           | ❌           |
 
 ### Collections
 
-| Collection | Standard Udon | Official U# | Merlin 1.2b1 | CE |
-|------------|--------------|-------------|--------------|-----|
-| Arrays | ✅ | ✅ | ✅ | ✅ |
-| `List<T>` | ❌ | ❌ | ✅ | ✅ Enhanced |
-| `Dictionary<K,V>` | ❌ | ❌ | ✅ | ✅ Enhanced |
-| `HashSet<T>` | ❌ | ❌ | ✅ | ✅ Enhanced |
-| `Queue<T>` | ❌ | ❌ | ✅ | ✅ Enhanced |
-| `Stack<T>` | ❌ | ❌ | ✅ | ✅ Enhanced |
-| `DataList` bridge | ❌ | ❌ | ❌ | ✅ |
-| `DataDictionary` bridge | ❌ | ❌ | ❌ | ✅ |
+| Collection              | Standard Udon | Official U# | Merlin 1.2b1 | CE          |
+| ----------------------- | ------------- | ----------- | ------------ | ----------- |
+| Arrays                  | ✅            | ✅          | ✅           | ✅          |
+| `List<T>`               | ❌            | ❌          | ✅           | ✅ Enhanced |
+| `Dictionary<K,V>`       | ❌            | ❌          | ✅           | ✅ Enhanced |
+| `HashSet<T>`            | ❌            | ❌          | ✅           | ✅ Enhanced |
+| `Queue<T>`              | ❌            | ❌          | ✅           | ✅ Enhanced |
+| `Stack<T>`              | ❌            | ❌          | ✅           | ✅ Enhanced |
+| `DataList` bridge       | ❌            | ❌          | ❌           | ✅          |
+| `DataDictionary` bridge | ❌            | ❌          | ❌           | ✅          |
 
 ### Networking
 
-| Feature | Standard Udon | Official U# | Merlin 1.2b1 | CE |
-|---------|--------------|-------------|--------------|-----|
-| `[UdonSynced]` | ✅ | ✅ | ✅ | ✅ |
-| `SendCustomNetworkEvent` | ✅ | ✅ | ✅ | ✅ |
-| Typed `[Sync]` attribute | ❌ | ❌ | ❌ | ✅ |
-| Typed `[Rpc]` attribute | ❌ | ❌ | ❌ | ✅ |
-| `[LocalOnly]` attribute | ❌ | ❌ | ❌ | ✅ |
-| Rate limiting | ❌ | ❌ | ❌ | ✅ |
-| Delta encoding hints | ❌ | ❌ | ❌ | ✅ |
-| Bandwidth analysis | ❌ | ❌ | ❌ | ✅ |
-| Late-join helpers | ❌ | ❌ | ❌ | ✅ |
+| Feature                  | Standard Udon | Official U# | Merlin 1.2b1 | CE  |
+| ------------------------ | ------------- | ----------- | ------------ | --- |
+| `[UdonSynced]`           | ✅            | ✅          | ✅           | ✅  |
+| `SendCustomNetworkEvent` | ✅            | ✅          | ✅           | ✅  |
+| Typed `[Sync]` attribute | ❌            | ❌          | ❌           | ✅  |
+| Typed `[Rpc]` attribute  | ❌            | ❌          | ❌           | ✅  |
+| `[LocalOnly]` attribute  | ❌            | ❌          | ❌           | ✅  |
+| Rate limiting            | ❌            | ❌          | ❌           | ✅  |
+| Delta encoding hints     | ❌            | ❌          | ❌           | ✅  |
+| Bandwidth analysis       | ❌            | ❌          | ❌           | ✅  |
+| Late-join helpers        | ❌            | ❌          | ❌           | ✅  |
 
 ### Persistence
 
-| Feature | Standard Udon | Official U# | Merlin 1.2b1 | CE |
-|---------|--------------|-------------|--------------|-----|
-| PlayerData API | ✅ Manual | ✅ Manual | ✅ Manual | ✅ ORM |
-| PlayerObject API | ✅ Manual | ✅ Manual | ✅ Manual | ✅ ORM |
-| Attribute mapping | ❌ | ❌ | ❌ | ✅ |
-| Lifecycle callbacks | ❌ | ❌ | ❌ | ✅ |
-| Size estimation | ❌ | ❌ | ❌ | ✅ |
-| Validation | ❌ | ❌ | ❌ | ✅ |
+| Feature             | Standard Udon | Official U# | Merlin 1.2b1 | CE     |
+| ------------------- | ------------- | ----------- | ------------ | ------ |
+| PlayerData API      | ✅ Manual     | ✅ Manual   | ✅ Manual    | ✅ ORM |
+| PlayerObject API    | ✅ Manual     | ✅ Manual   | ✅ Manual    | ✅ ORM |
+| Attribute mapping   | ❌            | ❌          | ❌           | ✅     |
+| Lifecycle callbacks | ❌            | ❌          | ❌           | ✅     |
+| Size estimation     | ❌            | ❌          | ❌           | ✅     |
+| Validation          | ❌            | ❌          | ❌           | ✅     |
 
 ### Performance Tools
 
-| Feature | Standard Udon | Official U# | Merlin 1.2b1 | CE |
-|---------|--------------|-------------|--------------|-----|
-| Object pooling | ❌ | ❌ | ❌ | ✅ CEPool |
-| ECS framework | ❌ | ❌ | ❌ | ✅ ECS-Lite |
-| Spatial partitioning | ❌ | ❌ | ❌ | ✅ CEGrid |
-| Batch processing | ❌ | ❌ | ❌ | ✅ |
-| Compile-time analyzers | ❌ | ❌ | ❌ | ✅ |
+| Feature                | Standard Udon | Official U# | Merlin 1.2b1 | CE          |
+| ---------------------- | ------------- | ----------- | ------------ | ----------- |
+| Object pooling         | ❌            | ❌          | ❌           | ✅ CEPool   |
+| ECS framework          | ❌            | ❌          | ❌           | ✅ ECS-Lite |
+| Spatial partitioning   | ❌            | ❌          | ❌           | ✅ CEGrid   |
+| Batch processing       | ❌            | ❌          | ❌           | ✅          |
+| Compile-time analyzers | ❌            | ❌          | ❌           | ✅          |
 
 ### Editor Tooling
 
-| Tool | Standard Udon | Official U# | Merlin 1.2b1 | CE |
-|------|--------------|-------------|--------------|-----|
-| In-world debug console | ❌ | ❌ | ❌ | ✅ |
-| Performance profiler | ❌ | ❌ | ❌ | ✅ |
-| Bandwidth analyzer | ❌ | ❌ | ❌ | ✅ |
-| World validator | ❌ | ❌ | ❌ | ✅ |
-| Network simulator | ❌ | ❌ | ❌ | ✅ |
-| Late-join simulator | ❌ | ❌ | ❌ | ✅ |
-| Custom inspector system | ❌ | ✅ Basic | ✅ Basic | ✅ Enhanced |
+| Tool                    | Standard Udon | Official U# | Merlin 1.2b1 | CE          |
+| ----------------------- | ------------- | ----------- | ------------ | ----------- |
+| In-world debug console  | ❌            | ❌          | ❌           | ✅          |
+| Performance profiler    | ❌            | ❌          | ❌           | ✅          |
+| Bandwidth analyzer      | ❌            | ❌          | ❌           | ✅          |
+| World validator         | ❌            | ❌          | ❌           | ✅          |
+| Network simulator       | ❌            | ❌          | ❌           | ✅          |
+| Late-join simulator     | ❌            | ❌          | ❌           | ✅          |
+| Custom inspector system | ❌            | ✅ Basic    | ✅ Basic     | ✅ Enhanced |
 
 ---
 
@@ -228,15 +229,15 @@ using UdonSharpCE.Data;
 public class InventoryManager : UdonSharpBehaviour
 {
     private CEList<int> itemIds = new CEList<int>();
-    
+
     public void AddItem(int id)
     {
         itemIds.Add(id);
     }
-    
+
     // Convert to DataList for persistence/networking
     public DataList ToDataList() => itemIds.AsDataList();
-    
+
     // Load from DataList
     public void FromDataList(DataList data)
     {
@@ -277,14 +278,14 @@ int health = stats["health"];  // Type-safe
 
 #### Classes
 
-| Class | Description |
-|-------|-------------|
-| `CEList<T>` | Generic list with DataList bridge |
+| Class                        | Description                                   |
+| ---------------------------- | --------------------------------------------- |
+| `CEList<T>`                  | Generic list with DataList bridge             |
 | `CEDictionary<TKey, TValue>` | Generic dictionary with DataDictionary bridge |
-| `CEDataBridge` | Static conversion utilities |
-| `DataTokenConverter` | Type conversion helpers |
-| `[DataModel]` | Attribute for model classes |
-| `[DataField]` | Attribute for field mapping |
+| `CEDataBridge`               | Static conversion utilities                   |
+| `DataTokenConverter`         | Type conversion helpers                       |
+| `[DataModel]`                | Attribute for model classes                   |
+| `[DataField]`                | Attribute for field mapping                   |
 
 ---
 
@@ -341,7 +342,7 @@ public async UdonTask LongOperation()
     {
         if (_token.IsCancellationRequested)
             return;
-        
+
         await ProcessChunk(i);
         await UdonTask.Yield();
     }
@@ -401,12 +402,12 @@ public void Example()
 
 #### Classes
 
-| Class | Description |
-|-------|-------------|
-| `UdonTask` | Non-generic task for void async methods |
-| `UdonTask<T>` | Generic task with return value |
-| `TaskStatus` | Enum: Created, Running, Completed, Faulted, Canceled |
-| `CancellationToken` | Cooperative cancellation support |
+| Class               | Description                                          |
+| ------------------- | ---------------------------------------------------- |
+| `UdonTask`          | Non-generic task for void async methods              |
+| `UdonTask<T>`       | Generic task with return value                       |
+| `TaskStatus`        | Enum: Created, Running, Completed, Faulted, Canceled |
+| `CancellationToken` | Cooperative cancellation support                     |
 
 ---
 
@@ -429,14 +430,14 @@ public class GameController : UdonSharpBehaviour
     // Local-only method, analyzer warns if called via network
     [LocalOnly]
     private void PlayLocalEffect() { }
-    
+
     // Typed RPC with target and rate limiting
     [Rpc(Target = RpcTarget.All, RateLimit = 5)]
     public void AnnounceGoal(int team, int scorerId)
     {
         // Called on all clients
     }
-    
+
     // Owner-only RPC
     [RpcOwnerOnly]
     public void RequestOwnership()
@@ -454,15 +455,15 @@ public class PlayerState : UdonSharpBehaviour
 {
     // Basic sync
     [Sync] public int health;
-    
+
     // With delta encoding hint
-    [Sync(DeltaEncode = true)] 
+    [Sync(DeltaEncode = true)]
     public int[] playerScores = new int[16];
-    
+
     // With interpolation hint
     [Sync(Interpolation = InterpolationMode.Linear)]
     public Vector3 position;
-    
+
     // With quantization hint
     [Sync(Quantization = 0.01f)]
     public float rotation;
@@ -477,7 +478,7 @@ public class WorldState : UdonSharpBehaviour
 {
     [Sync] public int gamePhase;
     [Sync] public float[] teamScores = new float[4];
-    
+
     // Called when a late-joiner needs state
     public override void OnPlayerJoined(VRCPlayerApi player)
     {
@@ -531,22 +532,22 @@ public void IncrementCounter()
 
 #### Attributes Reference
 
-| Attribute | Description |
-|-----------|-------------|
-| `[Sync]` | Marks field for synchronization with optional hints |
-| `[Rpc]` | Marks method as RPC with target and rate limit |
-| `[RpcOwnerOnly]` | RPC only receivable by owner |
-| `[LocalOnly]` | Method should never be called via network |
-| `[SyncOnJoin]` | Behaviour syncs state to late-joiners |
+| Attribute        | Description                                         |
+| ---------------- | --------------------------------------------------- |
+| `[Sync]`         | Marks field for synchronization with optional hints |
+| `[Rpc]`          | Marks method as RPC with target and rate limit      |
+| `[RpcOwnerOnly]` | RPC only receivable by owner                        |
+| `[LocalOnly]`    | Method should never be called via network           |
+| `[SyncOnJoin]`   | Behaviour syncs state to late-joiners               |
 
 #### RpcTarget Options
 
-| Target | Description |
-|--------|-------------|
-| `RpcTarget.All` | Send to all clients including sender |
-| `RpcTarget.Others` | Send to all clients except sender |
-| `RpcTarget.Owner` | Send only to object owner |
-| `RpcTarget.Master` | Send only to instance master |
+| Target             | Description                          |
+| ------------------ | ------------------------------------ |
+| `RpcTarget.All`    | Send to all clients including sender |
+| `RpcTarget.Others` | Send to all clients except sender    |
+| `RpcTarget.Owner`  | Send only to object owner            |
+| `RpcTarget.Master` | Send only to instance master         |
 
 ---
 
@@ -570,18 +571,18 @@ public class PlayerSaveData : UdonSharpBehaviour
     [PersistKey("lvl")] public int level;
     [PersistKey("inv")] public int[] inventory = new int[50];
     [PersistKey("pos")] public Vector3 lastPosition;
-    
+
     // Lifecycle callbacks
     public void OnDataRestored()
     {
         Debug.Log($"Welcome back! Level {level}");
     }
-    
+
     public void OnDataSaved()
     {
         Debug.Log("Progress saved!");
     }
-    
+
     public void OnDataCorrupted()
     {
         Debug.LogWarning("Save data corrupted, resetting...");
@@ -599,11 +600,11 @@ public class PlayerSettings : UdonSharpBehaviour
     [PersistKey("vol")]
     [Range(0f, 1f)]
     public float volume = 0.8f;
-    
+
     [PersistKey("name")]
     [MaxLength(32)]
     public string displayName;
-    
+
     [PersistKey("sensitivity")]
     [Range(0.1f, 5f)]
     public float mouseSensitivity = 1f;
@@ -618,7 +619,7 @@ public class InventoryUI : UdonSharpBehaviour
 {
     [PersistKey("layout")] public int layoutMode;
     [PersistKey("sort")] public int sortOrder;
-    
+
     // Automatically instantiated per-player
     // Data persists across sessions
 }
@@ -632,11 +633,11 @@ using UdonSharpCE.Persistence;
 public class GameManager : UdonSharpBehaviour
 {
     [SerializeField] private PlayerSaveData saveData;
-    
+
     // Periodic auto-save (can't save in OnPlayerLeft!)
     private float _autoSaveInterval = 30f;
     private float _lastSave;
-    
+
     void Update()
     {
         if (Time.time - _lastSave > _autoSaveInterval)
@@ -645,7 +646,7 @@ public class GameManager : UdonSharpBehaviour
             _lastSave = Time.time;
         }
     }
-    
+
     // Save on explicit triggers
     public void OnLevelComplete()
     {
@@ -668,27 +669,27 @@ if (estimatedBytes > 90000)  // Approaching 100KB limit
 
 #### Attributes Reference
 
-| Attribute | Description |
-|-----------|-------------|
-| `[PlayerData("key")]` | Maps class to PlayerData with given key |
+| Attribute               | Description                               |
+| ----------------------- | ----------------------------------------- |
+| `[PlayerData("key")]`   | Maps class to PlayerData with given key   |
 | `[PlayerObject("key")]` | Maps class to PlayerObject with given key |
-| `[PersistKey("name")]` | Maps field to persistence key |
-| `[Range(min, max)]` | Validation constraint |
-| `[MaxLength(n)]` | String length constraint |
+| `[PersistKey("name")]`  | Maps field to persistence key             |
+| `[Range(min, max)]`     | Validation constraint                     |
+| `[MaxLength(n)]`        | String length constraint                  |
 
 #### Lifecycle Callbacks
 
-| Callback | When Called |
-|----------|-------------|
-| `OnDataRestored()` | After data loaded from persistence |
-| `OnDataSaved()` | After data successfully saved |
+| Callback            | When Called                        |
+| ------------------- | ---------------------------------- |
+| `OnDataRestored()`  | After data loaded from persistence |
+| `OnDataSaved()`     | After data successfully saved      |
 | `OnDataCorrupted()` | When data fails validation/parsing |
 
 #### VRChat Persistence Limits
 
-| Resource | Limit |
-|----------|-------|
-| PlayerData per world per player | 100 KB |
+| Resource                          | Limit  |
+| --------------------------------- | ------ |
+| PlayerData per world per player   | 100 KB |
 | PlayerObject per world per player | 100 KB |
 
 **Important:** Data cannot be saved in `OnPlayerLeft` — use periodic auto-save or save on explicit events.
@@ -711,14 +712,14 @@ using UdonSharpCE.DevTools;
 public class GameManager : UdonSharpBehaviour
 {
     [SerializeField] private CEDebugConsole console;
-    
+
     void Start()
     {
         console.Log("Game initialized");
         console.LogWarning("Low memory mode active");
         console.LogError("Failed to load asset");
     }
-    
+
     void OnNetworkError()
     {
         console.LogError($"Network error at {Time.time:F2}s");
@@ -734,23 +735,23 @@ using UdonSharpCE.DevTools;
 public class ExpensiveSystem : UdonSharpBehaviour
 {
     private CEProfiler _profiler;
-    
+
     void Start()
     {
         _profiler = new CEProfiler("ExpensiveSystem");
     }
-    
+
     void Update()
     {
         _profiler.BeginSample("Physics");
         DoPhysicsWork();
         _profiler.EndSample();
-        
+
         _profiler.BeginSample("AI");
         DoAIWork();
         _profiler.EndSample();
     }
-    
+
     public void ShowStats()
     {
         Debug.Log(_profiler.GetReport());
@@ -761,6 +762,7 @@ public class ExpensiveSystem : UdonSharpBehaviour
 ##### 3. Performance Monitor
 
 Drop-in component that displays:
+
 - Frame time (ms)
 - FPS (current/average/min)
 - Update costs per behaviour
@@ -768,17 +770,18 @@ Drop-in component that displays:
 
 #### Editor Tools
 
-| Tool | Menu Path | Purpose |
-|------|-----------|---------|
-| Bandwidth Analyzer | `CE Tools/Bandwidth Analyzer` | Analyze sync payload sizes |
-| World Validator | `CE Tools/World Validator` | Pre-publish validation |
-| Network Simulator | `CE Tools/Network Simulator` | Simulate latency/packet loss |
-| Late-Join Simulator | `CE Tools/Late-Join Simulator` | Test sync reconstruction |
-| Graph Node Browser | `CE Tools/Graph Node Browser` | Browse CE graph nodes |
+| Tool                | Menu Path                      | Purpose                      |
+| ------------------- | ------------------------------ | ---------------------------- |
+| Bandwidth Analyzer  | `CE Tools/Bandwidth Analyzer`  | Analyze sync payload sizes   |
+| World Validator     | `CE Tools/World Validator`     | Pre-publish validation       |
+| Network Simulator   | `CE Tools/Network Simulator`   | Simulate latency/packet loss |
+| Late-Join Simulator | `CE Tools/Late-Join Simulator` | Test sync reconstruction     |
+| Graph Node Browser  | `CE Tools/Graph Node Browser`  | Browse CE graph nodes        |
 
 ##### Bandwidth Analyzer
 
 Analyzes all UdonSharp behaviours and reports:
+
 - Sync payload sizes per behaviour
 - Total bandwidth usage estimates
 - Oversized payload warnings
@@ -787,6 +790,7 @@ Analyzes all UdonSharp behaviours and reports:
 ##### World Validator
 
 Pre-publish checks for common issues:
+
 - GetComponent in Update loops
 - Uninitialized synced arrays
 - Invalid VRCPlayerApi usage
@@ -797,6 +801,7 @@ Pre-publish checks for common issues:
 ##### Network Simulator
 
 Test your world under adverse network conditions:
+
 - Configurable latency (0-500ms)
 - Packet loss simulation (0-30%)
 - Jitter simulation
@@ -805,6 +810,7 @@ Test your world under adverse network conditions:
 ##### Late-Join Simulator
 
 Test late-joiner experience:
+
 - Capture current world state
 - Simulate player join
 - Verify state reconstruction
@@ -835,7 +841,7 @@ using UdonSharpCE.Perf;
 public class BulletHellManager : UdonSharpBehaviour
 {
     private CEWorld world;
-    
+
     void Start()
     {
         world = new CEWorld(maxEntities: 2000);
@@ -843,7 +849,7 @@ public class BulletHellManager : UdonSharpBehaviour
         world.RegisterComponent<Velocity>();
         world.RegisterSystem<Position, Velocity>(MovementSystem);
     }
-    
+
     [CESystem]
     private void MovementSystem(int count, Vector3[] positions, Vector3[] velocities)
     {
@@ -853,7 +859,7 @@ public class BulletHellManager : UdonSharpBehaviour
             positions[i] += velocities[i] * dt;
         }
     }
-    
+
     void Update()
     {
         world.RunSystems();
@@ -890,12 +896,12 @@ public class ProjectileManager : UdonSharpBehaviour
 {
     [SerializeField] private GameObject bulletPrefab;
     private CEPool<Bullet> bulletPool;
-    
+
     void Start()
     {
         bulletPool = new CEPool<Bullet>(bulletPrefab, initialSize: 50);
     }
-    
+
     public void Fire(Vector3 direction)
     {
         // O(1) acquire with handle
@@ -903,12 +909,12 @@ public class ProjectileManager : UdonSharpBehaviour
         if (handle.IsValid)
         {
             handle.Object.Fire(direction);
-            
+
             // Store handle for O(1) release later
             StartCoroutine(ReturnAfterDelay(handle, 5f));
         }
     }
-    
+
     private IEnumerator ReturnAfterDelay(PoolHandle<Bullet> handle, float delay)
     {
         yield return new WaitForSeconds(delay);
@@ -925,18 +931,18 @@ using UdonSharpCE.Perf;
 public class EnemyManager : UdonSharpBehaviour
 {
     private CEGrid<Enemy> grid;
-    
+
     void Start()
     {
         // Grid with 10-unit cells, 100x100 world
         grid = new CEGrid<Enemy>(cellSize: 10f, worldSize: 100f);
     }
-    
+
     public void UpdateEnemyPosition(Enemy enemy, Vector3 newPos)
     {
         grid.Move(enemy, newPos);
     }
-    
+
     public Enemy[] GetNearbyEnemies(Vector3 position, float radius)
     {
         return grid.QueryRadius(position, radius);
@@ -952,7 +958,7 @@ using UdonSharpCE.Perf;
 public class DamageSystem : UdonSharpBehaviour
 {
     private BatchProcessor<DamageEvent> damageProcessor;
-    
+
     void Start()
     {
         damageProcessor = new BatchProcessor<DamageEvent>(
@@ -960,17 +966,17 @@ public class DamageSystem : UdonSharpBehaviour
             processor: ProcessDamageBatch
         );
     }
-    
+
     public void QueueDamage(int targetId, float amount)
     {
         damageProcessor.Enqueue(new DamageEvent { targetId = targetId, amount = amount });
     }
-    
+
     void LateUpdate()
     {
         damageProcessor.ProcessAll();
     }
-    
+
     private void ProcessDamageBatch(DamageEvent[] events, int count)
     {
         for (int i = 0; i < count; i++)
@@ -983,16 +989,16 @@ public class DamageSystem : UdonSharpBehaviour
 
 #### Classes Reference
 
-| Class | Description |
-|-------|-------------|
-| `CEWorld` | Entity container with archetype storage |
-| `CEQuery` | Efficient entity queries |
-| `CEPool<T>` | Generic object pool with O(1) release |
-| `PoolHandle<T>` | Handle for pooled objects |
-| `CEGrid<T>` | Spatial partitioning grid |
-| `BatchProcessor<T>` | Batch processing utility |
-| `[CEComponent]` | Marks struct as ECS component |
-| `[CESystem]` | Marks method as ECS system |
+| Class               | Description                             |
+| ------------------- | --------------------------------------- |
+| `CEWorld`           | Entity container with archetype storage |
+| `CEQuery`           | Efficient entity queries                |
+| `CEPool<T>`         | Generic object pool with O(1) release   |
+| `PoolHandle<T>`     | Handle for pooled objects               |
+| `CEGrid<T>`         | Spatial partitioning grid               |
+| `BatchProcessor<T>` | Batch processing utility                |
+| `[CEComponent]`     | Marks struct as ECS component           |
+| `[CESystem]`        | Marks method as ECS system              |
 
 ---
 
@@ -1012,12 +1018,12 @@ using UdonSharpCE.Procgen;
 public class DungeonGenerator : UdonSharpBehaviour
 {
     [UdonSynced] private int worldSeed;
-    
+
     public void GenerateDungeon()
     {
         // Same seed = same dungeon on all clients
         CERandom rng = new CERandom(worldSeed);
-        
+
         int roomCount = rng.Range(5, 10);
         for (int i = 0; i < roomCount; i++)
         {
@@ -1042,20 +1048,20 @@ public class TerrainGenerator : UdonSharpBehaviour
     public void GenerateTerrain(int seed)
     {
         CENoise noise = new CENoise(seed);
-        
+
         for (int x = 0; x < 100; x++)
         {
             for (int z = 0; z < 100; z++)
             {
                 // Perlin noise for height
                 float height = noise.Perlin(x * 0.1f, z * 0.1f) * 10f;
-                
+
                 // Simplex noise for detail
                 height += noise.Simplex(x * 0.5f, z * 0.5f) * 2f;
-                
+
                 // Worley noise for caves
                 float cave = noise.Worley(x * 0.2f, z * 0.2f);
-                
+
                 SetTerrainHeight(x, z, height, cave < 0.3f);
             }
         }
@@ -1064,6 +1070,7 @@ public class TerrainGenerator : UdonSharpBehaviour
 ```
 
 Supported noise types:
+
 - **Perlin** — Classic smooth noise
 - **Simplex** — Faster, fewer artifacts than Perlin
 - **Worley** — Cellular/Voronoi patterns
@@ -1078,7 +1085,7 @@ public class RoguelikeLevel : UdonSharpBehaviour
     public void GenerateLevel(int seed)
     {
         CEDungeon dungeon = new CEDungeon(seed);
-        
+
         dungeon.Configure(
             minRooms: 8,
             maxRooms: 15,
@@ -1086,14 +1093,14 @@ public class RoguelikeLevel : UdonSharpBehaviour
             maxRoomSize: 12,
             corridorWidth: 2
         );
-        
+
         DungeonData data = dungeon.Generate();
-        
+
         foreach (var room in data.rooms)
         {
             SpawnRoom(room.position, room.size, room.type);
         }
-        
+
         foreach (var corridor in data.corridors)
         {
             SpawnCorridor(corridor.start, corridor.end);
@@ -1112,20 +1119,20 @@ using UdonSharpCE.Procgen;
 public class CityGenerator : UdonSharpBehaviour
 {
     private WFCSolver solver;
-    
+
     public void StartGeneration(int seed)
     {
         solver = new WFCSolver(seed);
-        
+
         // Define tile adjacency rules
         solver.AddTile("road_straight", /* adjacency rules */);
         solver.AddTile("road_corner", /* adjacency rules */);
         solver.AddTile("building", /* adjacency rules */);
         solver.AddTile("park", /* adjacency rules */);
-        
+
         solver.Initialize(gridWidth: 20, gridHeight: 20);
     }
-    
+
     void Update()
     {
         // Time-sliced: process some cells per frame
@@ -1144,12 +1151,12 @@ public class CityGenerator : UdonSharpBehaviour
 
 #### Classes Reference
 
-| Class | Description |
-|-------|-------------|
-| `CERandom` | Deterministic PRNG (Xorshift algorithm) |
-| `CENoise` | Noise generation (Perlin, Simplex, Worley) |
-| `CEDungeon` | Graph-based dungeon generator |
-| `WFCSolver` | Wave Function Collapse solver |
+| Class       | Description                                |
+| ----------- | ------------------------------------------ |
+| `CERandom`  | Deterministic PRNG (Xorshift algorithm)    |
+| `CENoise`   | Noise generation (Perlin, Simplex, Worley) |
+| `CEDungeon` | Graph-based dungeon generator              |
+| `WFCSolver` | Wave Function Collapse solver              |
 
 ---
 
@@ -1178,7 +1185,7 @@ public class MathNodes : UdonSharpBehaviour
     {
         return Mathf.Clamp(value, min, max);
     }
-    
+
     [GraphNode("Lerp Color")]
     [GraphInput("a", "Start color")]
     [GraphInput("b", "End color")]
@@ -1199,10 +1206,10 @@ public class PlayerNodes : UdonSharpBehaviour
 {
     [GraphProperty("Player Health")]
     public float health { get; set; }
-    
+
     [GraphEvent("On Player Damaged")]
     public event Action<float> OnDamaged;
-    
+
     [GraphFlowOutput("damaged")]
     public void TakeDamage(float amount)
     {
@@ -1237,15 +1244,15 @@ Auto-generates Markdown documentation for all graph nodes.
 
 #### Attributes Reference
 
-| Attribute | Description |
-|-----------|-------------|
-| `[GraphNode("name")]` | Marks method as graph node |
-| `[GraphInput("name", "desc")]` | Marks parameter as graph input |
-| `[GraphOutput("name", "desc")]` | Marks return value as graph output |
-| `[GraphFlowOutput("name")]` | Marks method as flow output trigger |
-| `[GraphProperty("name")]` | Marks property for graph access |
-| `[GraphEvent("name")]` | Marks event for graph subscription |
-| `[GraphCategory("path")]` | Organizes nodes in hierarchy |
+| Attribute                       | Description                         |
+| ------------------------------- | ----------------------------------- |
+| `[GraphNode("name")]`           | Marks method as graph node          |
+| `[GraphInput("name", "desc")]`  | Marks parameter as graph input      |
+| `[GraphOutput("name", "desc")]` | Marks return value as graph output  |
+| `[GraphFlowOutput("name")]`     | Marks method as flow output trigger |
+| `[GraphProperty("name")]`       | Marks property for graph access     |
+| `[GraphEvent("name")]`          | Marks event for graph subscription  |
+| `[GraphCategory("path")]`       | Organizes nodes in hierarchy        |
 
 ---
 
@@ -1291,15 +1298,15 @@ public bool Remove(TKey key)
 {
     int index = FindKeyIndex(key);
     if (index < 0) return false;
-    
+
     _slotState[index] = TOMBSTONE;  // Mark as tombstone, don't rehash
     _count--;
     _tombstoneCount++;
-    
+
     // Only rehash when tombstones exceed threshold
     if (_tombstoneCount > _capacity / 4)
         Rehash();
-    
+
     return true;
 }
 ```
@@ -1316,7 +1323,7 @@ public bool Remove(TKey key)
 private void ProcessPendingDestructions()
 {
     if (_pendingDestroyCount == 0) return;  // O(1) early exit
-    
+
     for (int i = 0; i < _pendingDestroyCount; i++)
     {
         ProcessDestruction(_pendingDestroyList[i]);
@@ -1341,7 +1348,7 @@ public void ForEach(Action<int> action)
     int count = _world.EntityCount;
     int required = _requiredMask;
     int excluded = _excludedMask;
-    
+
     for (int i = 0; i < count; i++)
     {
         // Inlined checks - no method calls
@@ -1349,7 +1356,7 @@ public void ForEach(Action<int> action)
         int mask = masks[i];
         if ((mask & required) != required) continue;
         if ((mask & excluded) != 0) continue;
-        
+
         action(i);
     }
 }
@@ -1419,16 +1426,16 @@ enemies.ForEachUntil(e => {
 
 ### Performance Impact Summary
 
-| Operation | Before | After | Improvement |
-|-----------|--------|-------|-------------|
-| Dictionary.Add | 1.0x | 1.2x | 20% |
-| Dictionary.TryGetValue | 1.0x | 1.25x | 25% |
-| Dictionary.Remove | 1.0x (O(n)) | 2-5x (O(1)) | 100-400% |
-| HashSet.Contains | 1.0x | 1.2x | 20% |
-| CEQuery.ForEach | 1.0x | 1.5x | 50% |
-| CEWorld.ProcessPending (0 pending) | 1.0x | 100x+ | 10000%+ |
-| CEPool.Release | 1.0x (O(n)) | 10x+ (O(1)) | 1000%+ |
-| List foreach | 1.0x | 1.3x | 30% |
+| Operation                          | Before      | After       | Improvement |
+| ---------------------------------- | ----------- | ----------- | ----------- |
+| Dictionary.Add                     | 1.0x        | 1.2x        | 20%         |
+| Dictionary.TryGetValue             | 1.0x        | 1.25x       | 25%         |
+| Dictionary.Remove                  | 1.0x (O(n)) | 2-5x (O(1)) | 100-400%    |
+| HashSet.Contains                   | 1.0x        | 1.2x        | 20%         |
+| CEQuery.ForEach                    | 1.0x        | 1.5x        | 50%         |
+| CEWorld.ProcessPending (0 pending) | 1.0x        | 100x+       | 10000%+     |
+| CEPool.Release                     | 1.0x (O(n)) | 10x+ (O(1)) | 1000%+      |
+| List foreach                       | 1.0x        | 1.3x        | 30%         |
 
 ---
 
@@ -1438,16 +1445,16 @@ CE includes Roslyn-based analyzers that detect common issues at compile time.
 
 ### Analyzer Reference
 
-| Analyzer | Category | Detects |
-|----------|----------|---------|
-| `GetComponentAnalyzer` | Performance | `GetComponent` calls in Update/FixedUpdate/LateUpdate |
-| `UninitializedSyncArrayAnalyzer` | Networking | Uninitialized `[UdonSynced]` arrays |
-| `SyncPayloadAnalyzer` | Networking | Oversized continuous sync payloads |
-| `NamedArgumentAnalyzer` | Compatibility | Named arguments (unsupported in U#) |
-| `LocalOnlyNetworkCallAnalyzer` | Networking | `SendCustomNetworkEvent` targeting `[LocalOnly]` methods |
-| `PlayerApiAfterLeaveAnalyzer` | Safety | Invalid VRCPlayerApi usage in OnPlayerLeft |
-| `SyncModeAnalyzer` | Performance | Inefficient continuous sync usage |
-| `PersistenceSizeAnalyzer` | Persistence | `[PlayerData]` schema exceeding size limits |
+| Analyzer                         | Category      | Detects                                                  |
+| -------------------------------- | ------------- | -------------------------------------------------------- |
+| `GetComponentAnalyzer`           | Performance   | `GetComponent` calls in Update/FixedUpdate/LateUpdate    |
+| `UninitializedSyncArrayAnalyzer` | Networking    | Uninitialized `[UdonSynced]` arrays                      |
+| `SyncPayloadAnalyzer`            | Networking    | Oversized continuous sync payloads                       |
+| `NamedArgumentAnalyzer`          | Compatibility | Named arguments (unsupported in U#)                      |
+| `LocalOnlyNetworkCallAnalyzer`   | Networking    | `SendCustomNetworkEvent` targeting `[LocalOnly]` methods |
+| `PlayerApiAfterLeaveAnalyzer`    | Safety        | Invalid VRCPlayerApi usage in OnPlayerLeft               |
+| `SyncModeAnalyzer`               | Performance   | Inefficient continuous sync usage                        |
+| `PersistenceSizeAnalyzer`        | Persistence   | `[PlayerData]` schema exceeding size limits              |
 
 ### Example Warnings
 
@@ -1468,6 +1475,7 @@ void Update()
 ```
 
 **Fix:**
+
 ```csharp
 [UdonSynced] public int[] scores = new int[16];
 ```
@@ -1489,6 +1497,7 @@ DoSomething(target: player, delay: 1.0f);  // ⚠️ CE004: Named arguments not 
 ```
 
 **Fix:**
+
 ```csharp
 DoSomething(player, 1.0f);
 ```
@@ -1499,25 +1508,27 @@ DoSomething(player, 1.0f);
 
 ### Tool Overview
 
-| Tool | Menu Path | Purpose |
-|------|-----------|---------|
-| Bandwidth Analyzer | `CE Tools > Bandwidth Analyzer` | Analyze sync payload sizes |
-| World Validator | `CE Tools > World Validator` | Pre-publish validation |
-| Network Simulator | `CE Tools > Network Simulator` | Simulate network conditions |
-| Late-Join Simulator | `CE Tools > Late-Join Simulator` | Test late-join sync |
-| Graph Node Browser | `CE Tools > Graph Node Browser` | Browse graph nodes |
+| Tool                | Menu Path                        | Purpose                     |
+| ------------------- | -------------------------------- | --------------------------- |
+| Bandwidth Analyzer  | `CE Tools > Bandwidth Analyzer`  | Analyze sync payload sizes  |
+| World Validator     | `CE Tools > World Validator`     | Pre-publish validation      |
+| Network Simulator   | `CE Tools > Network Simulator`   | Simulate network conditions |
+| Late-Join Simulator | `CE Tools > Late-Join Simulator` | Test late-join sync         |
+| Graph Node Browser  | `CE Tools > Graph Node Browser`  | Browse graph nodes          |
 
 ### Bandwidth Analyzer
 
 Analyzes all synced behaviours in your world:
 
 **Features:**
+
 - Per-behaviour sync payload size estimation
 - Total bandwidth usage calculation
 - Sync mode recommendations
 - Export to CSV for analysis
 
 **Output Example:**
+
 ```
 ═══════════════════════════════════════════════════════════
 Bandwidth Analysis Report
@@ -1547,17 +1558,18 @@ Pre-publish validation checklist:
 
 **Validators:**
 
-| Validator | Category | Description |
-|-----------|----------|-------------|
-| GetComponentInUpdate | Performance | Flags uncached GetComponent |
-| UninitializedSyncedArray | Networking | Flags null synced arrays |
-| PlayerApiAfterLeave | Safety | Flags invalid player API usage |
-| LocalOnlyNetworkCall | Networking | Flags network calls to local methods |
-| SyncModeValidator | Performance | Recommends sync mode changes |
-| BandwidthValidator | Networking | Checks bandwidth limits |
-| PersistenceSizeValidator | Persistence | Checks PlayerData size limits |
+| Validator                | Category    | Description                          |
+| ------------------------ | ----------- | ------------------------------------ |
+| GetComponentInUpdate     | Performance | Flags uncached GetComponent          |
+| UninitializedSyncedArray | Networking  | Flags null synced arrays             |
+| PlayerApiAfterLeave      | Safety      | Flags invalid player API usage       |
+| LocalOnlyNetworkCall     | Networking  | Flags network calls to local methods |
+| SyncModeValidator        | Performance | Recommends sync mode changes         |
+| BandwidthValidator       | Networking  | Checks bandwidth limits              |
+| PersistenceSizeValidator | Persistence | Checks PlayerData size limits        |
 
 **Output Example:**
+
 ```
 ═══════════════════════════════════════════════════════════
 World Validation Report
@@ -1581,12 +1593,14 @@ Summary: 1 Error, 1 Warning, 5 Passed
 Test your world under adverse network conditions:
 
 **Configurable Parameters:**
+
 - **Latency:** 0-500ms (simulates round-trip delay)
 - **Packet Loss:** 0-30% (simulates dropped packets)
 - **Jitter:** 0-100ms (simulates latency variance)
 - **Bandwidth Limit:** Throttle to specific KB/s
 
 **Usage:**
+
 1. Open `CE Tools > Network Simulator`
 2. Configure desired conditions
 3. Enter Play Mode
@@ -1598,6 +1612,7 @@ Test your world under adverse network conditions:
 Test what late-joiners experience:
 
 **Features:**
+
 - Capture current world state
 - Simulate player disconnect/rejoin
 - Verify state reconstruction
@@ -1605,6 +1620,7 @@ Test what late-joiners experience:
 - Generate sync coverage report
 
 **Usage:**
+
 1. Open `CE Tools > Late-Join Simulator`
 2. Play your world to desired state
 3. Click "Capture State"
@@ -1640,6 +1656,7 @@ Sync: Continuous │ 6 synced vars │ Optimized: -45% bandwidth
 #### 4. Property Grouping
 
 Automatic grouping of related fields:
+
 - **References:** UnityEngine.Object fields
 - **Configuration:** Numeric primitives
 - **Synced Variables:** `[UdonSynced]` fields
@@ -1661,19 +1678,19 @@ CE Optimizations
 
 Access via `Preferences > UdonSharp CE > Inspector`:
 
-| Setting | Description | Default |
-|---------|-------------|---------|
+| Setting                       | Description                              | Default   |
+| ----------------------------- | ---------------------------------------- | --------- |
 | Hide UdonBehaviour Components | Hide raw UdonBehaviour when proxy exists | ✓ Enabled |
-| Show Optimization Info | Display CE optimization details | ✓ Enabled |
-| Auto-Group Properties | Automatically group related properties | ✓ Enabled |
+| Show Optimization Info        | Display CE optimization details          | ✓ Enabled |
+| Auto-Group Properties         | Automatically group related properties   | ✓ Enabled |
 
 ### Menu Items
 
-| Menu | Action |
-|------|--------|
+| Menu                                                                 | Action                   |
+| -------------------------------------------------------------------- | ------------------------ |
 | `Tools > UdonSharp CE > Inspector > Toggle UdonBehaviour Visibility` | Show/hide raw components |
-| `Tools > UdonSharp CE > Inspector > Refresh All Inspectors` | Force refresh |
-| `Tools > UdonSharp CE > Inspector > Open Preferences` | Open settings |
+| `Tools > UdonSharp CE > Inspector > Refresh All Inspectors`          | Force refresh            |
+| `Tools > UdonSharp CE > Inspector > Open Preferences`                | Open settings            |
 
 ---
 
@@ -1686,6 +1703,7 @@ Merlin's 1.2-beta1 release notes warned:
 > "Installation is also super jank due to how VRC has a copy of U# directly in the SDK. I want to make it better, but **I advise against using this in prefabs you are looking to distribute**."
 
 This existed because:
+
 1. Manual installation required deleting SDK files
 2. No way for prefabs to declare dependency on 1.2-beta1
 3. VCC unaware of installation, risked silent overwrites
@@ -1727,6 +1745,7 @@ The core package declares explicit conflict with official UdonSharp:
 ```
 
 **What this achieves:**
+
 - `conflicts`: VCC knows it cannot install both simultaneously
 - `provides`: VCC treats UdonSharpCE as satisfying `com.vrchat.udonsharp` dependencies
 - Existing prefabs that depend on UdonSharp work without modification
@@ -1748,6 +1767,7 @@ With VPM, prefab creators can safely depend on UdonSharpCE features:
 ```
 
 When users install the prefab, VCC automatically:
+
 1. Detects dependency on UdonSharpCE
 2. Removes official UdonSharp (conflict)
 3. Installs UdonSharpCE and required modules
@@ -1759,13 +1779,14 @@ When users install the prefab, VCC automatically:
 
 ### Language Limitations
 
-| Limitation | CE Approach |
-|------------|-------------|
-| Named arguments not supported | Never use in CE APIs; use positional |
-| Complex optional parameters | Prefer overloads or builder patterns |
-| Static fields not truly static | Emulate internally, don't expose |
-| No struct support | SoA transformation in CE.Perf |
-| Enum casting quirks | Wrap in helper methods |
+| Limitation                            | CE Approach                          |
+| ------------------------------------- | ------------------------------------ |
+| Named arguments not supported         | Never use in CE APIs; use positional |
+| Complex optional parameters           | Prefer overloads or builder patterns |
+| Static fields not truly static        | Emulate internally, don't expose     |
+| No struct support                     | SoA transformation in CE.Perf        |
+| Collection initializers not supported | Use explicit `.Add()` calls          |
+| Enum casting quirks                   | Wrap in helper methods               |
 
 #### Named Arguments
 
@@ -1799,15 +1820,32 @@ public class MyBehaviour : UdonSharpBehaviour
 }
 ```
 
+#### Object Initializers vs Collection Initializers
+
+```csharp
+// ✅ Object initializers ARE supported
+var task = new UdonTask { _status = TaskStatus.RanToCompletion };
+var config = new MyConfig { Width = 100, Height = 200 };
+
+// ❌ Collection initializers are NOT supported
+var list = new List<int> { 1, 2, 3 };  // Will not compile
+
+// ✅ Use explicit Add() calls instead
+var list = new List<int>();
+list.Add(1);
+list.Add(2);
+list.Add(3);
+```
+
 ### Performance Constraints
 
-| Constraint | CE Approach |
-|------------|-------------|
-| 200-1000x slower than C# | Batch operations, avoid per-entity overhead |
-| GetComponent is slow | Cache all references in Start() |
-| Cross-behaviour calls slow | Minimize, use events where possible |
-| 11 KB/s network budget | Delta encoding, quantization, prioritization |
-| 200 byte continuous sync limit | Prefer manual sync for complex state |
+| Constraint                     | CE Approach                                  |
+| ------------------------------ | -------------------------------------------- |
+| 200-1000x slower than C#       | Batch operations, avoid per-entity overhead  |
+| GetComponent is slow           | Cache all references in Start()              |
+| Cross-behaviour calls slow     | Minimize, use events where possible          |
+| 11 KB/s network budget         | Delta encoding, quantization, prioritization |
+| 200 byte continuous sync limit | Prefer manual sync for complex state         |
 
 #### GetComponent in Hot Paths
 
@@ -1840,10 +1878,10 @@ otherBehaviour.ProcessBatch(dataArray);
 
 ### Networking Constraints
 
-| Constraint | Limit |
-|------------|-------|
-| Continuous sync payload | 200 bytes max |
-| Manual sync bandwidth | 11 KB/s budget |
+| Constraint              | Limit          |
+| ----------------------- | -------------- |
+| Continuous sync payload | 200 bytes max  |
+| Manual sync bandwidth   | 11 KB/s budget |
 
 #### Uninitialized Synced Arrays
 
@@ -1875,9 +1913,9 @@ public class Chat : UdonSharpBehaviour
 
 ### Persistence Constraints
 
-| Constraint | Limit |
-|------------|-------|
-| PlayerData per world per player | 100 KB |
+| Constraint                        | Limit  |
+| --------------------------------- | ------ |
+| PlayerData per world per player   | 100 KB |
 | PlayerObject per world per player | 100 KB |
 
 #### Cannot Save in OnPlayerLeft
@@ -1900,11 +1938,13 @@ private void AutoSave() { /* Called on timer */ }
 **Warning:** UdonSharp has always warned against nested prefabs, and in 1.x+ they can completely break.
 
 **Symptom:**
+
 ```
 Cannot upgrade scene behaviour 'SomethingOrOther' since its prefab must be upgraded
 ```
 
 **CE Guidance:**
+
 - Avoid nested prefabs containing UdonSharpBehaviours
 - If upgrading from 0.x: unpack nested prefabs first
 - CE prefabs should be flat (no nested U# prefabs)
@@ -1956,13 +1996,13 @@ All 1.2-beta1 features are included. Scripts should compile unchanged.
 
 CE maintains full backward compatibility:
 
-| Pattern | Works? |
-|---------|--------|
-| Old `foreach` loops | ✅ (with allocation) |
-| Old `list[i]` access | ✅ (with bounds check) |
-| Old `pool.Release(obj)` | ✅ (O(n) search) |
-| Old `[UdonSynced]` | ✅ |
-| Old `SendCustomNetworkEvent` | ✅ |
+| Pattern                      | Works?                 |
+| ---------------------------- | ---------------------- |
+| Old `foreach` loops          | ✅ (with allocation)   |
+| Old `list[i]` access         | ✅ (with bounds check) |
+| Old `pool.Release(obj)`      | ✅ (O(n) search)       |
+| Old `[UdonSynced]`           | ✅                     |
+| Old `SendCustomNetworkEvent` | ✅                     |
 
 New CE APIs are purely additive — no changes required to existing code.
 
@@ -2138,18 +2178,17 @@ TileData[] solution = solver.GetSolution();
 
 UdonSharpCE enables world types that are currently impractical or impossible with standard tools:
 
-| World Type | CE Features Used |
-|------------|------------------|
-| **Roguelike RPGs** | CE.Procgen (dungeons), CE.Persistence (saves), CE.Data (inventory) |
-| **RTS Games** | CE.Perf (ECS for units), CE.Net (sync), CE.Grid (spatial queries) |
-| **Story Experiences** | CE.Async (cutscenes), CE.Net (sync state) |
-| **Creation Tools** | CE.Data (models), CE.Persistence (saves), CE.GraphBridge |
-| **Competitive Games** | CE.Net (typed networking), CE.DevTools (debugging) |
-| **Persistent Worlds** | CE.Persistence (economy), CE.Data (complex state) |
+| World Type            | CE Features Used                                                   |
+| --------------------- | ------------------------------------------------------------------ |
+| **Roguelike RPGs**    | CE.Procgen (dungeons), CE.Persistence (saves), CE.Data (inventory) |
+| **RTS Games**         | CE.Perf (ECS for units), CE.Net (sync), CE.Grid (spatial queries)  |
+| **Story Experiences** | CE.Async (cutscenes), CE.Net (sync state)                          |
+| **Creation Tools**    | CE.Data (models), CE.Persistence (saves), CE.GraphBridge           |
+| **Competitive Games** | CE.Net (typed networking), CE.DevTools (debugging)                 |
+| **Persistent Worlds** | CE.Persistence (economy), CE.Data (complex state)                  |
 
 ---
 
 _UdonSharp Community Edition — Enabling the Next Generation of VRChat Experiences_
 
 _Document Version 1.0 — December 2025_
-

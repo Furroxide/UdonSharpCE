@@ -7,7 +7,7 @@ namespace UdonSharp.CE.Async
     /// Propagates notification that async operations should be canceled.
     /// </summary>
     /// <remarks>
-    /// Unlike .NET's CancellationToken, this is a simple struct that checks
+    /// Unlike .NET's CancellationToken (which is a struct), this is a class that checks
     /// a shared cancellation state. It cannot truly interrupt Udon execution,
     /// but allows async methods to check for cancellation at await points.
     ///
@@ -27,7 +27,7 @@ namespace UdonSharp.CE.Async
     ///     {
     ///         _cts = new CancellationTokenSource();
     ///
-    ///         for (int i = 0; i &lt; 100; i++)
+    ///         for (int i = 0; i < 100; i++)
     ///         {
     ///             if (_cts.Token.IsCancellationRequested)
     ///             {
@@ -48,7 +48,7 @@ namespace UdonSharp.CE.Async
     /// </code>
     /// </example>
     [PublicAPI]
-    public struct CancellationToken
+    public class CancellationToken
     {
         /// <summary>
         /// Internal reference to the source's cancellation state.
@@ -67,10 +67,31 @@ namespace UdonSharp.CE.Async
         public bool CanBeCanceled => _source != null;
 
         /// <summary>
+        /// Private singleton for None token.
+        /// </summary>
+        private static CancellationToken _none;
+
+        /// <summary>
         /// Returns a CancellationToken that cannot be canceled.
         /// Use this as a default when no cancellation is needed.
         /// </summary>
-        public static CancellationToken None => default;
+        public static CancellationToken None
+        {
+            get
+            {
+                if (_none == null)
+                    _none = new CancellationToken();
+                return _none;
+            }
+        }
+
+        /// <summary>
+        /// Creates a new CancellationToken (typically created by CancellationTokenSource).
+        /// </summary>
+        public CancellationToken()
+        {
+            _source = null;
+        }
 
         /// <summary>
         /// Throws if cancellation has been requested.
@@ -122,9 +143,25 @@ namespace UdonSharp.CE.Async
         public bool IsCancellationRequested => _isCanceled;
 
         /// <summary>
+        /// Cached token instance for this source.
+        /// </summary>
+        private CancellationToken _token;
+
+        /// <summary>
         /// Gets a CancellationToken associated with this source.
         /// </summary>
-        public CancellationToken Token => new CancellationToken { _source = this };
+        public CancellationToken Token
+        {
+            get
+            {
+                if (_token == null)
+                {
+                    _token = new CancellationToken();
+                    _token._source = this;
+                }
+                return _token;
+            }
+        }
 
         /// <summary>
         /// Communicates a request for cancellation.

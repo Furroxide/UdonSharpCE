@@ -112,6 +112,16 @@ namespace UdonSharp.CE.Perf
         private readonly int[] _pendingDestroyList;
         private int _pendingDestroyCount;
 
+        /// <summary>
+        /// Dense list of active entity IDs for O(activeCount) iteration.
+        /// </summary>
+        private readonly int[] _activeList;
+        
+        /// <summary>
+        /// Reverse mapping from entityId to index in _activeList (-1 if not active).
+        /// </summary>
+        private readonly int[] _entityToActiveIndex;
+
         #endregion
 
         #region Component Storage
@@ -137,7 +147,7 @@ namespace UdonSharp.CE.Perf
         #region System Storage
 
         /// <summary>
-        /// Registered system callbacks.
+        /// Registered system delegates.
         /// </summary>
         private readonly CECallback[] _systems;
 
@@ -180,6 +190,35 @@ namespace UdonSharp.CE.Perf
         /// </summary>
         public int ComponentTypeCount => _registeredComponentCount;
 
+        /// <summary>
+        /// Gets the number of entities pending destruction.
+        /// Useful for debugging or deciding whether to call FlushPendingDestructions().
+        /// </summary>
+        public int PendingDestroyCount => _pendingDestroyCount;
+
+        /// <summary>
+        /// Gets the number of available entity slots (free list + unallocated).
+        /// </summary>
+        public int AvailableEntitySlots => _freeListCount + (_maxEntities - _nextEntitySlot);
+
+        /// <summary>
+        /// Gets the dense array of active entity IDs for O(activeCount) iteration.
+        /// Use with <see cref="ActiveEntityCount"/> for bounds. Do not modify this array.
+        /// </summary>
+        /// <remarks>
+        /// This enables efficient iteration patterns:
+        /// <code>
+        /// int[] active = world.ActiveEntities;
+        /// int count = world.ActiveEntityCount;
+        /// for (int i = 0; i &lt; count; i++)
+        /// {
+        ///     int entityId = active[i];
+        ///     // Process entity - no validity check needed
+        /// }
+        /// </code>
+        /// </remarks>
+        public int[] ActiveEntities => _activeList;
+
         #endregion
 
         #region Constructor
@@ -205,6 +244,14 @@ namespace UdonSharp.CE.Perf
             _pendingDestroyCount = 0;
             _activeEntityCount = 0;
             _nextEntitySlot = 0;
+            
+            // Dense active entity list for O(activeCount) iteration
+            _activeList = new int[maxEntities];
+            _entityToActiveIndex = new int[maxEntities];
+            for (int i = 0; i < maxEntities; i++)
+            {
+                _entityToActiveIndex[i] = -1;
+            }
 
             // Component storage
             _componentArrays = new object[MaxComponentTypes];
@@ -252,23 +299,74 @@ namespace UdonSharp.CE.Perf
 
             _entityStates[entityId] = EntityState.Active;
             _componentMasks[entityId] = 0;
+            
+            // Add to dense active list
+            _entityToActiveIndex[entityId] = _activeEntityCount;
+            _activeList[_activeEntityCount] = entityId;
             _activeEntityCount++;
 
             return entityId;
         }
 
         /// <summary>
-        /// Destroys an entity and clears its component data.
+        /// Attempts to create a new entity without logging errors on failure.
+        /// Useful for high-frequency spawning where capacity limits are expected.
+        /// </summary>
+        /// <param name="entityId">The created entity ID, or InvalidEntity if creation failed.</param>
+        /// <returns>True if the entity was created successfully.</returns>
+        public bool TryCreateEntity(out int entityId)
+        {
+            // Try to reuse from free list first
+            if (_freeListCount > 0)
+            {
+                _freeListCount--;
+                entityId = _freeList[_freeListCount];
+            }
+            else if (_nextEntitySlot < _maxEntities)
+            {
+                entityId = _nextEntitySlot;
+                _nextEntitySlot++;
+            }
+            else
+            {
+                entityId = InvalidEntity;
+                return false;
+            }
+
+            _entityStates[entityId] = EntityState.Active;
+            _componentMasks[entityId] = 0;
+            
+            // Add to dense active list
+            _entityToActiveIndex[entityId] = _activeEntityCount;
+            _activeList[_activeEntityCount] = entityId;
+            _activeEntityCount++;
+
+            return true;
+        }
+
+        /// <summary>
+        /// Destroys an entity immediately and clears its component data.
+        /// Works for Active, Disabled, and PendingDestroy entities.
+        /// The entity ID is recycled and may be reused by future CreateEntity calls.
         /// </summary>
         /// <param name="entityId">The entity to destroy.</param>
-        public void DestroyEntity(int entityId)
+        /// <returns>True if the entity was destroyed, false if already free or invalid.</returns>
+        public bool DestroyEntity(int entityId)
         {
-            if (!IsValidEntity(entityId)) return;
+            if (entityId < 0 || entityId >= _maxEntities) return false;
+            
+            EntityState currentState = _entityStates[entityId];
+            if (currentState == EntityState.Free) return false;
+
+            // Remove from dense active list if was Active
+            if (currentState == EntityState.Active)
+            {
+                RemoveFromActiveList(entityId);
+            }
 
             _entityStates[entityId] = EntityState.Free;
             _entityVersions[entityId]++;
             _componentMasks[entityId] = 0;
-            _activeEntityCount--;
 
             // Add to free list for reuse
             if (_freeListCount < _freeList.Length)
@@ -276,16 +374,32 @@ namespace UdonSharp.CE.Perf
                 _freeList[_freeListCount] = entityId;
                 _freeListCount++;
             }
+            
+            return true;
         }
 
         /// <summary>
         /// Marks an entity for destruction at the end of the current tick.
         /// Safer than immediate destruction during system iteration.
+        /// Idempotent: calling multiple times on the same entity has no additional effect.
         /// </summary>
         /// <param name="entityId">The entity to destroy.</param>
-        public void DestroyEntityDeferred(int entityId)
+        /// <returns>True if the entity was marked for destruction, false if already pending or invalid.</returns>
+        public bool DestroyEntityDeferred(int entityId)
         {
-            if (!IsValidEntity(entityId)) return;
+            if (entityId < 0 || entityId >= _maxEntities) return false;
+            
+            EntityState currentState = _entityStates[entityId];
+            
+            // Already pending - idempotent, no duplicate entries
+            if (currentState == EntityState.PendingDestroy) return false;
+            
+            // Only active entities can be deferred (disabled entities should be enabled first or destroyed immediately)
+            if (currentState != EntityState.Active) return false;
+            
+            // Remove from dense active list
+            RemoveFromActiveList(entityId);
+            
             _entityStates[entityId] = EntityState.PendingDestroy;
             
             // Add to pending destroy list for O(1) processing
@@ -294,33 +408,84 @@ namespace UdonSharp.CE.Perf
                 _pendingDestroyList[_pendingDestroyCount] = entityId;
                 _pendingDestroyCount++;
             }
+            
+            return true;
         }
 
         /// <summary>
         /// Enables a previously disabled entity.
         /// </summary>
         /// <param name="entityId">The entity to enable.</param>
-        public void EnableEntity(int entityId)
+        /// <returns>True if the entity was enabled, false if not disabled or invalid.</returns>
+        public bool EnableEntity(int entityId)
         {
-            if (entityId < 0 || entityId >= _maxEntities) return;
+            if (entityId < 0 || entityId >= _maxEntities) return false;
             if (_entityStates[entityId] == EntityState.Disabled)
             {
                 _entityStates[entityId] = EntityState.Active;
+                
+                // Add to dense active list
+                _entityToActiveIndex[entityId] = _activeEntityCount;
+                _activeList[_activeEntityCount] = entityId;
+                _activeEntityCount++;
+                
+                return true;
             }
+            return false;
         }
 
         /// <summary>
         /// Disables an entity. Disabled entities are skipped by systems but retain components.
+        /// Can also be used to cancel a pending destruction (changes PendingDestroy to Disabled).
         /// </summary>
         /// <param name="entityId">The entity to disable.</param>
-        public void DisableEntity(int entityId)
+        /// <returns>True if the entity was disabled, false if invalid or already free.</returns>
+        public bool DisableEntity(int entityId)
         {
-            if (!IsValidEntity(entityId)) return;
-            _entityStates[entityId] = EntityState.Disabled;
+            if (entityId < 0 || entityId >= _maxEntities) return false;
+            
+            EntityState state = _entityStates[entityId];
+            if (state == EntityState.Active)
+            {
+                // Remove from dense active list
+                RemoveFromActiveList(entityId);
+                _entityStates[entityId] = EntityState.Disabled;
+                return true;
+            }
+            if (state == EntityState.PendingDestroy)
+            {
+                // PendingDestroy entities are already removed from dense list
+                _entityStates[entityId] = EntityState.Disabled;
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Cancels a pending destruction, restoring the entity to Active state.
+        /// </summary>
+        /// <param name="entityId">The entity to restore.</param>
+        /// <returns>True if the entity was restored, false if not pending destruction.</returns>
+        public bool CancelDestruction(int entityId)
+        {
+            if (entityId < 0 || entityId >= _maxEntities) return false;
+            if (_entityStates[entityId] == EntityState.PendingDestroy)
+            {
+                _entityStates[entityId] = EntityState.Active;
+                
+                // Add back to dense active list
+                _entityToActiveIndex[entityId] = _activeEntityCount;
+                _activeList[_activeEntityCount] = entityId;
+                _activeEntityCount++;
+                
+                return true;
+            }
+            return false;
         }
 
         /// <summary>
         /// Checks if an entity ID is valid and active.
+        /// Use this for normal gameplay checks where you want to skip disabled/pending entities.
         /// </summary>
         /// <param name="entityId">The entity to check.</param>
         /// <returns>True if the entity exists and is active.</returns>
@@ -329,6 +494,42 @@ namespace UdonSharp.CE.Perf
             return entityId >= 0 &&
                    entityId < _maxEntities &&
                    _entityStates[entityId] == EntityState.Active;
+        }
+
+        /// <summary>
+        /// Checks if an entity exists and is alive (Active or Disabled, but not Free or PendingDestroy).
+        /// Use this when you need to access component data regardless of enabled state.
+        /// </summary>
+        /// <param name="entityId">The entity to check.</param>
+        /// <returns>True if the entity is alive.</returns>
+        public bool IsEntityAlive(int entityId)
+        {
+            if (entityId < 0 || entityId >= _maxEntities) return false;
+            EntityState state = _entityStates[entityId];
+            return state == EntityState.Active || state == EntityState.Disabled;
+        }
+
+        /// <summary>
+        /// Checks if an entity exists in any non-free state (Active, Disabled, or PendingDestroy).
+        /// Use this for cleanup operations where you need to handle all existing entities.
+        /// </summary>
+        /// <param name="entityId">The entity to check.</param>
+        /// <returns>True if the entity exists.</returns>
+        public bool EntityExists(int entityId)
+        {
+            if (entityId < 0 || entityId >= _maxEntities) return false;
+            return _entityStates[entityId] != EntityState.Free;
+        }
+
+        /// <summary>
+        /// Checks if an entity is pending destruction.
+        /// </summary>
+        /// <param name="entityId">The entity to check.</param>
+        /// <returns>True if the entity is marked for deferred destruction.</returns>
+        public bool IsPendingDestroy(int entityId)
+        {
+            if (entityId < 0 || entityId >= _maxEntities) return false;
+            return _entityStates[entityId] == EntityState.PendingDestroy;
         }
 
         /// <summary>
@@ -410,37 +611,40 @@ namespace UdonSharp.CE.Perf
 
         /// <summary>
         /// Checks if an entity has a specific component.
+        /// Works for Active and Disabled entities.
         /// </summary>
         /// <param name="entityId">The entity ID.</param>
         /// <param name="componentSlot">The component slot index.</param>
         /// <returns>True if the entity has the component.</returns>
         public bool HasComponent(int entityId, int componentSlot)
         {
-            if (!IsValidEntity(entityId)) return false;
+            if (!IsEntityAlive(entityId)) return false;
             if (componentSlot < 0 || componentSlot >= MaxComponentTypes) return false;
             return (_componentMasks[entityId] & (1 << componentSlot)) != 0;
         }
 
         /// <summary>
         /// Adds a component to an entity (sets the component mask bit).
+        /// Works for Active and Disabled entities.
         /// </summary>
         /// <param name="entityId">The entity ID.</param>
         /// <param name="componentSlot">The component slot index.</param>
         public void AddComponent(int entityId, int componentSlot)
         {
-            if (!IsValidEntity(entityId)) return;
+            if (!IsEntityAlive(entityId)) return;
             if (componentSlot < 0 || componentSlot >= MaxComponentTypes) return;
             _componentMasks[entityId] |= (1 << componentSlot);
         }
 
         /// <summary>
         /// Removes a component from an entity (clears the component mask bit).
+        /// Works for Active and Disabled entities.
         /// </summary>
         /// <param name="entityId">The entity ID.</param>
         /// <param name="componentSlot">The component slot index.</param>
         public void RemoveComponent(int entityId, int componentSlot)
         {
-            if (!IsValidEntity(entityId)) return;
+            if (!IsEntityAlive(entityId)) return;
             if (componentSlot < 0 || componentSlot >= MaxComponentTypes) return;
             _componentMasks[entityId] &= ~(1 << componentSlot);
         }
@@ -597,32 +801,47 @@ namespace UdonSharp.CE.Perf
             }
 
             // Process deferred destructions
-            ProcessPendingDestructions();
+            ProcessPendingDestructionsInternal();
+        }
+
+        /// <summary>
+        /// Processes all entities marked for deferred destruction immediately.
+        /// Call this if you're not using Tick() but want to finalize pending destructions.
+        /// Safe to call even when no entities are pending (O(1) early exit).
+        /// </summary>
+        /// <returns>The number of entities that were destroyed.</returns>
+        public int FlushPendingDestructions()
+        {
+            return ProcessPendingDestructionsInternal();
         }
 
         /// <summary>
         /// Processes entities marked for deferred destruction.
         /// O(1) check when no entities pending, O(k) where k = pending count.
         /// </summary>
-        private void ProcessPendingDestructions()
+        /// <returns>The number of entities destroyed.</returns>
+        private int ProcessPendingDestructionsInternal()
         {
             // Early exit - common case when no entities pending
-            if (_pendingDestroyCount == 0) return;
+            if (_pendingDestroyCount == 0) return 0;
             
             int pendingCount = _pendingDestroyCount;
             int[] pendingList = _pendingDestroyList;
+            int destroyedCount = 0;
             
             for (int i = 0; i < pendingCount; i++)
             {
                 int entityId = pendingList[i];
                 
-                // Verify entity is still pending (could have been destroyed immediately)
+                // Verify entity is still pending (could have been destroyed immediately via DestroyEntity
+                // or cancelled via CancelDestruction/DisableEntity)
                 if (_entityStates[entityId] == EntityState.PendingDestroy)
                 {
                     _entityStates[entityId] = EntityState.Free;
                     _entityVersions[entityId]++;
                     _componentMasks[entityId] = 0;
-                    _activeEntityCount--;
+                    // Note: _activeEntityCount was already decremented when entity was marked PendingDestroy
+                    destroyedCount++;
 
                     if (_freeListCount < _freeList.Length)
                     {
@@ -633,6 +852,7 @@ namespace UdonSharp.CE.Perf
             }
             
             _pendingDestroyCount = 0;
+            return destroyedCount;
         }
 
         /// <summary>
@@ -676,6 +896,7 @@ namespace UdonSharp.CE.Perf
             {
                 _entityStates[i] = EntityState.Free;
                 _componentMasks[i] = 0;
+                _entityToActiveIndex[i] = -1;
             }
 
             _activeEntityCount = 0;
@@ -700,8 +921,36 @@ namespace UdonSharp.CE.Perf
         
         #endregion
         
+        #region Private Helpers
+        
         /// <summary>
-        /// Gets all active entity IDs.
+        /// Removes an entity from the dense active list using swap-remove.
+        /// O(1) operation. Also decrements _activeEntityCount.
+        /// </summary>
+        /// <param name="entityId">The entity to remove.</param>
+        private void RemoveFromActiveList(int entityId)
+        {
+            int activeIdx = _entityToActiveIndex[entityId];
+            if (activeIdx < 0) return; // Not in active list
+            
+            _activeEntityCount--;
+            
+            // If not the last element, swap with last
+            if (activeIdx < _activeEntityCount)
+            {
+                int lastEntityId = _activeList[_activeEntityCount];
+                _activeList[activeIdx] = lastEntityId;
+                _entityToActiveIndex[lastEntityId] = activeIdx;
+            }
+            
+            _entityToActiveIndex[entityId] = -1;
+        }
+        
+        #endregion
+        
+        /// <summary>
+        /// Gets all active entity IDs by copying from the dense active list.
+        /// For zero-copy iteration, use <see cref="ActiveEntities"/> with <see cref="ActiveEntityCount"/> instead.
         /// </summary>
         /// <param name="result">Array to fill with entity IDs.</param>
         /// <returns>Number of entities written to result.</returns>
@@ -709,33 +958,29 @@ namespace UdonSharp.CE.Perf
         {
             if (result == null) return 0;
 
-            int count = 0;
-            int maxCount = result.Length;
-
-            for (int i = 0; i < _maxEntities && count < maxCount; i++)
+            int copyCount = _activeEntityCount < result.Length ? _activeEntityCount : result.Length;
+            for (int i = 0; i < copyCount; i++)
             {
-                if (_entityStates[i] == EntityState.Active)
-                {
-                    result[count] = i;
-                    count++;
-                }
+                result[i] = _activeList[i];
             }
 
-            return count;
+            return copyCount;
         }
 
         /// <summary>
         /// Counts entities matching a component mask.
+        /// Uses dense active list for O(activeCount) iteration.
         /// </summary>
         /// <param name="requiredMask">Bitmask of required components.</param>
         /// <returns>Number of matching entities.</returns>
         public int CountEntitiesWithMask(int requiredMask)
         {
             int count = 0;
-            for (int i = 0; i < _maxEntities; i++)
+            int activeCount = _activeEntityCount;
+            for (int i = 0; i < activeCount; i++)
             {
-                if (_entityStates[i] == EntityState.Active &&
-                    (_componentMasks[i] & requiredMask) == requiredMask)
+                int entityId = _activeList[i];
+                if ((_componentMasks[entityId] & requiredMask) == requiredMask)
                 {
                     count++;
                 }
@@ -745,6 +990,7 @@ namespace UdonSharp.CE.Perf
 
         /// <summary>
         /// Gets entities matching a component mask.
+        /// Uses dense active list for O(activeCount) iteration.
         /// </summary>
         /// <param name="requiredMask">Bitmask of required components.</param>
         /// <param name="result">Array to fill with matching entity IDs.</param>
@@ -755,13 +1001,14 @@ namespace UdonSharp.CE.Perf
 
             int count = 0;
             int maxCount = result.Length;
+            int activeCount = _activeEntityCount;
 
-            for (int i = 0; i < _maxEntities && count < maxCount; i++)
+            for (int i = 0; i < activeCount && count < maxCount; i++)
             {
-                if (_entityStates[i] == EntityState.Active &&
-                    (_componentMasks[i] & requiredMask) == requiredMask)
+                int entityId = _activeList[i];
+                if ((_componentMasks[entityId] & requiredMask) == requiredMask)
                 {
-                    result[count] = i;
+                    result[count] = entityId;
                     count++;
                 }
             }

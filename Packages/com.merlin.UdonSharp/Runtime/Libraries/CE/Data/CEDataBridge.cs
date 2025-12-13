@@ -22,7 +22,7 @@ namespace UdonSharp.CE.Data
     /// <summary>
     /// Central API for data model registration and conversion.
     ///
-    /// In Phase 1, models must be manually registered using Register&lt;T&gt;().
+    /// In Phase 1, models must be manually registered using Register{T}().
     /// Future phases will support automatic registration via source generation.
     /// </summary>
     /// <example>
@@ -38,7 +38,7 @@ namespace UdonSharp.CE.Data
     /// // Register in Start() or Awake()
     /// void Start()
     /// {
-    ///     CEDataBridge.Register&lt;PlayerData&gt;(
+    ///     CEDataBridge.Register<PlayerData>(
     ///         toData: p => {
     ///             var d = new DataDictionary();
     ///             d["name"] = p.playerName;
@@ -56,7 +56,7 @@ namespace UdonSharp.CE.Data
     /// PlayerData data = new PlayerData { playerName = "Alice", score = 100 };
     /// DataDictionary dict = CEDataBridge.ToData(data);
     /// string json = CEDataBridge.ToJson(data);
-    /// PlayerData restored = CEDataBridge.FromJson&lt;PlayerData&gt;(json);
+    /// PlayerData restored = CEDataBridge.FromJson<PlayerData>(json);
     /// </code>
     /// </example>
     public static class CEDataBridge
@@ -103,7 +103,7 @@ namespace UdonSharp.CE.Data
 
         /// <summary>
         /// Converts a data model instance to a DataDictionary.
-        /// The type must be registered via Register&lt;T&gt;() first.
+        /// The type must be registered via Register{T}() first.
         /// </summary>
         public static DataDictionary ToData<T>(T model)
         {
@@ -124,7 +124,7 @@ namespace UdonSharp.CE.Data
 
         /// <summary>
         /// Converts a DataDictionary to a data model instance.
-        /// The type must be registered via Register&lt;T&gt;() first.
+        /// The type must be registered via Register{T}() first.
         /// </summary>
         public static T FromData<T>(DataDictionary data)
         {
@@ -149,7 +149,7 @@ namespace UdonSharp.CE.Data
 
         /// <summary>
         /// Serializes a data model to a JSON string.
-        /// The type must be registered via Register&lt;T&gt;() first.
+        /// The type must be registered via Register{T}() first.
         /// </summary>
         public static string ToJson<T>(T model)
         {
@@ -181,7 +181,7 @@ namespace UdonSharp.CE.Data
 
         /// <summary>
         /// Deserializes a JSON string to a data model.
-        /// The type must be registered via Register&lt;T&gt;() first.
+        /// The type must be registered via Register{T}() first.
         /// </summary>
         public static T FromJson<T>(string json)
         {

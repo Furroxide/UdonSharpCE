@@ -31,7 +31,7 @@ namespace UdonSharp.CE.Perf
     ///     private void MovementSystem(int count, Vector3[] positions, Vector3[] velocities)
     ///     {
     ///         float dt = Time.deltaTime;
-    ///         for (int i = 0; i &lt; count; i++)
+    ///         for (int i = 0; i < count; i++)
     ///         {
     ///             positions[i] += velocities[i] * dt;
     ///         }
@@ -40,7 +40,7 @@ namespace UdonSharp.CE.Perf
     ///     [CESystem(Order = 100)]
     ///     private void BoundsCheckSystem(int count, Vector3[] positions, bool[] alive)
     ///     {
-    ///         for (int i = 0; i &lt; count; i++)
+    ///         for (int i = 0; i < count; i++)
     ///         {
     ///             if (positions[i].magnitude > 1000f)
     ///             {

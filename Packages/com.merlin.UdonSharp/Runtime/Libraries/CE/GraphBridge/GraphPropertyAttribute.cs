@@ -176,7 +176,7 @@ namespace UdonSharp.CE.GraphBridge
     /// <example>
     /// <code>
     /// [GraphNode("Array/Get Element")]
-    /// public static T GetElement&lt;T&gt;(
+    /// public static T GetElement<T>(
     ///     [GraphInput][GraphTypeConstraint(typeof(int), typeof(float), typeof(string))] T[] array,
     ///     [GraphInput] int index)
     /// {

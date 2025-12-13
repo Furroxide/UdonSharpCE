@@ -7,7 +7,7 @@ namespace UdonSharp.CE.Data
     /// Marks a class as a data model that can be serialized to/from VRChat DataDictionary.
     ///
     /// In Phase 1, this attribute serves as documentation and must be paired with manual
-    /// registration via CEDataBridge.Register&lt;T&gt;().
+    /// registration via CEDataBridge.Register{T}().
     ///
     /// Future phases will support automatic code generation for conversion methods.
     /// </summary>
@@ -22,15 +22,15 @@ namespace UdonSharp.CE.Data
     /// }
     ///
     /// // Manual registration (Phase 1):
-    /// CEDataBridge.Register&lt;InventoryItem&gt;(
-    ///     toData: item =&gt; {
+    /// CEDataBridge.Register<InventoryItem>(
+    ///     toData: item => {
     ///         var d = new DataDictionary();
     ///         d["id"] = item.itemId;
     ///         d["qty"] = item.quantity;
     ///         d["name"] = item.itemName;
     ///         return d;
     ///     },
-    ///     fromData: d =&gt; new InventoryItem {
+    ///     fromData: d => new InventoryItem {
     ///         itemId = d["id"].Int,
     ///         quantity = d["qty"].Int,
     ///         itemName = d["name"].String

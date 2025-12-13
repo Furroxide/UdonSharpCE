@@ -13,7 +13,7 @@ namespace UdonSharp.CE.Editor.Optimizers
     internal interface ICompileTimeOptimizer
     {
         /// <summary>
-        /// Unique identifier for this optimizer (e.g., "CEOPT001").
+        /// Unique identifier for this optimizer (e.g., "CEOPT003").
         /// Used for filtering, documentation, and reports.
         /// </summary>
         string OptimizerId { get; }
@@ -36,8 +36,8 @@ namespace UdonSharp.CE.Editor.Optimizers
 
         /// <summary>
         /// Priority for execution order. Lower values run first.
-        /// Use 0-99 for early optimizations (constant folding),
-        /// 100-199 for standard optimizations (dead code elimination),
+        /// Use 0-99 for early transformations (async/await, callbacks),
+        /// 100-199 for standard optimizations (loop unrolling, CSE),
         /// 200+ for late optimizations (string interning).
         /// </summary>
         int Priority { get; }

@@ -41,7 +41,7 @@ namespace UdonSharp.CE.Perf
     ///         Vector3 playerPos = localPlayer.GetPosition();
     ///         lod.Update(Time.frameCount);
     ///
-    ///         for (int i = 0; i &lt; enemyCount; i++)
+    ///         for (int i = 0; i < enemyCount; i++)
     ///         {
     ///             if (lod.ShouldUpdate(playerPos, positions[i]))
     ///             {

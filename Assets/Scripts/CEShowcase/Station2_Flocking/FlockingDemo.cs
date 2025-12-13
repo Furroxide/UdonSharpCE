@@ -19,6 +19,9 @@ namespace CEShowcase.Station2_Flocking
         [SerializeField] private int _maxAgents = 500;
         [SerializeField] private int _initialAgents = 200;
         
+        [Header("Visual Settings")]
+        [SerializeField] private float _agentScale = 0.5f;
+        
         [Header("Arena Bounds")]
         [SerializeField] private Vector3 _arenaMin = new Vector3(-25, 0, -25);
         [SerializeField] private Vector3 _arenaMax = new Vector3(25, 5, 25);
@@ -45,6 +48,15 @@ namespace CEShowcase.Station2_Flocking
         [SerializeField] private Color _flockingColor = Color.green;
         [SerializeField] private Color _fleeingColor = Color.red;
         
+        [Header("Wandering Behavior")]
+        [SerializeField] private float _wanderStrength = 0.5f;
+        [SerializeField] private float _wanderFrequency = 2f;
+        [SerializeField] private float _targetHeight = 2.5f;
+        [SerializeField] private float _heightCorrectionStrength = 1f;
+        
+        [Header("State Balance")]
+        [SerializeField] private float _minStateRatio = 0.15f; // Minimum 15% for each state
+        
         // ECS World
         private CEWorld _world;
         private CEGrid _spatialGrid;
@@ -63,10 +75,18 @@ namespace CEShowcase.Station2_Flocking
         // Query buffers
         private int[] _nearbyBuffer;
         
+        // Cached MaterialPropertyBlock to avoid GC allocations
+        private MaterialPropertyBlock _materialPropertyBlock;
+        
         // Stats
         private int _activeAgents;
         private int _neighborQueriesThisFrame;
         private float _avgQueryTime;
+        
+        // Adaptive thresholds for state balance
+        private float _adaptiveFlockThreshold = 2f;
+        private int _lastIdleCount;
+        private int _lastFlockingCount;
         
         // Component slots
         private const int SLOT_POSITION = 0;
@@ -122,17 +142,26 @@ namespace CEShowcase.Station2_Flocking
         {
             _agentTransforms = new Transform[_maxAgents];
             _agentRenderers = new Renderer[_maxAgents];
+            _materialPropertyBlock = new MaterialPropertyBlock();
+            
+            if (_agentPrefab == null)
+            {
+                CELogger.Error("Flocking", "Agent prefab is required! Assign a prefab in the inspector.");
+                return;
+            }
             
             for (int i = 0; i < _maxAgents; i++)
             {
-                if (_agentPrefab != null)
-                {
-                    GameObject agent = Instantiate(_agentPrefab, _agentParent);
-                    agent.SetActive(false);
-                    _agentTransforms[i] = agent.transform;
-                    _agentRenderers[i] = agent.GetComponentInChildren<Renderer>();
-                }
+                GameObject agent = Instantiate(_agentPrefab, _agentParent);
+                agent.transform.localScale = Vector3.one * _agentScale;
+                agent.name = $"Agent_{i}";
+                
+                agent.SetActive(false);
+                _agentTransforms[i] = agent.transform;
+                _agentRenderers[i] = agent.GetComponentInChildren<Renderer>();
             }
+            
+            CELogger.Debug("Flocking", $"Agent pool initialized: {_maxAgents} agents");
         }
         
         private void SpawnInitialAgents()
@@ -165,16 +194,15 @@ namespace CEShowcase.Station2_Flocking
             
             _entityToAgent[entityId] = agentIndex;
             
-            // Random position in arena
+            // Random position in arena, spawn near target height
             Vector3 pos = new Vector3(
                 Random.Range(_arenaMin.x + 2, _arenaMax.x - 2),
-                Random.Range(_arenaMin.y, _arenaMax.y),
+                _targetHeight + Random.Range(-1f, 1f),
                 Random.Range(_arenaMin.z + 2, _arenaMax.z - 2)
             );
             
-            // Random initial velocity
+            // Random initial velocity (including Y for vertical mixing)
             Vector3 vel = Random.insideUnitSphere * _maxSpeed * 0.5f;
-            vel.y = 0;
             
             _positions[entityId] = pos;
             _velocities[entityId] = vel;
@@ -198,6 +226,9 @@ namespace CEShowcase.Station2_Flocking
             
             _neighborQueriesThisFrame = 0;
             float queryStartTime = Time.realtimeSinceStartup;
+            
+            // Update adaptive thresholds based on last frame's state distribution
+            UpdateAdaptiveThresholds();
             
             // Rebuild spatial grid
             RebuildGrid();
@@ -234,23 +265,47 @@ namespace CEShowcase.Station2_Flocking
         {
             _spatialGrid.Clear();
             
-            int maxEntities = _world.MaxEntities;
-            for (int i = 0; i < maxEntities; i++)
+            // Use dense active list for O(activeCount) iteration
+            int[] activeEntities = _world.ActiveEntities;
+            int activeCount = _world.ActiveEntityCount;
+            for (int i = 0; i < activeCount; i++)
             {
-                if (_world.IsValidEntity(i))
-                {
-                    _spatialGrid.Insert(i, _positions[i]);
-                }
+                int entityId = activeEntities[i];
+                _spatialGrid.Insert(entityId, _positions[entityId]);
             }
+        }
+        
+        private void UpdateAdaptiveThresholds()
+        {
+            int total = _world.ActiveEntityCount;
+            if (total < 10) return;
+            
+            float idleRatio = (float)_lastIdleCount / total;
+            float flockingRatio = (float)_lastFlockingCount / total;
+            
+            // If idle (blue) is too low, make it easier to become idle
+            if (idleRatio < _minStateRatio)
+                _adaptiveFlockThreshold += 0.1f; // Require more neighbors to flock
+            else if (idleRatio > 0.5f)
+                _adaptiveFlockThreshold -= 0.1f; // Require fewer neighbors
+            
+            // If flocking (green) is too low, make it easier to flock
+            if (flockingRatio < _minStateRatio)
+                _adaptiveFlockThreshold -= 0.05f;
+            
+            // Clamp to reasonable range
+            _adaptiveFlockThreshold = Mathf.Clamp(_adaptiveFlockThreshold, 1f, 8f);
         }
         
         private void UpdateFlockingSystem(float dt, Vector3 playerPos)
         {
-            int maxEntities = _world.MaxEntities;
+            // Use dense active list for O(activeCount) iteration
+            int[] activeEntities = _world.ActiveEntities;
+            int activeCount = _world.ActiveEntityCount;
             
-            for (int i = 0; i < maxEntities; i++)
+            for (int idx = 0; idx < activeCount; idx++)
             {
-                if (!_world.IsValidEntity(i)) continue;
+                int i = activeEntities[idx];
                 
                 Vector3 pos = _positions[i];
                 Vector3 vel = _velocities[i];
@@ -311,9 +366,23 @@ namespace CEShowcase.Station2_Flocking
                     steer += cohesionDir * _cohesionWeight;
                 }
                 
+                // Wandering force using Perlin noise for smooth random movement
+                float wanderTime = Time.time * _wanderFrequency;
+                Vector3 wander = new Vector3(
+                    Mathf.PerlinNoise(i * 0.1f, wanderTime) - 0.5f,
+                    Mathf.PerlinNoise(wanderTime, i * 0.1f) - 0.5f,
+                    Mathf.PerlinNoise(i * 0.2f + 100, wanderTime) - 0.5f
+                ) * _wanderStrength * 2f;
+                steer += wander;
+                
+                // Height correction - gently pull toward target height
+                float heightDiff = _targetHeight - pos.y;
+                steer.y += heightDiff * _heightCorrectionStrength;
+                
                 // Player flee behavior
                 float playerDist = Vector3.Distance(pos, playerPos);
                 int newState = STATE_IDLE;
+                float speed = vel.magnitude;
                 
                 if (playerDist < _fleeRadius)
                 {
@@ -321,8 +390,9 @@ namespace CEShowcase.Station2_Flocking
                     steer += fleeDir * _fleeStrength * (1f - playerDist / _fleeRadius);
                     newState = STATE_FLEEING;
                 }
-                else if (flockCount > 2)
+                else if (flockCount > _adaptiveFlockThreshold && speed > _maxSpeed * 0.1f)
                 {
+                    // Only "flocking" if actually moving with the group
                     newState = STATE_FLOCKING;
                 }
                 
@@ -335,16 +405,24 @@ namespace CEShowcase.Station2_Flocking
                     _velocities[i] += steer * dt;
                     _velocities[i] = Vector3.ClampMagnitude(_velocities[i], _maxSpeed);
                 }
+                
+                // Ensure minimum speed to prevent complete stops
+                if (_velocities[i].sqrMagnitude < 0.5f)
+                {
+                    _velocities[i] += Random.insideUnitSphere * 0.5f;
+                }
             }
         }
         
         private void UpdateMovementSystem(float dt)
         {
-            int maxEntities = _world.MaxEntities;
+            // Use dense active list for O(activeCount) iteration
+            int[] activeEntities = _world.ActiveEntities;
+            int activeCount = _world.ActiveEntityCount;
             
-            for (int i = 0; i < maxEntities; i++)
+            for (int idx = 0; idx < activeCount; idx++)
             {
-                if (!_world.IsValidEntity(i)) continue;
+                int i = activeEntities[idx];
                 
                 _positions[i] += _velocities[i] * dt;
                 
@@ -357,11 +435,13 @@ namespace CEShowcase.Station2_Flocking
         
         private void UpdateBoundsSystem()
         {
-            int maxEntities = _world.MaxEntities;
+            // Use dense active list for O(activeCount) iteration
+            int[] activeEntities = _world.ActiveEntities;
+            int activeCount = _world.ActiveEntityCount;
             
-            for (int i = 0; i < maxEntities; i++)
+            for (int idx = 0; idx < activeCount; idx++)
             {
-                if (!_world.IsValidEntity(i)) continue;
+                int i = activeEntities[idx];
                 
                 Vector3 pos = _positions[i];
                 Vector3 vel = _velocities[i];
@@ -385,11 +465,13 @@ namespace CEShowcase.Station2_Flocking
         
         private void SyncTransforms()
         {
-            int maxEntities = _world.MaxEntities;
+            // Use dense active list for O(activeCount) iteration
+            int[] activeEntities = _world.ActiveEntities;
+            int activeCount = _world.ActiveEntityCount;
             
-            for (int i = 0; i < maxEntities; i++)
+            for (int idx = 0; idx < activeCount; idx++)
             {
-                if (!_world.IsValidEntity(i)) continue;
+                int i = activeEntities[idx];
                 
                 int agentIndex = _entityToAgent[i];
                 if (agentIndex < 0) continue;
@@ -418,24 +500,25 @@ namespace CEShowcase.Station2_Flocking
                         default: c = _idleColor; break;
                     }
                     
-                    MaterialPropertyBlock block = new MaterialPropertyBlock();
-                    r.GetPropertyBlock(block);
-                    block.SetColor("_Color", c);
-                    r.SetPropertyBlock(block);
+                    // Reuse cached MaterialPropertyBlock to avoid GC allocations
+                    r.GetPropertyBlock(_materialPropertyBlock);
+                    _materialPropertyBlock.SetColor("_Color", c);
+                    r.SetPropertyBlock(_materialPropertyBlock);
                 }
             }
         }
         
         private void UpdateStats()
         {
-            if (_statsText == null) return;
-            
             int idleCount = 0, flockingCount = 0, fleeingCount = 0;
-            int maxEntities = _world.MaxEntities;
             
-            for (int i = 0; i < maxEntities; i++)
+            // Use dense active list for O(activeCount) iteration
+            int[] activeEntities = _world.ActiveEntities;
+            int activeCount = _world.ActiveEntityCount;
+            
+            for (int idx = 0; idx < activeCount; idx++)
             {
-                if (!_world.IsValidEntity(i)) continue;
+                int i = activeEntities[idx];
                 
                 switch (_states[i])
                 {
@@ -444,6 +527,12 @@ namespace CEShowcase.Station2_Flocking
                     case STATE_FLEEING: fleeingCount++; break;
                 }
             }
+            
+            // Store counts for adaptive threshold calculation next frame
+            _lastIdleCount = idleCount;
+            _lastFlockingCount = flockingCount;
+            
+            if (_statsText == null) return;
             
             _statsText.text = $"<b>FLOCKING METRICS</b>\n" +
                              $"Agents: <color=#00FF00>{_world.ActiveEntityCount}</color>\n" +
@@ -466,23 +555,27 @@ namespace CEShowcase.Station2_Flocking
         public void RemoveAgents()
         {
             int removed = 0;
-            int maxEntities = _world.MaxEntities;
             
-            for (int i = 0; i < maxEntities && removed < 50; i++)
+            // Use dense active list - but we need to be careful when removing!
+            // Iterate backwards or copy the list since we're modifying it
+            int activeCount = _world.ActiveEntityCount;
+            int toRemove = activeCount < 50 ? activeCount : 50;
+            
+            // Remove from the end of the active list (safe iteration)
+            for (int idx = activeCount - 1; idx >= 0 && removed < toRemove; idx--)
             {
-                if (_world.IsValidEntity(i))
+                int i = _world.ActiveEntities[idx];
+                
+                int agentIndex = _entityToAgent[i];
+                if (agentIndex >= 0 && _agentTransforms[agentIndex] != null)
                 {
-                    int agentIndex = _entityToAgent[i];
-                    if (agentIndex >= 0 && _agentTransforms[agentIndex] != null)
-                    {
-                        _agentTransforms[agentIndex].gameObject.SetActive(false);
-                    }
-                    
-                    _world.DestroyEntity(i);
-                    _entityToAgent[i] = -1;
-                    _activeAgents--;
-                    removed++;
+                    _agentTransforms[agentIndex].gameObject.SetActive(false);
                 }
+                
+                _world.DestroyEntity(i);
+                _entityToAgent[i] = -1;
+                _activeAgents--;
+                removed++;
             }
             
             CELogger.Info("Flocking", $"Removed {removed} agents. Total: {_world.ActiveEntityCount}");

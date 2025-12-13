@@ -23,7 +23,7 @@ namespace UdonSharp.CE.Editor.Optimizers
     /// </summary>
     internal class CommonSubexpressionEliminationOptimizer : ICompileTimeOptimizer
     {
-        public string OptimizerId => "CEOPT006";
+        public string OptimizerId => "CEOPT009";
         public string OptimizerName => "Common Subexpression Elimination";
         public string Description => "Caches repeated pure expressions to avoid redundant computation.";
         public bool IsEnabledByDefault => true;
@@ -129,14 +129,20 @@ namespace UdonSharp.CE.Editor.Optimizers
 
             private BlockSyntax OptimizeBlock(BlockSyntax block)
             {
+                // Collect all local variable names declared in this block
+                var localVariables = CollectLocalVariables(block);
+
                 // Collect all expressions and their fingerprints
                 var expressionCollector = new ExpressionCollector();
                 expressionCollector.Visit(block);
 
-                // Find expressions that appear 2+ times and are pure
+                // Find expressions that appear 2+ times, are pure, and DON'T reference local variables
+                // (since we can't hoist expressions that reference locals declared later in the block)
                 var duplicates = expressionCollector.Expressions
                     .GroupBy(e => e.Fingerprint)
-                    .Where(g => g.Count() >= 2 && g.First().IsPure)
+                    .Where(g => g.Count() >= 2 && 
+                                g.First().IsPure && 
+                                !ReferencesLocalVariables(g.First().Expression, localVariables))
                     .ToList();
 
                 if (duplicates.Count == 0)
@@ -177,7 +183,7 @@ namespace UdonSharp.CE.Editor.Optimizers
                     declarations.Add(declaration);
 
                     _context.RecordOptimization(
-                        "CEOPT006",
+                        "CEOPT009",
                         $"Cached repeated expression: {expr.ToString().Substring(0, Math.Min(50, expr.ToString().Length))}...",
                         expr.GetLocation(),
                         expr.ToString(),
@@ -189,6 +195,52 @@ namespace UdonSharp.CE.Editor.Optimizers
                 // Combine declarations with the rewritten statements
                 var newStatements = declarations.Concat(newBlock.Statements);
                 return newBlock.WithStatements(SyntaxFactory.List(newStatements));
+            }
+
+            /// <summary>
+            /// Collects all local variable names declared in a block.
+            /// </summary>
+            private HashSet<string> CollectLocalVariables(BlockSyntax block)
+            {
+                var locals = new HashSet<string>();
+                
+                foreach (var statement in block.Statements)
+                {
+                    if (statement is LocalDeclarationStatementSyntax localDecl)
+                    {
+                        foreach (var variable in localDecl.Declaration.Variables)
+                        {
+                            locals.Add(variable.Identifier.Text);
+                        }
+                    }
+                    
+                    // Also collect variables from nested blocks, loops, etc.
+                    var nestedDeclarations = statement.DescendantNodes()
+                        .OfType<VariableDeclaratorSyntax>();
+                    foreach (var decl in nestedDeclarations)
+                    {
+                        locals.Add(decl.Identifier.Text);
+                    }
+                }
+                
+                return locals;
+            }
+
+            /// <summary>
+            /// Checks if an expression references any of the given local variables.
+            /// </summary>
+            private bool ReferencesLocalVariables(ExpressionSyntax expr, HashSet<string> localVariables)
+            {
+                var identifiers = expr.DescendantNodesAndSelf()
+                    .OfType<IdentifierNameSyntax>();
+                
+                foreach (var id in identifiers)
+                {
+                    if (localVariables.Contains(id.Identifier.Text))
+                        return true;
+                }
+                
+                return false;
             }
 
             private TypeSyntax InferType(ExpressionSyntax expression)

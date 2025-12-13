@@ -61,14 +61,14 @@ namespace UdonSharp.CE.Persistence
     /// // Register in Start()
     /// void Start()
     /// {
-    ///     CEPersistence.Register&lt;PlayerSaveData&gt;(
-    ///         toData: data =&gt; {
+    ///     CEPersistence.Register<PlayerSaveData>(
+    ///         toData: data => {
     ///             var d = new DataDictionary();
     ///             d["xp"] = data.experience;
     ///             d["lvl"] = data.level;
     ///             return d;
     ///         },
-    ///         fromData: d =&gt; new PlayerSaveData {
+    ///         fromData: d => new PlayerSaveData {
     ///             experience = (int)d["xp"].Double,
     ///             level = (int)d["lvl"].Double
     ///         },

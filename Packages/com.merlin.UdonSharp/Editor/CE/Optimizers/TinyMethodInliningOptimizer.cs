@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
@@ -37,24 +38,13 @@ namespace UdonSharp.CE.Editor.Optimizers
         public SyntaxTree Optimize(SyntaxTree tree, OptimizationContext context)
         {
             var root = tree.GetRoot();
+            bool anyChanges = false;
 
-            // First pass: collect inlinable methods and their call counts
-            var collector = new MethodCollector();
-            collector.Visit(root);
-
-            // Filter to only methods worth inlining
-            var inlinableMethods = collector.Methods
-                .Where(m => IsInlinable(m.Value.Declaration) && m.Value.CallCount >= MinCallCount)
-                .ToDictionary(m => m.Key, m => m.Value);
-
-            if (inlinableMethods.Count == 0)
-                return tree;
-
-            // Second pass: inline the calls
-            var rewriter = new MethodInliner(inlinableMethods, context);
+            // Process each class separately to avoid cross-class method name collisions
+            var rewriter = new ClassScopedRewriter(context, ref anyChanges);
             var newRoot = rewriter.Visit(root);
 
-            if (rewriter.ChangesMade)
+            if (anyChanges)
             {
                 return tree.WithRootAndOptions(newRoot, tree.Options);
             }
@@ -106,6 +96,59 @@ namespace UdonSharp.CE.Editor.Optimizers
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// Rewriter that processes each class separately to properly scope method inlining.
+        /// </summary>
+        private class ClassScopedRewriter : CSharpSyntaxRewriter
+        {
+            private readonly OptimizationContext _context;
+            private bool _anyChanges;
+
+            public ClassScopedRewriter(OptimizationContext context, ref bool anyChanges)
+            {
+                _context = context;
+                _anyChanges = anyChanges;
+            }
+
+            public override SyntaxNode VisitClassDeclaration(ClassDeclarationSyntax node)
+            {
+                try
+                {
+                    // Collect methods within this class only
+                    var collector = new MethodCollector();
+                    collector.Visit(node);
+
+                    // Filter to only methods worth inlining
+                    var optimizer = new TinyMethodInliningOptimizer();
+                    var inlinableMethods = collector.Methods
+                        .Where(m => optimizer.IsInlinable(m.Value.Declaration) && m.Value.CallCount >= MinCallCount)
+                        .ToDictionary(m => m.Key, m => m.Value);
+
+                    if (inlinableMethods.Count == 0)
+                    {
+                        // Still need to visit nested classes
+                        return base.VisitClassDeclaration(node);
+                    }
+
+                    // Inline calls within this class
+                    var inliner = new MethodInliner(inlinableMethods, _context);
+                    var result = (ClassDeclarationSyntax)inliner.Visit(node);
+
+                    if (inliner.ChangesMade)
+                    {
+                        _anyChanges = true;
+                    }
+
+                    return result;
+                }
+                catch (Exception)
+                {
+                    // If anything fails, just return the original node unchanged
+                    return node;
+                }
+            }
         }
 
         private class MethodInfo
@@ -172,71 +215,84 @@ namespace UdonSharp.CE.Editor.Optimizers
 
             public override SyntaxNode VisitInvocationExpression(InvocationExpressionSyntax node)
             {
-                var visited = (InvocationExpressionSyntax)base.VisitInvocationExpression(node);
-
-                var methodName = GetMethodName(visited);
-                if (methodName == null || !_methods.TryGetValue(methodName, out var methodInfo))
-                    return visited;
-
-                var method = methodInfo.Declaration;
-
-                // Get the argument list
-                var arguments = visited.ArgumentList.Arguments;
-                var parameters = method.ParameterList.Parameters;
-
-                // Argument count must match
-                if (arguments.Count != parameters.Count)
-                    return visited;
-
-                // Build parameter -> argument mapping
-                var parameterMap = new Dictionary<string, ExpressionSyntax>();
-                for (int i = 0; i < parameters.Count; i++)
+                try
                 {
-                    var paramName = parameters[i].Identifier.Text;
-                    var argExpr = arguments[i].Expression;
+                    var visited = (InvocationExpressionSyntax)base.VisitInvocationExpression(node);
 
-                    // Only inline if argument is simple (avoid evaluating complex expressions multiple times)
-                    if (!IsSimpleExpression(argExpr))
+                    var methodName = GetMethodName(visited);
+                    if (methodName == null || !_methods.TryGetValue(methodName, out var methodInfo))
                         return visited;
 
-                    parameterMap[paramName] = argExpr;
-                }
+                    var method = methodInfo.Declaration;
 
-                // Get the expression to inline
-                ExpressionSyntax inlineExpr = null;
+                    // Get the argument list
+                    var arguments = visited.ArgumentList.Arguments;
+                    var parameters = method.ParameterList.Parameters;
 
-                if (method.ExpressionBody != null)
-                {
-                    inlineExpr = method.ExpressionBody.Expression;
-                }
-                else if (method.Body != null && method.Body.Statements.Count > 0)
-                {
-                    var lastStmt = method.Body.Statements.Last();
-                    if (lastStmt is ReturnStatementSyntax returnStmt && returnStmt.Expression != null)
+                    // Argument count must match
+                    if (arguments.Count != parameters.Count)
+                        return visited;
+
+                    // Build parameter -> argument mapping
+                    var parameterMap = new Dictionary<string, ExpressionSyntax>();
+                    for (int i = 0; i < parameters.Count; i++)
                     {
-                        inlineExpr = returnStmt.Expression;
+                        var paramName = parameters[i].Identifier.Text;
+                        var argExpr = arguments[i].Expression;
+
+                        // Only inline if argument is simple (avoid evaluating complex expressions multiple times)
+                        if (!IsSimpleExpression(argExpr))
+                            return visited;
+
+                        parameterMap[paramName] = argExpr;
                     }
+
+                    // Get the expression to inline
+                    ExpressionSyntax inlineExpr = null;
+
+                    if (method.ExpressionBody != null)
+                    {
+                        inlineExpr = method.ExpressionBody.Expression;
+                    }
+                    else if (method.Body != null && method.Body.Statements.Count > 0)
+                    {
+                        var lastStmt = method.Body.Statements.Last();
+                        if (lastStmt is ReturnStatementSyntax returnStmt && returnStmt.Expression != null)
+                        {
+                            inlineExpr = returnStmt.Expression;
+                        }
+                    }
+
+                    if (inlineExpr == null)
+                        return visited;
+
+                    // Replace parameters with arguments in the expression
+                    var replacer = new ParameterReplacer(parameterMap);
+                    var inlinedExpr = (ExpressionSyntax)replacer.Visit(inlineExpr);
+
+                    // Wrap in parentheses if needed for precedence
+                    inlinedExpr = SyntaxFactory.ParenthesizedExpression(inlinedExpr).WithTriviaFrom(node);
+
+                    _context.RecordOptimization(
+                        "CEOPT004",
+                        $"Inlined method '{methodName}'",
+                        node.GetLocation(),
+                        visited.ToString(),
+                        inlinedExpr.ToString());
+
+                    ChangesMade = true;
+                    return inlinedExpr;
                 }
-
-                if (inlineExpr == null)
-                    return visited;
-
-                // Replace parameters with arguments in the expression
-                var replacer = new ParameterReplacer(parameterMap);
-                var inlinedExpr = (ExpressionSyntax)replacer.Visit(inlineExpr);
-
-                // Wrap in parentheses if needed for precedence
-                inlinedExpr = SyntaxFactory.ParenthesizedExpression(inlinedExpr).WithTriviaFrom(node);
-
-                _context.RecordOptimization(
-                    "CEOPT004",
-                    $"Inlined method '{methodName}'",
-                    node.GetLocation(),
-                    visited.ToString(),
-                    inlinedExpr.ToString());
-
-                ChangesMade = true;
-                return inlinedExpr;
+                catch (InvalidCastException)
+                {
+                    // If casting fails, just return the original node
+                    return node;
+                }
+                catch (Exception)
+                {
+                    // If anything else fails, return the original node
+                    return node;
+                }
             }
 
             private string GetMethodName(InvocationExpressionSyntax invocation)
@@ -297,4 +353,3 @@ namespace UdonSharp.CE.Editor.Optimizers
         }
     }
 }
-

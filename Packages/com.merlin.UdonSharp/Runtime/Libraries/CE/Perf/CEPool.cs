@@ -66,11 +66,11 @@ namespace UdonSharp.CE.Perf
     ///     [SerializeField] private GameObject bulletPrefab;
     ///     [SerializeField] private int poolSize = 100;
     ///
-    ///     private CEPool&lt;GameObject&gt; pool;
+    ///     private CEPool<GameObject> pool;
     ///
     ///     void Start()
     ///     {
-    ///         pool = new CEPool&lt;GameObject&gt;(poolSize);
+    ///         pool = new CEPool<GameObject>(poolSize);
     ///         pool.Initialize(CreateBullet, OnBulletAcquired, OnBulletReleased);
     ///     }
     ///

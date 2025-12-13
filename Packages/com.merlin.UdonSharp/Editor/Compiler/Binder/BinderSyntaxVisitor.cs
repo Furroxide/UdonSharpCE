@@ -971,12 +971,10 @@ namespace UdonSharp.Compiler.Binder
 
         private BoundNode VisitBaseObjectCreationExpression(BaseObjectCreationExpressionSyntax node)
         {
-            if (node.Initializer != null)
-                throw new NotSupportedException(LocStr.CE_InitializerListsNotSupported, node);
-
             MethodSymbol constructorSymbol = (MethodSymbol)GetSymbol(node);
-
-            BoundExpression[] boundArguments = new BoundExpression[node.ArgumentList!.Arguments.Count];
+            
+            int argCount = node.ArgumentList?.Arguments.Count ?? 0;
+            BoundExpression[] boundArguments = new BoundExpression[argCount];
 
             bool isConstant = true;
 
@@ -986,9 +984,9 @@ namespace UdonSharp.Compiler.Binder
                 isConstant &= boundArguments[i].IsConstant;
             }
             
-            // Constant folding on struct creation when possible
+            // Constant folding on struct creation when possible (only when no initializer)
             // Also implicitly handles parameterless constructors on value types, which Udon does not expose constructors for
-            if (isConstant && constructorSymbol.IsExtern && constructorSymbol.ContainingType.IsValueType)
+            if (node.Initializer == null && isConstant && constructorSymbol.IsExtern && constructorSymbol.ContainingType.IsValueType)
             {
                 var constArgs = boundArguments.Select(e => e.ConstantValue.Value).ToArray();
                 
@@ -999,7 +997,77 @@ namespace UdonSharp.Compiler.Binder
                 return new BoundConstantExpression(constantStore, constructorSymbol.ContainingType, node);
             }
 
-            return BoundInvocationExpression.CreateBoundInvocation(Context, node, constructorSymbol, null, boundArguments);
+            BoundExpression constructorInvocation = BoundInvocationExpression.CreateBoundInvocation(Context, node, constructorSymbol, null, boundArguments);
+            
+            // Handle object initializers: new Foo { Bar = 1, Baz = 2 }
+            if (node.Initializer != null)
+            {
+                return VisitObjectInitializer(node, constructorInvocation, constructorSymbol.ContainingType);
+            }
+
+            return constructorInvocation;
+        }
+        
+        private BoundNode VisitObjectInitializer(BaseObjectCreationExpressionSyntax node, BoundExpression constructorInvocation, TypeSymbol createdType)
+        {
+            var initializer = node.Initializer;
+            
+            // Only support object initializers (ObjectInitializerExpression), not collection initializers
+            if (initializer.Kind() != SyntaxKind.ObjectInitializerExpression)
+            {
+                throw new NotSupportedException(LocStr.CE_InitializerListsNotSupported, node);
+            }
+            
+            var expressions = initializer.Expressions;
+            var memberSymbols = new List<Symbol>();
+            var memberValues = new List<BoundExpression>();
+            
+            foreach (var expr in expressions)
+            {
+                if (expr is AssignmentExpressionSyntax assignmentExpr)
+                {
+                    // Get the member symbol from the left side of the assignment
+                    Symbol memberSymbol = GetSymbol(assignmentExpr.Left);
+                    
+                    if (memberSymbol == null)
+                    {
+                        throw new NotSupportedException($"Could not resolve member in initializer: {assignmentExpr.Left}", assignmentExpr.GetLocation());
+                    }
+                    
+                    // Determine the target type for the value
+                    TypeSymbol targetType = null;
+                    if (memberSymbol is FieldSymbol fieldSymbol)
+                    {
+                        targetType = fieldSymbol.Type;
+                    }
+                    else if (memberSymbol is PropertySymbol propertySymbol)
+                    {
+                        targetType = propertySymbol.Type;
+                    }
+                    else
+                    {
+                        throw new NotSupportedException($"Unsupported member type in initializer: {memberSymbol.GetType().Name}", assignmentExpr.GetLocation());
+                    }
+                    
+                    // Visit the right side of the assignment with the target type
+                    BoundExpression valueExpr = VisitExpression(assignmentExpr.Right, targetType);
+                    
+                    memberSymbols.Add(memberSymbol);
+                    memberValues.Add(valueExpr);
+                }
+                else
+                {
+                    // Nested object initializers or collection initializers are not yet supported
+                    throw new NotSupportedException(LocStr.CE_InitializerListsNotSupported, expr);
+                }
+            }
+            
+            return new BoundObjectInitializerExpression(
+                node,
+                constructorInvocation,
+                createdType,
+                memberSymbols.ToArray(),
+                memberValues.ToArray());
         }
 
         public override BoundNode VisitArrayCreationExpression(ArrayCreationExpressionSyntax node)

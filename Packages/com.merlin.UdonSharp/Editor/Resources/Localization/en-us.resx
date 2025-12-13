@@ -163,6 +163,6 @@
     <value>Method is not exposed to Udon: '{0}'</value>
   </data>
   <data name="CE_InitializerListsNotSupported" xml:space="preserve">
-    <value>U# Does not yet support initializer lists</value>
+    <value>U# does not support collection initializers or nested initializers. Object initializers (new Type { Field = value }) are supported.</value>
   </data>
 </root>

@@ -13,3 +13,20 @@ These scripts demonstrate common patterns for VRChat world development:
 - Synced/GlobalToggleObject: Synced toggle any player can use
 - Synced/MasterToggleObject: Synced toggle only master can use
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

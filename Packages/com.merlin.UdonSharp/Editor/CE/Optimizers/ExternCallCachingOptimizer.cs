@@ -120,13 +120,20 @@ namespace UdonSharp.CE.Editor.Optimizers
 
             private BlockSyntax OptimizeBlock(BlockSyntax block)
             {
+                // Collect all local variable names declared in this block
+                // We cannot cache expressions that reference these, as they may not be declared
+                // at the point where we insert the cache declaration (top of block)
+                var localVariables = CollectLocalVariables(block);
+
                 // Collect all member access expressions that access expensive properties
                 var collector = new ExternAccessCollector();
                 collector.Visit(block);
 
                 // Group by base expression to find patterns like:
                 // transform.position.x, transform.position.y, transform.position.z
+                // Filter out any that reference local variables
                 var accessGroups = collector.Accesses
+                    .Where(a => !ReferencesLocalVariables(a.FullAccessExpression, localVariables))
                     .GroupBy(a => a.BaseExpression)
                     .Where(g => g.Count() >= 2) // Must have at least 2 accesses to benefit
                     .ToList();
@@ -190,6 +197,52 @@ namespace UdonSharp.CE.Editor.Optimizers
                 }
 
                 return SyntaxFactory.IdentifierName("var");
+            }
+
+            /// <summary>
+            /// Collects all local variable names declared in a block.
+            /// </summary>
+            private HashSet<string> CollectLocalVariables(BlockSyntax block)
+            {
+                var locals = new HashSet<string>();
+                
+                foreach (var statement in block.Statements)
+                {
+                    if (statement is LocalDeclarationStatementSyntax localDecl)
+                    {
+                        foreach (var variable in localDecl.Declaration.Variables)
+                        {
+                            locals.Add(variable.Identifier.Text);
+                        }
+                    }
+                    
+                    // Also collect variables from nested blocks, loops, etc.
+                    var nestedDeclarations = statement.DescendantNodes()
+                        .OfType<VariableDeclaratorSyntax>();
+                    foreach (var decl in nestedDeclarations)
+                    {
+                        locals.Add(decl.Identifier.Text);
+                    }
+                }
+                
+                return locals;
+            }
+
+            /// <summary>
+            /// Checks if an expression references any of the given local variables.
+            /// </summary>
+            private bool ReferencesLocalVariables(ExpressionSyntax expr, HashSet<string> localVariables)
+            {
+                var identifiers = expr.DescendantNodesAndSelf()
+                    .OfType<IdentifierNameSyntax>();
+                
+                foreach (var id in identifiers)
+                {
+                    if (localVariables.Contains(id.Identifier.Text))
+                        return true;
+                }
+                
+                return false;
             }
         }
 

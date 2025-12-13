@@ -18,7 +18,7 @@ namespace UdonSharp.CE.DevTools
     /// <example>
     /// <code>
     /// // Get profiler reference
-    /// CEProfiler profiler = GetComponent&lt;CEProfiler&gt;();
+    /// CEProfiler profiler = GetComponent<CEProfiler>();
     ///
     /// // Manual section timing
     /// profiler.BeginSection("Physics");

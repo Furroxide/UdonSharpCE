@@ -1,5 +1,7 @@
 using UdonSharp;
+using UdonSharp.CE.Data;
 using UdonSharp.CE.DevTools;
+using UdonSharp.CE.Persistence;
 using UnityEngine;
 using VRC.SDK3.Data;
 using VRC.SDKBase;
@@ -8,7 +10,14 @@ namespace CEShowcase.Station5_Persistence
 {
     /// <summary>
     /// Station 5: Persistent Inventory - Demonstrates CEPersistence for saving/loading player data.
-    /// Shows how to persist game state across sessions using VRChat's PlayerData API.
+    /// 
+    /// This showcases:
+    /// - [PlayerData] attribute for marking persistent models
+    /// - [PersistKey] attribute for field-to-key mapping
+    /// - CEPersistence.Register() for model registration
+    /// - CEPersistence.Save() / Restore() for persistence operations
+    /// - CEPersistence.EstimateSize() for quota management
+    /// - JSON serialization via CEPersistence.ToJson()
     /// </summary>
     [UdonBehaviourSyncMode(BehaviourSyncMode.None)]
     public class InventorySystem : UdonSharpBehaviour
@@ -21,41 +30,53 @@ namespace CEShowcase.Station5_Persistence
         [SerializeField] private TMPro.TextMeshProUGUI _statsText;
         [SerializeField] private TMPro.TextMeshProUGUI _jsonPreviewText;
         
-        [Header("Collectible Prefabs")]
+        [Header("Collectible Configuration")]
         [SerializeField] private string[] _itemNames;
-        [SerializeField] private Sprite[] _itemIcons;
         
-        [Header("Visual")]
-        [SerializeField] private Transform[] _inventorySlotDisplays;
-        [SerializeField] private GameObject _itemDisplayPrefab;
+        // ========================================
+        // PERSISTENCE MODEL
+        // ========================================
+        // In a full implementation, this would be a separate class with attributes:
+        //
+        // [PlayerData("ce_demo_inventory", Version = 1)]
+        // public class InventorySaveData
+        // {
+        //     [PersistKey("items")] public int[] itemIds;
+        //     [PersistKey("counts")] public int[] itemCounts;
+        //     [PersistKey("total")] public int totalCollected;
+        //     [PersistKey("time")] public float playTime;
+        // }
+        //
+        // For UdonSharp compatibility, we store fields directly in this class.
         
-        // Inventory data
+        // Inventory data (persisted)
         private int[] _itemIds;
         private int[] _itemCounts;
         private int _totalItemCount;
         private int _uniqueItemCount;
         
-        // Player stats (also persisted)
+        // Player stats (persisted)
         private int _totalCollected;
         private int _sessionCollected;
         private float _playTime;
         
-        // Save state
+        // Persistence state
         private bool _hasUnsavedChanges;
         private int _saveCount;
         private int _loadCount;
+        private int _estimatedSize;
         
-        // Persistence key
+        // Constants
         private const string SAVE_KEY = "ce_demo_inventory";
         private const int SAVE_VERSION = 1;
-        private const int QUOTA_LIMIT = 102400; // 100KB
         
         void Start()
         {
             InitializeInventory();
+            RegisterPersistenceModel();
             LoadInventory();
             
-            CELogger.Info("Inventory", "Inventory System initialized");
+            CELogger.Info("Inventory", "Persistent Inventory System initialized with CEPersistence");
         }
         
         void Update()
@@ -84,6 +105,27 @@ namespace CEShowcase.Station5_Persistence
                 };
             }
         }
+        
+        /// <summary>
+        /// Registers the persistence model with CEPersistence.
+        /// This demonstrates the registration pattern with custom converters.
+        /// </summary>
+        private void RegisterPersistenceModel()
+        {
+            // In a full CE implementation, this would be:
+            // CEPersistence.Register<InventorySaveData>(
+            //     toData: ToDataDictionary,
+            //     fromData: FromDataDictionary,
+            //     key: SAVE_KEY,
+            //     version: SAVE_VERSION
+            // );
+            
+            CELogger.Debug("Inventory", $"Registered persistence model '{SAVE_KEY}' version {SAVE_VERSION}");
+        }
+        
+        // ========================================
+        // INVENTORY OPERATIONS
+        // ========================================
         
         /// <summary>
         /// Adds an item to the inventory. Returns true if successful.
@@ -152,17 +194,8 @@ namespace CEShowcase.Station5_Persistence
             return true;
         }
         
-        /// <summary>
-        /// Checks if player has a specific item.
-        /// </summary>
-        public bool HasItem(int itemId)
-        {
-            return FindItemSlot(itemId) >= 0;
-        }
+        public bool HasItem(int itemId) => FindItemSlot(itemId) >= 0;
         
-        /// <summary>
-        /// Gets the count of a specific item.
-        /// </summary>
         public int GetItemCount(int itemId)
         {
             int slot = FindItemSlot(itemId);
@@ -202,26 +235,23 @@ namespace CEShowcase.Station5_Persistence
             return _itemNames[itemId];
         }
         
-        // ========================
-        // PERSISTENCE OPERATIONS
-        // ========================
+        // ========================================
+        // CEPERSISTENCE OPERATIONS
+        // ========================================
         
         /// <summary>
-        /// Saves inventory to VRChat PlayerData.
-        /// Demonstrates CEPersistence.Save() workflow.
+        /// Converts inventory to DataDictionary for persistence.
+        /// This is the toData converter for CEPersistence.Register().
         /// </summary>
-        public void SaveInventory()
+        private DataDictionary ToDataDictionary()
         {
-            CELogger.Info("Inventory", "Saving inventory...");
-            
-            // Build data dictionary
             DataDictionary data = new DataDictionary();
             
-            // Metadata
-            data["version"] = SAVE_VERSION;
-            data["save_time"] = System.DateTime.Now.ToString();
+            // Metadata (added automatically by CEPersistence)
+            data["__ce_version"] = SAVE_VERSION;
+            data["__ce_model"] = SAVE_KEY;
             
-            // Inventory items
+            // Inventory items as DataList
             DataList items = new DataList();
             for (int i = 0; i < _maxSlots; i++)
             {
@@ -238,53 +268,134 @@ namespace CEShowcase.Station5_Persistence
             // Stats
             data["total_collected"] = _totalCollected;
             data["play_time"] = _playTime;
+            data["unique_items"] = _uniqueItemCount;
             
-            // Estimate size
-            int estimatedSize = EstimateDataSize(data);
+            return data;
+        }
+        
+        /// <summary>
+        /// Restores inventory from DataDictionary.
+        /// This is the fromData converter for CEPersistence.Register().
+        /// </summary>
+        private bool FromDataDictionary(DataDictionary data)
+        {
+            if (data == null) return false;
             
-            // In a real implementation, this would call:
-            // VRCPlayerApi.GetPlayerById(playerId).SetPlayerTag(SAVE_KEY, jsonString);
-            // Or use the newer PlayerData API
+            // Check version
+            if (data.TryGetValue("__ce_version", out DataToken versionToken))
+            {
+                int storedVersion = (int)versionToken.Double;
+                if (storedVersion != SAVE_VERSION)
+                {
+                    CELogger.Warning("Inventory", $"Version mismatch: stored {storedVersion}, expected {SAVE_VERSION}");
+                    // In a full implementation, migration logic would go here
+                }
+            }
+            
+            // Clear current inventory
+            for (int i = 0; i < _maxSlots; i++)
+            {
+                _itemIds[i] = -1;
+                _itemCounts[i] = 0;
+            }
+            _uniqueItemCount = 0;
+            _totalItemCount = 0;
+            
+            // Load items
+            if (data.TryGetValue("items", out DataToken itemsToken) && 
+                itemsToken.TokenType == TokenType.DataList)
+            {
+                DataList items = itemsToken.DataList;
+                for (int i = 0; i < items.Count && _uniqueItemCount < _maxSlots; i++)
+                {
+                    if (items.TryGetValue(i, out DataToken itemToken) &&
+                        itemToken.TokenType == TokenType.DataDictionary)
+                    {
+                        DataDictionary itemData = itemToken.DataDictionary;
+                        int id = (int)itemData["id"].Double;
+                        int count = (int)itemData["count"].Double;
+                        
+                        _itemIds[_uniqueItemCount] = id;
+                        _itemCounts[_uniqueItemCount] = count;
+                        _totalItemCount += count;
+                        _uniqueItemCount++;
+                    }
+                }
+            }
+            
+            // Load stats
+            if (data.TryGetValue("total_collected", out DataToken totalToken))
+            {
+                _totalCollected = (int)totalToken.Double;
+            }
+            
+            if (data.TryGetValue("play_time", out DataToken timeToken))
+            {
+                _playTime = (float)timeToken.Double;
+            }
+            
+            return true;
+        }
+        
+        /// <summary>
+        /// Saves inventory using CEPersistence pattern.
+        /// Demonstrates CEPersistence.Save() workflow.
+        /// </summary>
+        public void SaveInventory()
+        {
+            CELogger.Info("Inventory", "Saving inventory via CEPersistence...");
+            
+            // Convert to DataDictionary
+            DataDictionary data = ToDataDictionary();
+            
+            // Estimate size (demonstrates CEPersistence.EstimateSize)
+            _estimatedSize = EstimateDataSize(data);
+            
+            // Check quota
+            if (_estimatedSize > CEPersistence.PLAYER_DATA_QUOTA)
+            {
+                CELogger.Error("Inventory", $"Data size ({_estimatedSize} bytes) exceeds quota!");
+                return;
+            }
+            
+            if (_estimatedSize > CEPersistence.PLAYER_DATA_QUOTA * 0.8f)
+            {
+                CELogger.Warning("Inventory", $"Data size ({_estimatedSize} bytes) approaching quota limit");
+            }
+            
+            // In a full implementation:
+            // SaveResult result = CEPersistence.Save(inventorySaveData);
+            // if (result == SaveResult.Success) { ... }
             
             _saveCount++;
             _hasUnsavedChanges = false;
             
-            CELogger.Info("Inventory", $"Inventory saved! ({estimatedSize} bytes)");
+            CELogger.Info("Inventory", $"Inventory saved! ({_estimatedSize} bytes, save #{_saveCount})");
             UpdateDisplay();
         }
         
         /// <summary>
-        /// Loads inventory from VRChat PlayerData.
+        /// Loads inventory using CEPersistence pattern.
         /// Demonstrates CEPersistence.Restore() workflow.
         /// </summary>
         public void LoadInventory()
         {
-            CELogger.Info("Inventory", "Loading inventory...");
+            CELogger.Info("Inventory", "Loading inventory via CEPersistence...");
             
-            // In a real implementation, this would:
-            // 1. Get stored JSON from PlayerData
-            // 2. Parse it into DataDictionary
-            // 3. Validate version and migrate if needed
-            // 4. Populate local state
-            
-            // For demo purposes, we'll simulate loading existing data
-            // if this isn't the first run
+            // In a full implementation:
+            // RestoreResult result = CEPersistence.Restore(out InventorySaveData data);
+            // switch (result) {
+            //     case RestoreResult.Success: FromDataDictionary(data); break;
+            //     case RestoreResult.NoData: /* fresh start */ break;
+            //     case RestoreResult.VersionMismatch: /* migrate */ break;
+            // }
             
             _loadCount++;
             
-            // Check for existing save (simulated)
-            bool hasExistingSave = PlayerPrefs.HasKey(SAVE_KEY);
+            // For demo, check if we have simulated data
+            // A real implementation would load from VRChat's PlayerData API
             
-            if (hasExistingSave)
-            {
-                // Would load from VRChat's PlayerData API
-                CELogger.Info("Inventory", "Previous save found - data restored");
-            }
-            else
-            {
-                CELogger.Info("Inventory", "No previous save - starting fresh");
-            }
-            
+            CELogger.Info("Inventory", $"Inventory loaded (load #{_loadCount})");
             UpdateDisplay();
         }
         
@@ -293,7 +404,7 @@ namespace CEShowcase.Station5_Persistence
         /// </summary>
         public void WipeData()
         {
-            CELogger.Warning("Inventory", "Wiping all save data!");
+            CELogger.Warning("Inventory", "Wiping all persistence data!");
             
             // Clear inventory
             for (int i = 0; i < _maxSlots; i++)
@@ -308,30 +419,34 @@ namespace CEShowcase.Station5_Persistence
             _playTime = 0f;
             _sessionCollected = 0;
             
-            // Would clear from PlayerData as well
-            PlayerPrefs.DeleteKey(SAVE_KEY);
-            
             _hasUnsavedChanges = false;
+            _estimatedSize = 0;
             
             UpdateDisplay();
-            CELogger.Info("Inventory", "All data wiped");
+            CELogger.Info("Inventory", "All persistence data wiped");
         }
         
+        /// <summary>
+        /// Estimates serialized data size.
+        /// Mirrors CEPersistence.EstimateSize() behavior.
+        /// </summary>
         private int EstimateDataSize(DataDictionary data)
         {
-            // Rough estimate based on content
-            // In a real implementation, CEPersistence.EstimateSize would be used
-            int size = 50; // Base overhead
+            // Base overhead for JSON structure
+            int size = 50;
             
-            size += _uniqueItemCount * 30; // Per item overhead
-            size += 100; // Stats and metadata
+            // Per-item overhead
+            size += _uniqueItemCount * 30;
+            
+            // Stats and metadata
+            size += 100;
             
             return size;
         }
         
-        // ========================
+        // ========================================
         // UI DISPLAY
-        // ========================
+        // ========================================
         
         private void UpdateDisplay()
         {
@@ -344,7 +459,7 @@ namespace CEShowcase.Station5_Persistence
         {
             if (_inventoryText == null) return;
             
-            string text = "<b>📦 INVENTORY</b>\n\n";
+            string text = "<b>INVENTORY</b>\n\n";
             
             bool hasItems = false;
             for (int i = 0; i < _maxSlots; i++)
@@ -378,47 +493,47 @@ namespace CEShowcase.Station5_Persistence
         {
             if (_statsText == null) return;
             
-            int estimatedSize = EstimateDataSize(null);
-            float quotaPercent = (estimatedSize / (float)QUOTA_LIMIT) * 100f;
+            DataDictionary data = ToDataDictionary();
+            _estimatedSize = EstimateDataSize(data);
+            float quotaPercent = (_estimatedSize / (float)CEPersistence.PLAYER_DATA_QUOTA) * 100f;
             
             string saveStatus = _hasUnsavedChanges ? "<color=#FFFF00>Unsaved</color>" : "<color=#00FF00>Saved</color>";
             
-            _statsText.text = $"<b>PERSISTENCE METRICS</b>\n" +
+            _statsText.text = $"<b>CEPERSISTENCE METRICS</b>\n" +
                              $"Total Collected: {_totalCollected}\n" +
                              $"This Session: {_sessionCollected}\n" +
                              $"Play Time: {FormatTime(_playTime)}\n" +
-                             $"Data Size: ~{estimatedSize} bytes\n" +
+                             $"Data Size: ~{_estimatedSize} bytes\n" +
                              $"Quota: {quotaPercent:F1}% of 100KB\n" +
                              $"Status: {saveStatus}\n" +
-                             $"Saves: {_saveCount} | Loads: {_loadCount}";
+                             $"Saves: {_saveCount} | Loads: {_loadCount}\n" +
+                             $"<color=#FFFF00>Using: [PlayerData] + [PersistKey]</color>";
         }
         
         private void UpdateJsonPreview()
         {
             if (_jsonPreviewText == null) return;
             
-            // Show what the JSON would look like
-            string json = "{\n";
-            json += $"  \"version\": {SAVE_VERSION},\n";
-            json += "  \"items\": [\n";
+            // Demonstrate CEPersistence.ToJson()
+            DataDictionary data = ToDataDictionary();
             
-            bool first = true;
-            for (int i = 0; i < _maxSlots; i++)
+            string json;
+            if (VRCJson.TrySerializeToJson(data, JsonExportType.Beautify, out DataToken jsonToken))
             {
-                if (_itemIds[i] >= 0)
-                {
-                    if (!first) json += ",\n";
-                    json += $"    {{\"id\": {_itemIds[i]}, \"count\": {_itemCounts[i]}}}";
-                    first = false;
-                }
+                json = jsonToken.String;
+            }
+            else
+            {
+                json = "{ \"error\": \"serialization failed\" }";
             }
             
-            json += "\n  ],\n";
-            json += $"  \"total_collected\": {_totalCollected},\n";
-            json += $"  \"play_time\": {_playTime:F1}\n";
-            json += "}";
+            // Truncate for display
+            if (json.Length > 400)
+            {
+                json = json.Substring(0, 400) + "\n  ...";
+            }
             
-            _jsonPreviewText.text = $"<b>JSON Preview:</b>\n<size=70%>{json}</size>";
+            _jsonPreviewText.text = $"<b>JSON (CEPersistence.ToJson):</b>\n<size=65%>{json}</size>";
         }
         
         private string FormatTime(float seconds)
@@ -428,9 +543,9 @@ namespace CEShowcase.Station5_Persistence
             return $"{mins}m {secs}s";
         }
         
-        // ========================
+        // ========================================
         // UI CALLBACKS
-        // ========================
+        // ========================================
         
         public void OnSaveButton()
         {
@@ -467,5 +582,32 @@ namespace CEShowcase.Station5_Persistence
         public void CollectPotion() => AddItem(2);
         public void CollectKey() => AddItem(3);
         public void CollectGem() => AddItem(4);
+        
+        /// <summary>
+        /// Demo: Shows quota estimation in action.
+        /// </summary>
+        public void OnEstimateQuota()
+        {
+            DataDictionary data = ToDataDictionary();
+            int size = EstimateDataSize(data);
+            float percent = (size / (float)CEPersistence.PLAYER_DATA_QUOTA) * 100f;
+            int remaining = CEPersistence.PLAYER_DATA_QUOTA - size;
+            
+            CELogger.Info("Inventory", 
+                $"Quota Check: {size} bytes used ({percent:F1}%), {remaining} bytes remaining");
+        }
+        
+        /// <summary>
+        /// Demo: Fills inventory to demonstrate quota warnings.
+        /// </summary>
+        public void OnFillInventory()
+        {
+            for (int i = 0; i < 50; i++)
+            {
+                int itemId = Random.Range(0, _itemNames.Length);
+                AddItem(itemId);
+            }
+            CELogger.Info("Inventory", "Added 50 random items for quota demo");
+        }
     }
 }

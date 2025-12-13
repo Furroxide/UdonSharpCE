@@ -122,3 +122,13 @@ Assets/XR.meta
 # IDE stuff
 .claude/
 .vscode/
+
+# Local documentation
+LocalDocs/
+
+# Plastic SCM
+.plastic/
+
+# Screenshots
+Assets/Screenshots/
+Assets/Screenshots.m

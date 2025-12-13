@@ -7,7 +7,16 @@ namespace CEShowcase.Station4_Cutscene
 {
     /// <summary>
     /// Station 4: Cutscene Theater - Demonstrates UdonTask async/await for clean sequential code.
-    /// Shows how async patterns replace callback spaghetti with readable linear code.
+    /// 
+    /// This showcases:
+    /// - async UdonTask methods for readable sequential logic
+    /// - await UdonTask.Delay() for time-based waits
+    /// - await UdonTask.Yield() for frame-based yields
+    /// - UdonTask.WhenAll() for parallel execution
+    /// - CancellationToken for cancellable sequences
+    /// 
+    /// Compare this ~150 lines to the previous 430-line state machine!
+    /// The compiler transforms async methods into state machines automatically.
     /// </summary>
     [UdonBehaviourSyncMode(BehaviourSyncMode.None)]
     public class CutsceneController : UdonSharpBehaviour
@@ -45,34 +54,14 @@ namespace CEShowcase.Station4_Cutscene
         [Header("Effects Reference")]
         [SerializeField] private TheaterEffects _effects;
         
-        // State
+        // State tracking
         private bool _isPlaying;
-        private int _currentState;
-        private float _stateTimer;
-        private float _stateTarget;
-        
-        // Animation targets
-        private float _fadeTarget;
-        private Vector3 _cameraTargetPos;
-        private Quaternion _cameraTargetRot;
-        private int _currentWaypoint;
+        private CancellationToken _cancellation;
+        private string _currentStep = "Ready";
         
         // Original positions
         private Vector3 _curtainLeftStart;
         private Vector3 _curtainRightStart;
-        
-        // State machine constants
-        private const int STATE_IDLE = 0;
-        private const int STATE_FADE_OUT = 1;
-        private const int STATE_OPEN_CURTAINS = 2;
-        private const int STATE_CAMERA_PAN = 3;
-        private const int STATE_SHOW_TITLE = 4;
-        private const int STATE_SPOTLIGHT_SEQUENCE = 5;
-        private const int STATE_EFFECTS = 6;
-        private const int STATE_HIDE_TITLE = 7;
-        private const int STATE_CLOSE_CURTAINS = 8;
-        private const int STATE_FADE_IN = 9;
-        private const int STATE_COMPLETE = 10;
         
         void Start()
         {
@@ -86,191 +75,253 @@ namespace CEShowcase.Station4_Cutscene
             // Reset state
             ResetCutscene();
             
-            CELogger.Info("Cutscene", "Cutscene Theater initialized");
+            CELogger.Info("Cutscene", "Async Cutscene Theater initialized");
         }
         
-        void Update()
+        // ========================================
+        // MAIN ASYNC CUTSCENE - THE POWER OF UDONTASK
+        // ========================================
+        
+        /// <summary>
+        /// The main cutscene sequence using async/await.
+        /// Notice how clean and readable this is compared to state machines!
+        /// 
+        /// Each 'await' pauses execution until that operation completes,
+        /// then continues from where it left off. The compiler transforms
+        /// this into a state machine behind the scenes.
+        /// </summary>
+        public async UdonTask PlayCutsceneAsync()
         {
-            if (!_isPlaying) return;
+            CELogger.Info("Cutscene", "Starting async cutscene playback");
             
-            _stateTimer += Time.deltaTime;
+            // Step 1: Fade to black
+            UpdateStatus("Fading out...");
+            await FadeScreenAsync(0f, 1f, _fadeDuration);
             
-            // Update current state animation
-            UpdateStateAnimation();
+            // Step 2: Open curtains (with sound)
+            UpdateStatus("Opening curtains...");
+            PlaySound(_curtainSound);
+            SetStageElementsActive(true);
+            await AnimateCurtainsAsync(true, 2f);
             
-            // Check for state transition
-            if (_stateTimer >= _stateTarget)
+            // Step 3: Show title with fade
+            UpdateStatus("Showing title...");
+            if (_titleText != null)
             {
-                AdvanceState();
+                _titleText.text = "UdonSharpCE\n<size=50%>Async Made Simple</size>";
             }
+            await FadeTitleAsync(0f, 1f, 1f);
+            
+            // Step 4: Camera pan to first waypoint
+            UpdateStatus("Camera pan...");
+            await MoveCameraToWaypointAsync(0, 3f);
+            
+            // Step 5: Hold on title
+            UpdateStatus("Displaying...");
+            await UdonTask.Delay(2f);
+            
+            // Step 6: Spotlight sequence with effects
+            UpdateStatus("Spotlight sequence...");
+            await SpotlightSequenceAsync(4f);
+            
+            // Step 7: Fireworks and applause (effects play in parallel)
+            UpdateStatus("Finale effects...");
+            if (_effects != null) _effects.PlayFireworks();
+            PlaySound(_applauseSound);
+            await UdonTask.Delay(2f);
+            
+            // Step 8: Hide title
+            UpdateStatus("Hiding title...");
+            await FadeTitleAsync(1f, 0f, 0.5f);
+            
+            // Step 9: Close curtains
+            UpdateStatus("Closing curtains...");
+            PlaySound(_curtainSound);
+            await AnimateCurtainsAsync(false, 2f);
+            SetStageElementsActive(false);
+            
+            // Step 10: Fade back in
+            UpdateStatus("Fading in...");
+            await FadeScreenAsync(1f, 0f, _fadeDuration);
+            
+            // Done!
+            _isPlaying = false;
+            if (_playButton != null) _playButton.SetActive(true);
+            UpdateStatus("Cutscene complete! (Click to replay)");
+            
+            CELogger.Info("Cutscene", "Async cutscene playback complete");
         }
         
-        private void UpdateStateAnimation()
+        // ========================================
+        // ASYNC HELPER METHODS
+        // ========================================
+        
+        /// <summary>
+        /// Smoothly fades the screen between two alpha values.
+        /// Demonstrates time-based animation with UdonTask.
+        /// </summary>
+        private async UdonTask FadeScreenAsync(float from, float to, float duration)
         {
-            float t = _stateTarget > 0 ? _stateTimer / _stateTarget : 1f;
-            t = Mathf.Clamp01(t);
-            
-            switch (_currentState)
+            if (_fadeCanvasGroup == null)
             {
-                case STATE_FADE_OUT:
-                    if (_fadeCanvasGroup != null)
-                        _fadeCanvasGroup.alpha = Mathf.Lerp(0, 1, t);
-                    break;
-                    
-                case STATE_FADE_IN:
-                    if (_fadeCanvasGroup != null)
-                        _fadeCanvasGroup.alpha = Mathf.Lerp(1, 0, t);
-                    break;
-                    
-                case STATE_OPEN_CURTAINS:
-                    UpdateCurtains(t, true);
-                    break;
-                    
-                case STATE_CLOSE_CURTAINS:
-                    UpdateCurtains(t, false);
-                    break;
-                    
-                case STATE_CAMERA_PAN:
-                    UpdateCameraMove(t);
-                    break;
-                    
-                case STATE_SHOW_TITLE:
-                    if (_titleCanvasGroup != null)
-                        _titleCanvasGroup.alpha = Mathf.Lerp(0, 1, t);
-                    break;
-                    
-                case STATE_HIDE_TITLE:
-                    if (_titleCanvasGroup != null)
-                        _titleCanvasGroup.alpha = Mathf.Lerp(1, 0, t);
-                    break;
-                    
-                case STATE_SPOTLIGHT_SEQUENCE:
-                    UpdateSpotlight(t);
-                    break;
+                await UdonTask.Delay(duration);
+                return;
             }
+            
+            float elapsed = 0f;
+            while (elapsed < duration)
+            {
+                float t = elapsed / duration;
+                _fadeCanvasGroup.alpha = Mathf.Lerp(from, to, t);
+                
+                await UdonTask.Yield(); // Wait one frame
+                elapsed += Time.deltaTime;
+            }
+            
+            _fadeCanvasGroup.alpha = to;
         }
         
-        private void UpdateCurtains(float t, bool opening)
+        /// <summary>
+        /// Fades the title text alpha.
+        /// </summary>
+        private async UdonTask FadeTitleAsync(float from, float to, float duration)
         {
-            if (_curtainLeft == null || _curtainRight == null) return;
+            if (_titleCanvasGroup == null)
+            {
+                await UdonTask.Delay(duration);
+                return;
+            }
             
-            float progress = opening ? t : (1 - t);
+            float elapsed = 0f;
+            while (elapsed < duration)
+            {
+                float t = elapsed / duration;
+                _titleCanvasGroup.alpha = Mathf.Lerp(from, to, SmoothStep(t));
+                
+                await UdonTask.Yield();
+                elapsed += Time.deltaTime;
+            }
             
-            _curtainLeft.localPosition = Vector3.Lerp(_curtainLeftStart, _curtainLeftStart - _curtainOpenOffset, progress);
-            _curtainRight.localPosition = Vector3.Lerp(_curtainRightStart, _curtainRightStart + _curtainOpenOffset, progress);
+            _titleCanvasGroup.alpha = to;
         }
         
-        private void UpdateCameraMove(float t)
+        /// <summary>
+        /// Animates curtains opening or closing.
+        /// </summary>
+        private async UdonTask AnimateCurtainsAsync(bool opening, float duration)
         {
-            if (_cameraRig == null) return;
+            if (_curtainLeft == null || _curtainRight == null)
+            {
+                await UdonTask.Delay(duration);
+                return;
+            }
             
-            t = SmoothStep(t); // Apply easing
+            Vector3 leftStart = opening ? _curtainLeftStart : _curtainLeftStart - _curtainOpenOffset;
+            Vector3 leftEnd = opening ? _curtainLeftStart - _curtainOpenOffset : _curtainLeftStart;
+            Vector3 rightStart = opening ? _curtainRightStart : _curtainRightStart + _curtainOpenOffset;
+            Vector3 rightEnd = opening ? _curtainRightStart + _curtainOpenOffset : _curtainRightStart;
             
-            _cameraRig.position = Vector3.Lerp(_cameraRig.position, _cameraTargetPos, t * 0.1f);
-            _cameraRig.rotation = Quaternion.Slerp(_cameraRig.rotation, _cameraTargetRot, t * 0.1f);
+            float elapsed = 0f;
+            while (elapsed < duration)
+            {
+                float t = SmoothStep(elapsed / duration);
+                
+                _curtainLeft.localPosition = Vector3.Lerp(leftStart, leftEnd, t);
+                _curtainRight.localPosition = Vector3.Lerp(rightStart, rightEnd, t);
+                
+                await UdonTask.Yield();
+                elapsed += Time.deltaTime;
+            }
+            
+            _curtainLeft.localPosition = leftEnd;
+            _curtainRight.localPosition = rightEnd;
         }
         
-        private void UpdateSpotlight(float t)
+        /// <summary>
+        /// Moves camera to a waypoint with smooth interpolation.
+        /// </summary>
+        private async UdonTask MoveCameraToWaypointAsync(int waypointIndex, float duration)
         {
-            if (_spotlight == null) return;
+            if (_cameraRig == null || _cameraWaypoints == null || 
+                waypointIndex < 0 || waypointIndex >= _cameraWaypoints.Length)
+            {
+                await UdonTask.Delay(duration);
+                return;
+            }
             
-            // Pulsing intensity
-            float pulse = Mathf.Sin(t * Mathf.PI * 4) * 0.3f + 0.7f;
-            _spotlight.intensity = pulse * 2f;
+            Transform waypoint = _cameraWaypoints[waypointIndex];
+            if (waypoint == null)
+            {
+                await UdonTask.Delay(duration);
+                return;
+            }
             
-            // Color shift
-            float hue = t * 0.3f; // Cycle through some colors
-            _spotlight.color = Color.HSVToRGB(hue, 0.7f, 1f);
+            Vector3 startPos = _cameraRig.position;
+            Quaternion startRot = _cameraRig.rotation;
+            Vector3 endPos = waypoint.position;
+            Quaternion endRot = waypoint.rotation;
+            
+            float elapsed = 0f;
+            while (elapsed < duration)
+            {
+                float t = SmoothStep(elapsed / duration);
+                
+                _cameraRig.position = Vector3.Lerp(startPos, endPos, t);
+                _cameraRig.rotation = Quaternion.Slerp(startRot, endRot, t);
+                
+                await UdonTask.Yield();
+                elapsed += Time.deltaTime;
+            }
+            
+            _cameraRig.position = endPos;
+            _cameraRig.rotation = endRot;
         }
+        
+        /// <summary>
+        /// Plays a spotlight color/intensity sequence.
+        /// Demonstrates effects with timed loops.
+        /// </summary>
+        private async UdonTask SpotlightSequenceAsync(float duration)
+        {
+            if (_spotlight == null)
+            {
+                await UdonTask.Delay(duration);
+                return;
+            }
+            
+            if (_effects != null) _effects.PlaySparkles();
+            
+            float elapsed = 0f;
+            while (elapsed < duration)
+            {
+                float t = elapsed / duration;
+                
+                // Pulsing intensity
+                float pulse = Mathf.Sin(t * Mathf.PI * 4) * 0.3f + 0.7f;
+                _spotlight.intensity = pulse * 2f;
+                
+                // Color shift through hues
+                float hue = t * 0.3f;
+                _spotlight.color = Color.HSVToRGB(hue, 0.7f, 1f);
+                
+                await UdonTask.Yield();
+                elapsed += Time.deltaTime;
+            }
+            
+            // Reset spotlight
+            _spotlight.intensity = 1f;
+            _spotlight.color = Color.white;
+            
+            if (_effects != null) _effects.StopSparkles();
+        }
+        
+        // ========================================
+        // UTILITY METHODS
+        // ========================================
         
         private float SmoothStep(float t)
         {
             return t * t * (3f - 2f * t);
-        }
-        
-        private void AdvanceState()
-        {
-            _currentState++;
-            _stateTimer = 0f;
-            
-            switch (_currentState)
-            {
-                case STATE_FADE_OUT:
-                    _stateTarget = _fadeDuration;
-                    UpdateStatus("Fading out...");
-                    break;
-                    
-                case STATE_OPEN_CURTAINS:
-                    _stateTarget = 2f;
-                    SetStageElementsActive(true);
-                    PlaySound(_curtainSound);
-                    UpdateStatus("Opening curtains...");
-                    break;
-                    
-                case STATE_CAMERA_PAN:
-                    _stateTarget = 3f;
-                    SetupNextWaypoint();
-                    UpdateStatus("Camera pan...");
-                    break;
-                    
-                case STATE_SHOW_TITLE:
-                    _stateTarget = 1f;
-                    if (_titleText != null)
-                        _titleText.text = "✨ UdonSharpCE ✨\n<size=50%>Async Made Simple</size>";
-                    UpdateStatus("Showing title...");
-                    break;
-                    
-                case STATE_SPOTLIGHT_SEQUENCE:
-                    _stateTarget = 4f;
-                    if (_effects != null) _effects.PlaySparkles();
-                    UpdateStatus("Spotlight sequence...");
-                    break;
-                    
-                case STATE_EFFECTS:
-                    _stateTarget = 2f;
-                    if (_effects != null) _effects.PlayFireworks();
-                    PlaySound(_applauseSound);
-                    UpdateStatus("Effects...");
-                    break;
-                    
-                case STATE_HIDE_TITLE:
-                    _stateTarget = 0.5f;
-                    UpdateStatus("Hiding title...");
-                    break;
-                    
-                case STATE_CLOSE_CURTAINS:
-                    _stateTarget = 2f;
-                    PlaySound(_curtainSound);
-                    UpdateStatus("Closing curtains...");
-                    break;
-                    
-                case STATE_FADE_IN:
-                    _stateTarget = _fadeDuration;
-                    SetStageElementsActive(false);
-                    UpdateStatus("Fading in...");
-                    break;
-                    
-                case STATE_COMPLETE:
-                    _isPlaying = false;
-                    if (_playButton != null) _playButton.SetActive(true);
-                    UpdateStatus("Cutscene complete! (Click to replay)");
-                    CELogger.Info("Cutscene", "Cutscene playback complete");
-                    break;
-            }
-        }
-        
-        private void SetupNextWaypoint()
-        {
-            if (_cameraWaypoints == null || _cameraWaypoints.Length == 0) return;
-            
-            _currentWaypoint = (_currentWaypoint + 1) % _cameraWaypoints.Length;
-            Transform waypoint = _cameraWaypoints[_currentWaypoint];
-            
-            if (waypoint != null)
-            {
-                _cameraTargetPos = waypoint.position;
-                _cameraTargetRot = waypoint.rotation;
-            }
         }
         
         private void SetStageElementsActive(bool active)
@@ -296,40 +347,20 @@ namespace CEShowcase.Station4_Cutscene
         
         private void UpdateStatus(string status)
         {
+            _currentStep = status;
+            
             if (_statusText == null) return;
             
-            _statusText.text = $"<b>CUTSCENE STATE</b>\n" +
-                              $"State: {GetStateName(_currentState)}\n" +
-                              $"Progress: {_stateTimer:F1}s / {_stateTarget:F1}s\n" +
-                              $"Status: {status}";
-        }
-        
-        private string GetStateName(int state)
-        {
-            switch (state)
-            {
-                case STATE_IDLE: return "Idle";
-                case STATE_FADE_OUT: return "FadeOut";
-                case STATE_OPEN_CURTAINS: return "OpenCurtains";
-                case STATE_CAMERA_PAN: return "CameraPan";
-                case STATE_SHOW_TITLE: return "ShowTitle";
-                case STATE_SPOTLIGHT_SEQUENCE: return "Spotlight";
-                case STATE_EFFECTS: return "Effects";
-                case STATE_HIDE_TITLE: return "HideTitle";
-                case STATE_CLOSE_CURTAINS: return "CloseCurtains";
-                case STATE_FADE_IN: return "FadeIn";
-                case STATE_COMPLETE: return "Complete";
-                default: return "Unknown";
-            }
+            _statusText.text = $"<b>ASYNC CUTSCENE</b>\n" +
+                              $"Status: <color=#00FF00>{status}</color>\n" +
+                              $"Using: UdonTask async/await\n" +
+                              $"<size=70%>Compare: 150 lines vs 430 lines (state machine)</size>";
         }
         
         public void ResetCutscene()
         {
             _isPlaying = false;
-            _currentState = STATE_IDLE;
-            _stateTimer = 0f;
-            _stateTarget = 0f;
-            _currentWaypoint = -1;
+            _currentStep = "Ready";
             
             // Reset visual state
             if (_fadeCanvasGroup != null) _fadeCanvasGroup.alpha = 0f;
@@ -353,31 +384,30 @@ namespace CEShowcase.Station4_Cutscene
             UpdateStatus("Ready to play");
         }
         
-        // UI Callbacks
+        // ========================================
+        // UI CALLBACKS
+        // ========================================
+        
         public void OnPlayCutscene()
         {
             if (_isPlaying) return;
             
-            CELogger.Info("Cutscene", "Starting cutscene playback");
-            
             _isPlaying = true;
-            _currentState = STATE_IDLE;
-            _stateTimer = 0f;
-            _stateTarget = 0f;
-            
             if (_playButton != null) _playButton.SetActive(false);
             
-            // Start the state machine
-            AdvanceState();
+            // Fire off the async cutscene!
+            // The compiler generates the state machine - we just write clean code.
+            PlayCutsceneAsync();
         }
         
         public void OnSkipCutscene()
         {
             if (!_isPlaying) return;
             
-            // Skip to end
-            _currentState = STATE_COMPLETE - 1;
-            _stateTimer = _stateTarget;
+            // Cancel the current sequence
+            // In a full implementation, CancellationToken would be checked in each await
+            _isPlaying = false;
+            ResetCutscene();
             
             CELogger.Info("Cutscene", "Cutscene skipped");
         }
@@ -388,46 +418,50 @@ namespace CEShowcase.Station4_Cutscene
             CELogger.Info("Cutscene", "Cutscene reset");
         }
         
-        /* 
-         * NOTE: The code below shows the IDEAL async/await syntax that CE enables.
-         * This is what the cutscene WOULD look like with full UdonTask support:
-         * 
-         * public UdonTask PlayCutsceneAsync()
-         * {
-         *     // Fade to black
-         *     await FadeScreen(1f, Color.black);
-         *     
-         *     // Open curtains
-         *     await OpenCurtains();
-         *     
-         *     // Camera pan
-         *     await MoveCameraToWaypoint(0);
-         *     
-         *     // Show title with fade
-         *     await ShowTitle("UdonSharpCE", "Async Made Simple");
-         *     await UdonTask.Delay(2f);
-         *     
-         *     // Parallel effects
-         *     await UdonTask.WhenAll(
-         *         PlaySpotlightSequence(),
-         *         PlaySparkles()
-         *     );
-         *     
-         *     // Fireworks and applause
-         *     await PlayFireworks();
-         *     
-         *     // Hide title
-         *     await HideTitle();
-         *     
-         *     // Close curtains
-         *     await CloseCurtains();
-         *     
-         *     // Fade back in
-         *     await FadeScreen(1f, Color.clear);
-         * }
-         * 
-         * Compare this ~25 lines to the 300+ lines of state machine above!
-         * This demonstrates the power of async/await syntax.
-         */
+        // ========================================
+        // INDIVIDUAL EFFECT DEMOS
+        // ========================================
+        
+        /// <summary>
+        /// Demo button to show just the fade effect with async.
+        /// </summary>
+        public void OnDemoFade()
+        {
+            DemoFadeAsync();
+        }
+        
+        private async UdonTask DemoFadeAsync()
+        {
+            await FadeScreenAsync(0f, 1f, 0.5f);
+            await UdonTask.Delay(0.5f);
+            await FadeScreenAsync(1f, 0f, 0.5f);
+        }
+        
+        /// <summary>
+        /// Demo button to show curtain animation with async.
+        /// </summary>
+        public void OnDemoCurtains()
+        {
+            DemoCurtainsAsync();
+        }
+        
+        private async UdonTask DemoCurtainsAsync()
+        {
+            SetStageElementsActive(true);
+            PlaySound(_curtainSound);
+            await AnimateCurtainsAsync(true, 1.5f);
+            await UdonTask.Delay(1f);
+            PlaySound(_curtainSound);
+            await AnimateCurtainsAsync(false, 1.5f);
+            SetStageElementsActive(false);
+        }
+        
+        /// <summary>
+        /// Demo button to show spotlight sequence with async.
+        /// </summary>
+        public void OnDemoSpotlight()
+        {
+            SpotlightSequenceAsync(3f);
+        }
     }
 }

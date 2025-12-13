@@ -16,6 +16,12 @@ namespace UdonSharp.Compiler.Symbols
         internal const int HEADER_SIZE = 1;
         
         public const int HEADER_TYPE_ID_INDEX = 0;
+        
+        /// <summary>
+        /// CE library namespace prefix. Types in this namespace are compiler infrastructure
+        /// and may use features (like structs) that are not supported for regular user types.
+        /// </summary>
+        private const string CELibraryNamespacePrefix = "UdonSharp.CE";
 
         public override int UserTypeAllocationSize => FieldSymbols.Count(e => !e.IsStatic && !e.IsConst) + HEADER_SIZE;
         
@@ -53,7 +59,10 @@ namespace UdonSharp.Compiler.Symbols
             if (IsArray)
                 return;
             
-            if (RoslynSymbol.IsValueType && RoslynSymbol.TypeKind != TypeKind.Enum)
+            // CE library types (UdonSharp.CE.*) are compiler infrastructure and exempt from struct restrictions
+            bool isCELibraryType = IsCELibraryType(RoslynSymbol);
+            
+            if (RoslynSymbol.IsValueType && RoslynSymbol.TypeKind != TypeKind.Enum && !isCELibraryType)
                 throw new NotSupportedException("Structs are not supported for user types, consider using class", RoslynSymbol.DeclaringSyntaxReferences.First().GetSyntax().GetLocation());
             
             if (RoslynSymbol.TypeKind == TypeKind.Interface)
@@ -143,6 +152,19 @@ namespace UdonSharp.Compiler.Symbols
                 throw new ArgumentException($"Could not get field index {field} for type {this}", nameof(field));
             
             return fieldIndex + HEADER_SIZE;
+        }
+        
+        /// <summary>
+        /// Checks if a type is part of the CE library infrastructure.
+        /// CE library types are allowed to use features like structs that are not
+        /// supported for regular user types.
+        /// </summary>
+        private static bool IsCELibraryType(ITypeSymbol typeSymbol)
+        {
+            string containingNamespace = typeSymbol.ContainingNamespace?.ToDisplayString();
+            return containingNamespace != null && 
+                   (containingNamespace.StartsWith(CELibraryNamespacePrefix + ".") || 
+                    containingNamespace == CELibraryNamespacePrefix);
         }
     }
 }

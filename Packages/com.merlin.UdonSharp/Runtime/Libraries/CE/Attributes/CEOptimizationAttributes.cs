@@ -56,7 +56,7 @@ namespace UdonSharp.CE
     /// [CEUnroll(maxIterations: 8)]
     /// void ProcessOctants()
     /// {
-    ///     for (int i = 0; i &lt; 8; i++) { /* ... */ }
+    ///     for (int i = 0; i < 8; i++) { /* ... */ }
     /// }
     /// </example>
     [AttributeUsage(AttributeTargets.Method, AllowMultiple = false)]
@@ -106,6 +106,32 @@ namespace UdonSharp.CE
     /// </example>
     [AttributeUsage(AttributeTargets.Method, AllowMultiple = false)]
     public class CEDebugOnlyAttribute : Attribute
+    {
+    }
+
+    /// <summary>
+    /// Prevents the Action → CECallback transformation on the marked type or method.
+    /// Use when implementing BCL interfaces that require Action parameters (e.g., INotifyCompletion).
+    /// </summary>
+    /// <remarks>
+    /// UdonSharp's CE transformer normally converts all Action delegates to CECallback structs
+    /// since Udon doesn't support delegates. However, some BCL interfaces require Action
+    /// parameters in their signatures. This attribute prevents that transformation.
+    /// 
+    /// Note: Code marked with this attribute must not be executed at Udon runtime since
+    /// Action delegates are not supported. It's intended for compile-time infrastructure
+    /// like awaiters that are transformed away before runtime.
+    /// </remarks>
+    /// <example>
+    /// [CEPreserveAction]
+    /// public struct UdonTaskAwaiter : INotifyCompletion
+    /// {
+    ///     // OnCompleted(Action) signature is preserved for C# compiler compatibility
+    ///     public void OnCompleted(Action continuation) { }
+    /// }
+    /// </example>
+    [AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct | AttributeTargets.Method, AllowMultiple = false)]
+    public class CEPreserveActionAttribute : Attribute
     {
     }
 }

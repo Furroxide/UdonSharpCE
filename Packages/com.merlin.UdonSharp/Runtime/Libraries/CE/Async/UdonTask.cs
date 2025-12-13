@@ -1,3 +1,5 @@
+using System;
+using System.Runtime.CompilerServices;
 using JetBrains.Annotations;
 using UnityEngine;
 
@@ -44,6 +46,7 @@ namespace UdonSharp.CE.Async
     /// </code>
     /// </example>
     [PublicAPI]
+    [AsyncMethodBuilder(typeof(AsyncUdonTaskMethodBuilder))]
     public struct UdonTask
     {
         /// <summary>
@@ -254,6 +257,30 @@ namespace UdonSharp.CE.Async
                 _status = TaskStatus.Faulted,
                 _error = error
             };
+        }
+
+        /// <summary>
+        /// Creates a faulted task from an exception.
+        /// </summary>
+        /// <param name="exception">The exception that caused the fault.</param>
+        /// <returns>A task in the Faulted state.</returns>
+        public static UdonTask FromException(Exception exception)
+        {
+            return new UdonTask
+            {
+                _status = TaskStatus.Faulted,
+                _error = exception?.Message ?? "Unknown error"
+            };
+        }
+
+        /// <summary>
+        /// Gets an awaiter for this task.
+        /// This enables the async/await pattern for UdonTask.
+        /// </summary>
+        /// <returns>An awaiter that can be used to await this task.</returns>
+        public UdonTaskAwaiter GetAwaiter()
+        {
+            return new UdonTaskAwaiter(this);
         }
 
         /// <summary>

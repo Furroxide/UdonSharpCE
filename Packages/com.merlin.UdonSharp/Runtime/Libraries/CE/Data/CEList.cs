@@ -8,7 +8,7 @@ namespace UdonSharp.CE.Data
 {
     /// <summary>
     /// A type-safe list wrapper with DataList bridge methods.
-    /// Provides seamless conversion between UdonSharp List&lt;T&gt; and VRChat DataList.
+    /// Provides seamless conversion between UdonSharp List{T} and VRChat DataList.
     /// </summary>
     public class CEList<T> : IEnumerable
     #if COMPILER_UDONSHARP

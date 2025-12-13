@@ -44,7 +44,7 @@ namespace UdonSharp.CE.Perf
     ///     {
     ///         // Clear and rebuild grid each frame
     ///         grid.Clear();
-    ///         for (int i = 0; i &lt; entityCount; i++)
+    ///         for (int i = 0; i < entityCount; i++)
     ///         {
     ///             grid.Insert(i, positions[i]);
     ///         }

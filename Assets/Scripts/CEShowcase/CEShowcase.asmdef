@@ -12,7 +12,8 @@
     "overrideReferences": true,
     "precompiledReferences": [
         "VRCSDKBase.dll",
-        "VRCSDK3.dll"
+        "VRCSDK3.dll",
+        "VRC.Udon.Common.dll"
     ],
     "autoReferenced": true,
     "defineConstraints": [],

@@ -29,7 +29,7 @@ namespace UdonSharp.CE.Editor.Optimizers
     /// </summary>
     internal class LoopInvariantCodeMotionOptimizer : ICompileTimeOptimizer
     {
-        public string OptimizerId => "CEOPT007";
+        public string OptimizerId => "CEOPT010";
         public string OptimizerName => "Loop Invariant Code Motion";
         public string Description => "Hoists invariant computations out of loops to reduce per-iteration work.";
         public bool IsEnabledByDefault => true;
@@ -161,7 +161,7 @@ namespace UdonSharp.CE.Editor.Optimizers
                     replacements[expr.NormalizeWhitespace().ToFullString()] = tempName;
 
                     _context.RecordOptimization(
-                        "CEOPT007",
+                        "CEOPT010",
                         $"Hoisted loop-invariant expression: {TruncateString(expr.ToString(), 50)}",
                         expr.GetLocation(),
                         expr.ToString(),
@@ -466,12 +466,14 @@ namespace UdonSharp.CE.Editor.Optimizers
 
             private bool IsInvariant(ExpressionSyntax expression)
             {
-                var identifiers = expression.DescendantNodes()
+                var identifiers = expression.DescendantNodesAndSelf()
                     .OfType<IdentifierNameSyntax>()
                     .Select(id => id.Identifier.Text);
 
                 foreach (var identifier in identifiers)
                 {
+                    // Modified variables include those declared inside the loop body,
+                    // so any reference to them makes the expression non-invariant
                     if (_modifiedVariables.Contains(identifier))
                         return false;
                 }

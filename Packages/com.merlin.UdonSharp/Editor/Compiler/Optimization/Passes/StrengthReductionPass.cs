@@ -15,8 +15,11 @@ namespace UdonSharp.Compiler.Optimization.Passes
     /// - Multiplication by 1: x * 1 → x
     /// - Division by 1: x / 1 → x
     /// - Addition/subtraction of 0: x + 0, x - 0 → x
-    /// - Division by power-of-2: x / 4.0f → x * 0.25f (cheaper operation)
-    /// - Integer multiplication by power-of-2: x * 8 → x &lt;&lt; 3 (shift operation)
+    /// - Self-subtraction: x - x → 0
+    /// - Self-OR: x | x → x
+    /// - Self-AND: x &amp; x → x
+    /// - XOR with zero: x ^ 0 → x
+    /// - Self-XOR: x ^ x → 0
     /// 
     /// This pass operates on the instruction stream after emit, identifying
     /// PUSH-PUSH-EXTERN sequences where one operand is a constant that matches
@@ -102,7 +105,22 @@ namespace UdonSharp.Compiler.Optimization.Passes
 
                 case "Subtraction":
                     changed = TryReduceSubtraction(context, externIndex, leftValue, rightValue,
+                        leftIndex, rightIndex, destValue, destIndex, operandType);
+                    break;
+
+                case "BitwiseOr":
+                    changed = TryReduceBitwiseOr(context, externIndex, leftValue, rightValue,
                         leftIndex, rightIndex, destValue, destIndex);
+                    break;
+
+                case "BitwiseAnd":
+                    changed = TryReduceBitwiseAnd(context, externIndex, leftValue, rightValue,
+                        leftIndex, rightIndex, destValue, destIndex);
+                    break;
+
+                case "ExclusiveOr":
+                    changed = TryReduceExclusiveOr(context, externIndex, leftValue, rightValue,
+                        leftIndex, rightIndex, destValue, destIndex, operandType);
                     break;
             }
 
@@ -133,6 +151,18 @@ namespace UdonSharp.Compiler.Optimization.Passes
             else if (signature.Contains("__op_Subtraction__"))
             {
                 operation = "Subtraction";
+            }
+            else if (signature.Contains("__op_BitwiseOr__"))
+            {
+                operation = "BitwiseOr";
+            }
+            else if (signature.Contains("__op_BitwiseAnd__"))
+            {
+                operation = "BitwiseAnd";
+            }
+            else if (signature.Contains("__op_ExclusiveOr__"))
+            {
+                operation = "ExclusiveOr";
             }
             else
             {
@@ -302,7 +332,7 @@ namespace UdonSharp.Compiler.Optimization.Passes
 
         private bool TryReduceSubtraction(OptimizationContext context, int externIndex,
             Value leftValue, Value rightValue, int leftIndex, int rightIndex,
-            Value destValue, int destIndex)
+            Value destValue, int destIndex, string operandType)
         {
             // x - 0 → x
             if (IsZeroConstant(rightValue))
@@ -313,7 +343,150 @@ namespace UdonSharp.Compiler.Optimization.Passes
                 return true;
             }
 
+            // x - x → 0 (when both operands are the same value)
+            if (leftValue == rightValue && leftValue != null)
+            {
+                // Create a zero constant of the appropriate type
+                Value zeroValue = CreateZeroConstant(context, operandType);
+                if (zeroValue != null)
+                {
+                    ReplaceWithCopyConstant(context, externIndex, destValue, zeroValue,
+                        leftIndex, rightIndex, destIndex);
+                    context.Metrics.RecordPassMetric(Name, "SelfSubtraction", 1);
+                    return true;
+                }
+            }
+
             return false;
+        }
+
+        private bool TryReduceBitwiseOr(OptimizationContext context, int externIndex,
+            Value leftValue, Value rightValue, int leftIndex, int rightIndex,
+            Value destValue, int destIndex)
+        {
+            // x | x → x (when both operands are the same value)
+            if (leftValue == rightValue && leftValue != null)
+            {
+                ReplaceWithCopyValue(context, externIndex, destValue, leftValue,
+                    leftIndex, rightIndex, destIndex);
+                context.Metrics.RecordPassMetric(Name, "SelfOr", 1);
+                return true;
+            }
+
+            // x | 0 → x
+            if (IsZeroConstant(rightValue))
+            {
+                ReplaceWithCopyValue(context, externIndex, destValue, leftValue,
+                    leftIndex, rightIndex, destIndex);
+                context.Metrics.RecordPassMetric(Name, "OrZero", 1);
+                return true;
+            }
+            if (IsZeroConstant(leftValue))
+            {
+                ReplaceWithCopyValue(context, externIndex, destValue, rightValue,
+                    leftIndex, rightIndex, destIndex);
+                context.Metrics.RecordPassMetric(Name, "OrZero", 1);
+                return true;
+            }
+
+            return false;
+        }
+
+        private bool TryReduceBitwiseAnd(OptimizationContext context, int externIndex,
+            Value leftValue, Value rightValue, int leftIndex, int rightIndex,
+            Value destValue, int destIndex)
+        {
+            // x & x → x (when both operands are the same value)
+            if (leftValue == rightValue && leftValue != null)
+            {
+                ReplaceWithCopyValue(context, externIndex, destValue, leftValue,
+                    leftIndex, rightIndex, destIndex);
+                context.Metrics.RecordPassMetric(Name, "SelfAnd", 1);
+                return true;
+            }
+
+            // x & 0 → 0
+            if (IsZeroConstant(rightValue))
+            {
+                ReplaceWithCopyConstant(context, externIndex, destValue, rightValue,
+                    leftIndex, rightIndex, destIndex);
+                context.Metrics.RecordPassMetric(Name, "AndZero", 1);
+                return true;
+            }
+            if (IsZeroConstant(leftValue))
+            {
+                ReplaceWithCopyConstant(context, externIndex, destValue, leftValue,
+                    leftIndex, rightIndex, destIndex);
+                context.Metrics.RecordPassMetric(Name, "AndZero", 1);
+                return true;
+            }
+
+            return false;
+        }
+
+        private bool TryReduceExclusiveOr(OptimizationContext context, int externIndex,
+            Value leftValue, Value rightValue, int leftIndex, int rightIndex,
+            Value destValue, int destIndex, string operandType)
+        {
+            // x ^ 0 → x
+            if (IsZeroConstant(rightValue))
+            {
+                ReplaceWithCopyValue(context, externIndex, destValue, leftValue,
+                    leftIndex, rightIndex, destIndex);
+                context.Metrics.RecordPassMetric(Name, "XorZero", 1);
+                return true;
+            }
+            if (IsZeroConstant(leftValue))
+            {
+                ReplaceWithCopyValue(context, externIndex, destValue, rightValue,
+                    leftIndex, rightIndex, destIndex);
+                context.Metrics.RecordPassMetric(Name, "XorZero", 1);
+                return true;
+            }
+
+            // x ^ x → 0 (when both operands are the same value)
+            if (leftValue == rightValue && leftValue != null)
+            {
+                Value zeroValue = CreateZeroConstant(context, operandType);
+                if (zeroValue != null)
+                {
+                    ReplaceWithCopyConstant(context, externIndex, destValue, zeroValue,
+                        leftIndex, rightIndex, destIndex);
+                    context.Metrics.RecordPassMetric(Name, "SelfXor", 1);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Creates a zero constant value of the appropriate type for self-subtraction and self-XOR patterns.
+        /// </summary>
+        private Value CreateZeroConstant(OptimizationContext context, string operandType)
+        {
+            // Try to find an existing zero constant of this type in the value table
+            foreach (var value in context.RootValueTable.GetAllUniqueChildValues())
+            {
+                if (!value.IsConstant)
+                    continue;
+
+                if (IsZeroConstant(value))
+                {
+                    // Check type matches
+                    string valueTypeName = value.UdonType?.ExternSignature ?? "";
+                    if ((operandType == "Int32" && valueTypeName.Contains("Int32")) ||
+                        (operandType == "Single" && valueTypeName.Contains("Single")) ||
+                        (operandType == "Double" && valueTypeName.Contains("Double")))
+                    {
+                        return value;
+                    }
+                }
+            }
+
+            // If no existing zero constant found, we can't create one at this level
+            // The optimization will be skipped
+            return null;
         }
 
         private bool IsZeroConstant(Value value)

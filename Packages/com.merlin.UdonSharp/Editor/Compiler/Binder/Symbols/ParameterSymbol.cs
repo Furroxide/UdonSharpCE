@@ -31,17 +31,36 @@ namespace UdonSharp.Compiler.Symbols
 
             if (RoslynSymbol.HasExplicitDefaultValue)
             {
-                if (Type.IsEnum)
+                try
                 {
-                    DefaultValue = (IConstantValue) Activator.CreateInstance(
-                        typeof(ConstantValue<>).MakeGenericType(Type.UdonType.SystemType),
-                        Enum.ToObject(Type.UdonType.SystemType, RoslynSymbol.ExplicitDefaultValue));
+                    // Skip creating ConstantValue for types with unbound generic parameters
+                    // (e.g., Func<T, TResult> where T/TResult are not resolved)
+                    // These cannot be instantiated and will cause Activator.CreateInstance to fail
+                    var systemType = Type?.UdonType?.SystemType;
+                    if (systemType != null && 
+                        !systemType.ContainsGenericParameters && 
+                        !systemType.IsGenericTypeDefinition)
+                    {
+                        var constantValueType = typeof(ConstantValue<>).MakeGenericType(systemType);
+                        
+                        if (Type.IsEnum)
+                        {
+                            DefaultValue = (IConstantValue) Activator.CreateInstance(
+                                constantValueType,
+                                Enum.ToObject(systemType, RoslynSymbol.ExplicitDefaultValue));
+                        }
+                        else
+                        {
+                            DefaultValue = (IConstantValue) Activator.CreateInstance(
+                                constantValueType,
+                                RoslynSymbol.ExplicitDefaultValue);
+                        }
+                    }
                 }
-                else
+                catch (ArgumentException)
                 {
-                    DefaultValue = (IConstantValue) Activator.CreateInstance(
-                        typeof(ConstantValue<>).MakeGenericType(Type.UdonType.SystemType),
-                        RoslynSymbol.ExplicitDefaultValue);
+                    // Silently ignore - types with generic parameters or other issues
+                    // will not have default values tracked, which is acceptable
                 }
             }
         }

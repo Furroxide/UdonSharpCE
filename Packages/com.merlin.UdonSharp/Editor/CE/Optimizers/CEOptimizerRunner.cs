@@ -45,10 +45,10 @@ namespace UdonSharp.CE.Editor.Optimizers
                 new AsyncMethodTransformOptimizer(), // Priority 1 - Transform async/await FIRST before anything else
                 new ActionToCallbackTransformer(), // Priority 3 - Transform Action delegates to CECallback before other optimizations
                 new CELoggerTransformOptimizer(),  // Priority 5 - Transform CELogger calls before other optimizations
-                new ConstantFoldingOptimizer(),    // Priority 10
 
                 // Priority 100-199: Standard optimizations
-                new DeadCodeEliminationOptimizer(),           // Priority 100
+                // Note: ConstantFoldingOptimizer (CEOPT001) retired - Binder's ConstantExpressionOptimizer handles this
+                // Note: DeadCodeEliminationOptimizer (CEOPT002) retired - binary-level passes handle this
                 new LoopInvariantCodeMotionOptimizer(),       // Priority 105 - Hoist invariants before other loop opts
                 new SmallLoopUnrollingOptimizer(),            // Priority 110
                 new CommonSubexpressionEliminationOptimizer(), // Priority 115 - CSE after loop opts

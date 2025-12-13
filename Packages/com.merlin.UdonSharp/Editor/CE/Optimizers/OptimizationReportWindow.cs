@@ -312,11 +312,14 @@ namespace UdonSharp.CE.Editor.Optimizers
         {
             switch (id)
             {
-                case "CEOPT001": return "ConstFold";
-                case "CEOPT002": return "DeadCode";
                 case "CEOPT003": return "Unroll";
                 case "CEOPT004": return "Inline";
                 case "CEOPT005": return "Intern";
+                case "CEOPT006": return "Logger";
+                case "CEOPT007": return "Callback";
+                case "CEOPT008": return "ExternCache";
+                case "CEOPT009": return "CSE";
+                case "CEOPT010": return "LICM";
                 default: return id;
             }
         }
@@ -325,11 +328,14 @@ namespace UdonSharp.CE.Editor.Optimizers
         {
             switch (id)
             {
-                case "CEOPT001": return "Constant Folding";
-                case "CEOPT002": return "Dead Code Elimination";
                 case "CEOPT003": return "Small Loop Unrolling";
                 case "CEOPT004": return "Tiny Method Inlining";
                 case "CEOPT005": return "String Interning";
+                case "CEOPT006": return "CELogger Transform";
+                case "CEOPT007": return "Action to CECallback";
+                case "CEOPT008": return "Extern Call Caching";
+                case "CEOPT009": return "Common Subexpression Elimination";
+                case "CEOPT010": return "Loop Invariant Code Motion";
                 default: return id;
             }
         }
@@ -361,11 +367,14 @@ namespace UdonSharp.CE.Editor.Optimizers
             {
                 var name = id switch
                 {
-                    "CEOPT001" => "Constant Folding",
-                    "CEOPT002" => "Dead Code Elimination",
                     "CEOPT003" => "Small Loop Unrolling",
                     "CEOPT004" => "Tiny Method Inlining",
                     "CEOPT005" => "String Interning",
+                    "CEOPT006" => "CELogger Transform",
+                    "CEOPT007" => "Action to CECallback",
+                    "CEOPT008" => "Extern Call Caching",
+                    "CEOPT009" => "Common Subexpression Elimination",
+                    "CEOPT010" => "Loop Invariant Code Motion",
                     _ => id
                 };
                 sb.AppendLine($"  ✓ {name}: {count}");

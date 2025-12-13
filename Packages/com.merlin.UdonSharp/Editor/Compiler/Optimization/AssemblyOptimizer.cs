@@ -32,6 +32,7 @@ namespace UdonSharp.Compiler.Optimization
                 new RedundantCopyEliminationPass(),
                 new PeepholeOptimizationPass(),
                 new StrengthReductionPass(),  // Priority 125: replace expensive ops with cheaper equivalents
+                new ExternDeduplicationPass(), // Priority 130: CSE for extern calls
 
                 // Priority 200-299: propagation
                 new CopyPropagationPass(),
