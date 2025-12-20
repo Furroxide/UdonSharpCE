@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using UdonSharp.Compiler.Binder;
+using UnityEngine;
 using NotSupportedException = UdonSharp.Core.NotSupportedException;
 
 namespace UdonSharp.Compiler.Symbols
@@ -71,7 +72,11 @@ namespace UdonSharp.Compiler.Symbols
             if (RoslynSymbol.IsAbstract)
                 throw new NotSupportedException("Abstract classes are not supported by U#", RoslynSymbol.DeclaringSyntaxReferences.First().GetSyntax().GetLocation());
             
-            if (!IsValueType && (BaseType != context.GetTypeSymbol(typeof(object))))
+            // Skip inheritance check for classes that derive from Unity asset types (ScriptableObject, etc.)
+            // These are Unity-native types that shouldn't be compiled by U# but may exist in U# assemblies
+            bool isUnityAssetType = InheritsFromUnityAssetType(RoslynSymbol, context);
+            
+            if (!IsValueType && !isUnityAssetType && (BaseType != context.GetTypeSymbol(typeof(object))))
                 throw new NotSupportedException("Inheritance is not supported by U# on non-UdonSharpBehaviour classes", RoslynSymbol.DeclaringSyntaxReferences.First().GetSyntax().GetLocation());
             
             foreach (ISymbol symbol in RoslynSymbol.GetMembers())
@@ -165,6 +170,30 @@ namespace UdonSharp.Compiler.Symbols
             return containingNamespace != null && 
                    (containingNamespace.StartsWith(CELibraryNamespacePrefix + ".") || 
                     containingNamespace == CELibraryNamespacePrefix);
+        }
+        
+        /// <summary>
+        /// Checks if a type inherits from Unity asset types (ScriptableObject, etc.).
+        /// These are Unity-native types that exist in U# assemblies but shouldn't be 
+        /// compiled by U# - they're configuration assets, not Udon programs.
+        /// </summary>
+        private static bool InheritsFromUnityAssetType(ITypeSymbol typeSymbol, AbstractPhaseContext context)
+        {
+            // Walk up the type hierarchy looking for ScriptableObject
+            INamedTypeSymbol current = typeSymbol.BaseType;
+            
+            while (current != null)
+            {
+                string fullName = current.ToDisplayString();
+                // ScriptableObject and its derived Unity types
+                if (fullName == "UnityEngine.ScriptableObject" ||
+                    fullName == "UnityEngine.ScriptableSingleton`1")
+                    return true;
+                    
+                current = current.BaseType;
+            }
+            
+            return false;
         }
     }
 }

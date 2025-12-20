@@ -274,16 +274,35 @@ namespace UdonSharp.Compiler.Binder
         private static IConstantValue GetDefaultValue(TypeSymbol type)
         {
             IConstantValue constantValue;
+            Type systemType = type.UdonType.SystemType;
             
-            if (type.IsValueType)
+            // User-defined structs (CE library structs) are represented as object[] in Udon
+            // They need special handling since we can't create an object[] without a size
+            if (systemType == typeof(object[]))
             {
+                // User types mapped to object[] default to null
+                constantValue = new ConstantValue<object[]>(null);
+            }
+            else if (systemType.IsArray)
+            {
+                // Arrays default to null (not an empty array)
                 constantValue = (IConstantValue) Activator.CreateInstance(
-                    typeof(ConstantValue<>).MakeGenericType(type.UdonType.SystemType),
-                    Activator.CreateInstance(type.UdonType.SystemType, null));
+                    typeof(ConstantValue<>).MakeGenericType(systemType), 
+                    new object[] { null });
+            }
+            else if (type.IsValueType)
+            {
+                // Value types get their default value via Activator
+                constantValue = (IConstantValue) Activator.CreateInstance(
+                    typeof(ConstantValue<>).MakeGenericType(systemType),
+                    Activator.CreateInstance(systemType, null));
             }
             else
             {
-                constantValue = (IConstantValue) Activator.CreateInstance(typeof(ConstantValue<>).MakeGenericType(type.UdonType.SystemType), new object[] {null});
+                // Reference types default to null
+                constantValue = (IConstantValue) Activator.CreateInstance(
+                    typeof(ConstantValue<>).MakeGenericType(systemType), 
+                    new object[] { null });
             }
 
             return constantValue;
@@ -681,6 +700,12 @@ namespace UdonSharp.Compiler.Binder
             return VisitExpression(node.Expression, castType, true);
         }
 
+        // Udon doesn't have overflow checking, so checked/unchecked are no-ops
+        public override BoundNode VisitCheckedExpression(CheckedExpressionSyntax node)
+        {
+            return VisitExpression(node.Expression);
+        }
+
         private BoundExpression HandleShortCircuitOperator(BinaryExpressionSyntax node)
         {
             TypeSymbol booleanType = Context.GetTypeSymbol(SpecialType.System_Boolean);
@@ -731,6 +756,43 @@ namespace UdonSharp.Compiler.Binder
             return new BoundConstantExpression(booleanValue, booleanType, node);
         }
         
+        /// <summary>
+        /// Handles the 'as' operator (safe cast). In Udon, this is equivalent to a regular cast
+        /// that returns null if the cast fails, rather than throwing an exception.
+        /// </summary>
+        private BoundExpression HandleAsExpression(BinaryExpressionSyntax node)
+        {
+            // The right side is the target type
+            TypeSymbol targetType = GetTypeSymbol(node.Right);
+            
+            // Visit the left expression (the value being cast)
+            BoundExpression sourceExpression = VisitExpression(node.Left);
+            
+            // The 'as' operator is essentially a cast that can return null
+            // We treat it the same as a cast expression in Udon
+            return VisitExpression(node.Left, targetType, true);
+        }
+        
+        /// <summary>
+        /// Handles the 'is' operator (type check). Returns true if the left operand
+        /// is compatible with the type on the right.
+        /// </summary>
+        private BoundExpression HandleIsExpression(BinaryExpressionSyntax node)
+        {
+            // For basic 'is' type checks (not pattern matching)
+            TypeSymbol booleanType = Context.GetTypeSymbol(SpecialType.System_Boolean);
+            TypeSymbol targetType = GetTypeSymbol(node.Right);
+            BoundExpression sourceExpression = VisitExpression(node.Left);
+            
+            // Get the System.Type for the target
+            if (!targetType.IsExtern)
+                throw new NotSupportedException("The 'is' operator with user-defined types is not supported in UdonSharp", node.GetLocation());
+            
+            // For extern types, we can use Object.GetType() == typeof(T) pattern
+            // This is a simplified implementation - more complex patterns would need additional work
+            throw new NotSupportedException("The 'is' operator is not yet supported in UdonSharp. Use explicit null checks after 'as' casts instead.", node.GetLocation());
+        }
+        
         public override BoundNode VisitBinaryExpression(BinaryExpressionSyntax node)
         {
             if (node.Kind() == SyntaxKind.LogicalOrExpression ||
@@ -740,12 +802,24 @@ namespace UdonSharp.Compiler.Binder
             if (node.Kind() == SyntaxKind.CoalesceExpression)
                 return HandleNullCoalescingExpression(node);
 
+            // Handle 'as' expressions - these are safe cast attempts that return null on failure
+            if (node.Kind() == SyntaxKind.AsExpression)
+                return HandleAsExpression(node);
+
+            // Handle 'is' expressions - type pattern matching
+            if (node.Kind() == SyntaxKind.IsExpression)
+                return HandleIsExpression(node);
+
             MethodSymbol binaryMethodSymbol = (MethodSymbol)GetSymbol(node);
 
             if (binaryMethodSymbol == null &&
                 (node.Kind() == SyntaxKind.EqualsExpression ||
                  node.Kind() == SyntaxKind.NotEqualsExpression))
                 return HandleNullEqualsExpression(node);
+
+            // If we still have no method symbol, throw a clear error instead of null reference
+            if (binaryMethodSymbol == null)
+                throw new NotSupportedException($"Unsupported binary operator '{node.OperatorToken.Text}' for operand types", node.GetLocation());
 
             BoundExpression lhs = VisitExpression(node.Left, binaryMethodSymbol.Parameters[0].Type);
             BoundExpression rhs = VisitExpression(node.Right, binaryMethodSymbol.Parameters[1].Type);
@@ -973,14 +1047,38 @@ namespace UdonSharp.Compiler.Binder
         {
             MethodSymbol constructorSymbol = (MethodSymbol)GetSymbol(node);
             
-            int argCount = node.ArgumentList?.Arguments.Count ?? 0;
-            BoundExpression[] boundArguments = new BoundExpression[argCount];
+            // Size to parameter count, not argument count, to handle optional parameters
+            BoundExpression[] boundArguments = new BoundExpression[constructorSymbol.Parameters.Length];
+            var argumentsList = node.ArgumentList?.Arguments ?? default;
 
             bool isConstant = true;
 
             for (int i = 0; i < boundArguments.Length; ++i)
             {
-                boundArguments[i] = VisitExpression(node.ArgumentList.Arguments[i].Expression, constructorSymbol.Parameters[i].Type);
+                ArgumentSyntax argument;
+
+                if (i >= argumentsList.Count)
+                {
+                    argument = null;
+                }
+                else if (argumentsList[i].NameColon != null)
+                {
+                    // Named argument - find matching parameter
+                    argument = argumentsList.FirstOrDefault(x => x.NameColon?.Name.Identifier.ValueText == constructorSymbol.Parameters[i].Name);
+                }
+                else
+                {
+                    argument = argumentsList[i];
+                }
+
+                if (argument == null) // Default argument handling
+                {
+                    boundArguments[i] = new BoundConstantExpression(constructorSymbol.Parameters[i].DefaultValue, constructorSymbol.Parameters[i].Type, node);
+                    isConstant &= boundArguments[i].IsConstant;
+                    continue;
+                }
+
+                boundArguments[i] = VisitExpression(argument.Expression, constructorSymbol.Parameters[i].Type);
                 isConstant &= boundArguments[i].IsConstant;
             }
             
