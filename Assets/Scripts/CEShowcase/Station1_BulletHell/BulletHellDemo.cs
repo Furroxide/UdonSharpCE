@@ -2,6 +2,7 @@ using UdonSharp;
 using UdonSharp.CE.DevTools;
 using UdonSharp.CE.Perf;
 using UnityEngine;
+using VRC.SDKBase;
 
 namespace CEShowcase.Station1_BulletHell
 {
@@ -35,6 +36,9 @@ namespace CEShowcase.Station1_BulletHell
         
         [Header("Pattern Settings")]
         [SerializeField] private int _patternMode = 2; // Force random for bounce demo
+        
+        [Header("Player Collision")]
+        [SerializeField] private float _playerBounceRadius = 1.5f; // Collision sphere radius around player
         
         [Header("UI")]
         [SerializeField] private TMPro.TextMeshProUGUI _statsText;
@@ -261,6 +265,7 @@ namespace CEShowcase.Station1_BulletHell
             
             // Update all entities (the core ECS loop)
             UpdateMovementSystem(dt);
+            UpdatePlayerBounceSystem(); // Check player collision and bounce
             UpdateBounceAndBoundsSystem(); // Check bounds and handle bouncing
             UpdateLifetimeSystem(dt);
             
@@ -410,6 +415,52 @@ namespace CEShowcase.Station1_BulletHell
                 
                 // Position += Velocity * dt
                 _positions[i] += _velocities[i] * dt;
+            }
+        }
+        
+        /// <summary>
+        /// Player bounce system - bounces bullets off the local player.
+        /// Uses spherical collision detection centered on player position.
+        /// </summary>
+        private void UpdatePlayerBounceSystem()
+        {
+            VRCPlayerApi localPlayer = Networking.LocalPlayer;
+            if (localPlayer == null || !localPlayer.IsValid()) return;
+            
+            Vector3 playerPos = localPlayer.GetPosition();
+            playerPos.y += 1f; // Offset to roughly chest height
+            
+            float radiusSqr = _playerBounceRadius * _playerBounceRadius;
+            int maxEntities = _world.MaxEntities;
+            
+            for (int i = 0; i < maxEntities; i++)
+            {
+                if (!_active[i]) continue;
+                
+                Vector3 bulletPos = _positions[i];
+                Vector3 toPlayer = playerPos - bulletPos;
+                float distSqr = toPlayer.sqrMagnitude;
+                
+                // Check if bullet is inside player collision sphere
+                if (distSqr < radiusSqr && distSqr > 0.001f)
+                {
+                    // Reflect velocity off the sphere surface
+                    Vector3 normal = -toPlayer.normalized; // Normal points away from player
+                    Vector3 vel = _velocities[i];
+                    
+                    // Reflection formula: v' = v - 2(v·n)n
+                    float dot = Vector3.Dot(vel, normal);
+                    if (dot < 0) // Only bounce if moving toward player
+                    {
+                        _velocities[i] = vel - 2f * dot * normal;
+                        
+                        // Push bullet outside the collision sphere to prevent repeated bounces
+                        _positions[i] = playerPos - normal * (_playerBounceRadius + 0.1f);
+                        
+                        // Count this as a bounce for the bounds system
+                        _bounceCount[i]++;
+                    }
+                }
             }
         }
         
