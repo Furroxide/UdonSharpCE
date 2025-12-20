@@ -344,11 +344,35 @@ namespace UdonSharp.CE.Editor.Inspector
         private static bool _initialized;
 
         /// <summary>
+        /// Check if EditorStyles are ready (can be null during early domain reload).
+        /// </summary>
+        public static bool AreEditorStylesReady
+        {
+            get
+            {
+                try
+                {
+                    // EditorStyles.toolbar is commonly used as a base style
+                    // It will be null if accessed before Unity's GUI system is ready
+                    return EditorStyles.toolbar != null;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+
+        /// <summary>
         /// Initialize all styles. Called by CEInspectorBootstrap on domain reload.
         /// </summary>
         public static void Initialize()
         {
             if (_initialized) return;
+            
+            // Don't initialize if EditorStyles aren't ready yet
+            if (!AreEditorStylesReady) return;
+            
             _initialized = true;
 
             // Force initialization of all lazy properties

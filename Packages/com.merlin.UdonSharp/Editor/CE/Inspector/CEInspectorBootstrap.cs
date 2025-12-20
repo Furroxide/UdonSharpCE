@@ -77,6 +77,14 @@ namespace UdonSharp.CE.Editor.Inspector
         private static void Initialize()
         {
             if (_initialized) return;
+
+            // EditorStyles can be null during early domain reload - retry later if not ready
+            if (!CEStyleCache.AreEditorStylesReady)
+            {
+                EditorApplication.delayCall += Initialize;
+                return;
+            }
+            
             _initialized = true;
 
             // Initialize style cache
