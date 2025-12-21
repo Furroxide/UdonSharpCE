@@ -55,11 +55,42 @@ namespace UdonSharpEditor
             if (_logDirectoryWatcher == null && ShouldListenForVRC())
             {
                 // Now setup the filesystem watcher
+                string VRCDataPath = null;
+
                 #if UNITY_EDITOR_LINUX
-                string VRCDataPath =  Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + "/.local/share/Steam/steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat/";
+                string vrchatAppId = "438100";
+                string steamConfigPath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + "/.steam/steam/steamapps/libraryfolders.vdf";
+                string steamappsVrchatPath = $"steamapps/compatdata/{vrchatAppId}/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat/";
+
+                if (File.Exists(steamConfigPath))
+                {
+                    string[] lines = File.ReadAllLines(steamConfigPath);
+                    string currentPath = null;
+
+                    foreach (string line in lines)
+                    {
+                        if (line.Contains("\"path\""))
+                        {
+                            Match match = Regex.Match(line, "\"path\"\\s*\"([^\"]+)\"");
+
+                            if (match.Success)
+                                currentPath = match.Groups[1].Value;
+                        }
+
+                        if (currentPath != null && line.Contains($"\"{vrchatAppId}\""))
+                        {
+                            string vrchatPath = Path.Combine(currentPath, steamappsVrchatPath);
+                            if (Directory.Exists(vrchatPath))
+                            {
+                                VRCDataPath = vrchatPath;
+                                break;
+                            }
+                        }
+                    }
+                }
                 #else // UNITY_EDITOR_WIN || UNITY_EDITOR_MAC
                 string[] splitPath = Application.persistentDataPath.Split('/', '\\');
-                string VRCDataPath = string.Join("\\", splitPath.Take(splitPath.Length - 2)) + "\\VRChat\\VRChat";
+                VRCDataPath = string.Join("\\", splitPath.Take(splitPath.Length - 2)) + "\\VRChat\\VRChat";
                 #endif				
 
                 if (Directory.Exists(VRCDataPath))
@@ -150,7 +181,10 @@ namespace UdonSharpEditor
         private static void OnEditorUpdate()
         {
             if (!InitializeScriptLookup())
+            {
+                CleanupLogWatcher();
                 return;
+            }
 
             while (_debugOutputQueue.Count > 0)
             {
