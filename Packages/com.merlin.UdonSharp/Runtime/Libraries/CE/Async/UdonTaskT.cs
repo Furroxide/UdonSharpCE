@@ -116,7 +116,7 @@ namespace UdonSharp.CE.Async
         /// <summary>
         /// Gets the error message if the task faulted.
         /// </summary>
-        public string Error => _error;
+        public readonly string Error => _error;
 
         /// <summary>
         /// Creates a completed task with the specified result.

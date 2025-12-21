@@ -11,19 +11,21 @@ namespace UdonSharp
     {
         public static class UdonSharpInternalUtility
         {
-            public static long GetTypeID(System.Type type)
+            public static long GetTypeID(Type type)
             {
                 return GetTypeID(type.FullName);
             }
-            
-            public static long GetTypeID(string typeName)
+
+            public static long GetTypeID(string fullTypeName)
             {
-                SHA256 typeHash = new SHA256CryptoServiceProvider();
-                byte[] hash = typeHash.ComputeHash(Encoding.UTF8.GetBytes(typeName));
-                return BitConverter.ToInt64(hash, 0);
+                using SHA256 sha = SHA256.Create();
+
+                byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(fullTypeName));
+
+                return BitConverter.ToInt64(hash);
             }
 
-            public static string GetTypeName(System.Type type)
+            public static string GetTypeName(Type type)
             {
                 return type.Name;
             }
@@ -52,15 +54,15 @@ namespace UdonSharp
         }
 
         // These may be extended in the future to handle the edge cases with type names
-        public static string GetTypeName(System.Type type)
+        public static string GetTypeName(Type type)
         {
-            return Internal.UdonSharpInternalUtility.GetTypeID(type);
+            return Internal.UdonSharpInternalUtility.GetTypeName(type);
         }
 
-        //public static string GetTypeNamespace(System.Type type)
-        //{
-        //    return type.Namespace;
-        //}
+        /*public static string GetTypeNamespace(Type type)
+        {
+            return type.Namespace;
+        }*/
 
         // Placeholder stubs, won't give valid info unless used in the Udon runtime
         public static int GetUdonScriptVersion()
@@ -68,9 +70,9 @@ namespace UdonSharp
             return 0;
         }
 
-        public static System.DateTime GetLastCompileDate()
+        public static DateTime GetLastCompileDate()
         {
-            return System.DateTime.Now;
+            return DateTime.Now;
         }
 
         public static string GetCompilerVersionString()
