@@ -28,7 +28,6 @@ Yes.
 
 ### I'm starting from scratch and need to use C# tutorials. What common aspects of C# don't work in UdonSharp?
 If you are learning UdonSharp and not familiar with C# already, you may run across some commonly used techniques that don't work in Udon and UdonSharp yet. These include, but are not limited to, the following:
-- Enums not already defined by Unity
 - Generic classes (`Class<T>`) and methods
 - Inheritance
 - Interfaces

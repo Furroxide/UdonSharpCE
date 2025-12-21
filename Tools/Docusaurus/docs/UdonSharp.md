@@ -60,13 +60,26 @@ public class Example : UdonSharpBehaviour
 | --- | --- |
 | Any | Nothing is enforced and the behaviours can be set to either sync type by the user. This is the default when no attribute is specified. |
 | None | Enforces no synced variables on the behaviour and hides the selection dropdown in the UI for the sync mode. Nothing is synced and SendCustomNetworkEvent will not work on the behaviour. |
-| Continuous | Synced variables will be updated automatically at a very frequent rate, but may not always reliably update to save bandwidth. |
+| Continuous | Synced variables will be updated automatically at a very frequent rate, but may not always reliably update to save bandwidth. Updates for synced variables will be sent even when the variable value is unchanged. |
 | Manual | Synced variables are updated manually by the user less frequently, but ensures that updates are reliable when requested. |
 | NoVariableSync | Enforces that there are no synced variables on the behaviour, hides the sync mode selection dropdown, and allows you to use the behaviours on GameObjects that use either Manual or Continuous sync. |
 
 ## DefaultExecutionOrder
 
-Specifies the order that Update, LateUpdate, and FixedUpdate happen in relative to other UdonSharpBehaviours with an int. All behaviours are at 0 by default, the lower the int, the earlier their update happens. The int can be negative.
+Specifies the order that Udon Behaviour events will fire relative to other Udon Behaviours.
+
+Lower values indicate that the event will fire earlier compared to other Udon Behaviours, and higher values indicate that the event will fire later compared to other Udon Behaviours. The execution order value can be negative.
+
+When this attribute is not specified, the default execution order is `0`.
+
+Events affected by execution order are:
+
+* `OnEnable` (called for the first time prior to `Start`)
+* `Start`
+* `Update`
+* `LateUpdate`
+* `FixedUpdate`
+* `PostLateUpdate`
 
 ### Example
 ```cs

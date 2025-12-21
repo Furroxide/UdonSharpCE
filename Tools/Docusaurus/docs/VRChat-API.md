@@ -59,7 +59,7 @@
 | Static | Returns | Name | Summary |
 | :---: | --- | --- | --- |
 | ✔️ | bool | IsValid(object obj) | Returns true if the specified object is valid and not a null reference, otherwise false.  This is typically used to check [VRCPlayerApi](#vrcplayerapi) objects after a player has left the instance, or [GameObject](https://docs.unity3d.com/ScriptReference/GameObject.html) objects that have been destroyed. |
-| ✔️ | void | ShuffleArray(int[] array) | Randomly shuffles each element in the array. |
+| ✔️ | void | ShuffleArray<T>(T[] array) | Randomly shuffles each element in the array. |
 
 ### VRCStation
 `class VRC.SDK3.Components.VRCStation` / `class VRC.SDKBase.VRCStation`
@@ -375,7 +375,7 @@ A component used to allow objects to be picked up and held.
 | Returns | Name | Summary |
 | --- | --- | --- |
 | void | Drop() | Drops the pickup if it is being held by a player. |
-| void | Drop([VRCPlayerApi](#vrcplayerapi) instigator) | Drops the pickup if it is being held by a player. Note that the pickup will only drop if `instigator` is the player who is holding the pickup. |
+| void | Drop([VRCPlayerApi](#vrcplayerapi) player) | Drops the pickup if it is being held by a player. Note that the pickup will only drop if `player` is the player who is holding the pickup. |
 | void | GenerateHapticEvent(float duration, float amplitude, float frequency) | Plays haptic feedback on the player's controller. Default values are duration: 0.25, amplitude: 0.5, frequency: 0.5. |
 | void | PlayHaptics() | Plays haptic feedback on the player's controller. |
 
@@ -440,6 +440,7 @@ A component used to create portals to other rooms.
 | LeftHand | The player's left hand tracking data |
 | RightHand | The player's right hand tracking data |
 | Origin | The player's playspace origin |
+| AvatarRoot | The root transform of the player's avatar |
 
 ### VRCInputMethod
 `enum VRC.SDKBase.VRCInputMethod`

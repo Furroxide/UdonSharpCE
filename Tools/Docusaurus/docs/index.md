@@ -4,6 +4,12 @@
 
 UdonSharp is a compiler that compiles C# to Udon assembly. UdonSharp is not currently conformant to any version of the C# language specification, so there are many things that are not implemented or will not work.
 
+## UdonSharp Community Edition
+
+UdonSharp CE adds runtime libraries and editor tooling for async workflows, data bridges, networking analysis, persistence helpers, performance tooling, and procedural generation.
+
+Start here: [Community Edition Overview](ce-overview)
+
 ## C# features supported
 
 - Flow control
@@ -14,13 +20,16 @@ UdonSharp is a compiler that compiles C# to Udon assembly. UdonSharp is not curr
 - Conditional short circuiting `(true || CheckIfTrue())` will not execute CheckIfTrue()
 - `typeof()`
 - Extern methods with out or ref parameters (such as many variants of `Physics.Raycast()`)
+- Generic extern method calls (for example, `VRC.SDKBase.Utilities.ShuffleArray<T>()`)
 - User defined methods with parameters and return values, supports out/ref, extension methods, and `params`
 - User defined properties
 - Static user methods
 - UdonSharpBehaviour inheritence, virtual methods, etc.
 - Unity/Udon event callbacks with arguments. For instance, registering a OnPlayerJoined event with a VRCPlayerApi argument is valid.
 - String interpolation
+- Expression-bodied constructors
 - Field initializers
+- User-defined enums, including comparison operators and default parameter values
 - Object initializers (e.g., `new Foo { Bar = 1, Baz = 2 }`)
 - Jagged arrays
 - Referencing other custom UdonSharpBehaviour classes, accessing fields, and calling methods on them
