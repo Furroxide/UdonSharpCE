@@ -43,7 +43,7 @@ namespace UdonSharp.Compiler.Symbols
                     {
                         var constantValueType = typeof(ConstantValue<>).MakeGenericType(systemType);
                         
-                        if (Type.IsEnum)
+                        if (systemType.IsEnum)
                         {
                             DefaultValue = (IConstantValue) Activator.CreateInstance(
                                 constantValueType,

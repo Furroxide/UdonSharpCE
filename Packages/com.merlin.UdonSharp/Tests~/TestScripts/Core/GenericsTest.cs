@@ -32,6 +32,24 @@ namespace UdonSharp.Tests
             
             tester.TestAssertion("Generic variant 3", objects.Length == 3 && 
                                                       objects[0] == gameObject && objects[1] == transform && objects[2] == this);
+
+            CallUdonGenericMethod();
+        }
+
+        private void CallUdonGenericMethod()
+        {
+            int[] intArray;
+            UnityEngine.Object[] unityEngineObjectArray;
+
+            intArray = new int[] { 1, 2 };
+            while (intArray[0] == 1)
+                VRC.SDKBase.Utilities.ShuffleArray(intArray);
+            tester.TestAssertion("Call Udon generic method 2", intArray[0] == 2);
+
+            unityEngineObjectArray = new UnityEngine.Object[] { gameObject, transform };
+            while (unityEngineObjectArray[0].Equals(gameObject))
+                VRC.SDKBase.Utilities.ShuffleArray(unityEngineObjectArray);
+            tester.TestAssertion("Call Udon generic method 3", unityEngineObjectArray[0].Equals(transform));
         }
     }
 
