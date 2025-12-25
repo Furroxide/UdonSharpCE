@@ -1,5 +1,6 @@
 ﻿
 using System;
+using UdonSharp;
 
 namespace UdonSharp.Serialization
 {
@@ -18,7 +19,8 @@ namespace UdonSharp.Serialization
         protected override bool HandlesTypeSerialization(TypeSerializationMetadata typeMetadata)
         {
             VerifyTypeCheckSanity();
-            return typeMetadata.cSharpType == typeof(UnityEngine.Object) || typeMetadata.cSharpType.IsSubclassOf(typeof(UnityEngine.Object));
+            return (typeMetadata.cSharpType == typeof(UnityEngine.Object) || typeMetadata.cSharpType.IsSubclassOf(typeof(UnityEngine.Object)))
+                   && !UdonSharpUtils.IsUserDefinedClass(typeMetadata.cSharpType);
         }
 
         public override void Read(ref T targetObject, IValueStorage sourceObject)

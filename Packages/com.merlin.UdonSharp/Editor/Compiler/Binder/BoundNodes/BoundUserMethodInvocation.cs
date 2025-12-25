@@ -81,6 +81,9 @@ namespace UdonSharp.Compiler.Binder
 
             ReleaseCowReferences(context);
 
+            if (Method.IsStatic && !Method.IsExtern && !Method.ContainingType.IsUdonSharpBehaviour)
+                context.EmitStaticTypeInitialization(Method.ContainingType);
+
             if (isRecursiveCall)
             {
                 Value.CowValue[] paramCows = parameterValues.Select(e => e.GetCowValue(context)).ToArray();

@@ -35,6 +35,8 @@ namespace UdonSharp.Compiler.Symbols
             
             using (context.OpenBlockScope())
             {
+                context.EmitStaticTypeInitialization(ContainingType);
+
                 // First set the ID of the type in the object array, we don't bother strongboxing this because it's a single value that will never change
                 ulong typeID = (ulong)Internal.UdonSharpInternalUtility.GetTypeID(TypeSymbol.GetFullTypeName(ContainingType.RoslynSymbol));
                 

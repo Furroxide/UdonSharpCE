@@ -52,6 +52,22 @@ namespace UdonSharp.Compiler.Emit
         private Dictionary<BoundExpression, Dictionary<string, Value.CowValue[]>> _expressionCowValueTracker =
             new Dictionary<BoundExpression, Dictionary<string, Value.CowValue[]>>();
 
+        private readonly Dictionary<TypeSymbol, StaticInitializerInfo> _staticInitializerInfo =
+            new Dictionary<TypeSymbol, StaticInitializerInfo>();
+
+        private sealed class StaticInitializerInfo
+        {
+            public Value InitFlag;
+            public StaticInitializerEntry[] Entries;
+        }
+
+        private struct StaticInitializerEntry
+        {
+            public FieldSymbol Field;
+            public BoundExpression Initializer;
+            public int Order;
+        }
+
         public EmitContext(AssemblyModule module, ITypeSymbol emitType)
          :base(module.CompileContext)
         {
@@ -411,6 +427,98 @@ namespace UdonSharp.Compiler.Emit
         public Value GetInstanceValue()
         {
             return _instanceValue ?? (_instanceValue = RootTable.CreateInternalValue(GetTypeSymbol(SpecialType.System_Object).MakeArrayType(this), "userTypeInstance"));
+        }
+
+        internal void EmitStaticTypeInitialization(TypeSymbol typeSymbol)
+        {
+            if (typeSymbol == null || typeSymbol.IsExtern || typeSymbol.IsUdonSharpBehaviour)
+                return;
+
+            StaticInitializerInfo initializerInfo = GetStaticInitializerInfo(typeSymbol);
+            if (initializerInfo.Entries.Length == 0)
+                return;
+
+            if (initializerInfo.InitFlag == null)
+            {
+                ulong typeId = (ulong)Internal.UdonSharpInternalUtility.GetTypeID(TypeSymbol.GetFullTypeName(typeSymbol.RoslynSymbol));
+                initializerInfo.InitFlag = RootTable.CreateGlobalInternalValue(GetTypeSymbol(SpecialType.System_Boolean), $"staticinit_{typeId}");
+                initializerInfo.InitFlag.DefaultValue = false;
+            }
+
+            JumpLabel initLabel = Module.CreateLabel();
+            JumpLabel exitLabel = Module.CreateLabel();
+
+            Module.AddJumpIfFalse(initLabel, initializerInfo.InitFlag);
+            Module.AddJump(exitLabel);
+            Module.LabelJump(initLabel);
+
+            Module.AddCopy(GetConstantValue(GetTypeSymbol(SpecialType.System_Boolean), true), initializerInfo.InitFlag);
+
+            foreach (StaticInitializerEntry entry in initializerInfo.Entries)
+            {
+                EmitValueAssignment(GetUserValue(entry.Field), entry.Initializer);
+            }
+
+            Module.LabelJump(exitLabel);
+        }
+
+        private StaticInitializerInfo GetStaticInitializerInfo(TypeSymbol typeSymbol)
+        {
+            if (_staticInitializerInfo.TryGetValue(typeSymbol, out StaticInitializerInfo info))
+                return info;
+
+            StaticInitializerEntry[] entries = BuildStaticInitializerEntries(typeSymbol);
+            info = new StaticInitializerInfo { Entries = entries };
+            _staticInitializerInfo.Add(typeSymbol, info);
+
+            return info;
+        }
+
+        private StaticInitializerEntry[] BuildStaticInitializerEntries(TypeSymbol typeSymbol)
+        {
+            List<StaticInitializerEntry> entries = new List<StaticInitializerEntry>();
+
+            foreach (FieldSymbol field in typeSymbol.GetMembers<FieldSymbol>(this))
+            {
+                if (!field.IsStatic || field.IsConst || field.InitializerExpression == null)
+                    continue;
+
+                entries.Add(new StaticInitializerEntry
+                {
+                    Field = field,
+                    Initializer = field.InitializerExpression,
+                    Order = GetSymbolOrder(field.RoslynSymbol),
+                });
+            }
+
+            foreach (ImportedUdonSharpPropertySymbol property in typeSymbol.GetMembers<ImportedUdonSharpPropertySymbol>(this))
+            {
+                if (!property.IsStatic || property.InitializerExpression == null || property.BackingField == null)
+                    continue;
+
+                entries.Add(new StaticInitializerEntry
+                {
+                    Field = property.BackingField,
+                    Initializer = property.InitializerExpression,
+                    Order = GetSymbolOrder(property.RoslynSymbol),
+                });
+            }
+
+            entries.Sort((left, right) => left.Order.CompareTo(right.Order));
+
+            return entries.ToArray();
+        }
+
+        private static int GetSymbolOrder(ISymbol symbol)
+        {
+            if (symbol == null)
+                return int.MaxValue;
+
+            Location location = symbol.Locations.FirstOrDefault();
+            if (location == null)
+                return int.MaxValue;
+
+            return location.SourceSpan.Start;
         }
 
         public void EmitReturn()

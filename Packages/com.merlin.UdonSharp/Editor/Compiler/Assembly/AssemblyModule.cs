@@ -210,6 +210,9 @@ namespace UdonSharp.Compiler.Assembly
             {
                 if (value.AssociatedSymbol is FieldSymbol fieldSymbol)
                 {
+                    if (fieldSymbol.IsStatic)
+                        continue;
+
                     if (fieldSymbol.IsSerialized)
                         builder.AppendFormat("    .export {0}\n", value.UniqueID);
 

@@ -89,13 +89,9 @@ namespace UdonSharp.Compiler.Symbols
                 InitializerSyntax = (context.CurrentNode as VariableDeclaratorSyntax)?.Initializer?.Value;
             }
 
-            if (!IsExtern && IsStatic && !IsConst)
+            if (!IsExtern && IsStatic && !IsConst && ContainingType.IsUdonSharpBehaviour)
             {
-                if (ContainingType.IsUdonSharpBehaviour)
-                    throw new NotSupportedException("Static fields are not yet supported on user defined types");
-                
-                _isBound = true; // Non-UdonSharpBehaviour types can have static fields, declared it's just invalid to reference them. This avoids stuff where you have some utility class you have some constants or methods in that you want to use in part.
-                return;
+                throw new NotSupportedException("Static fields are not supported on UdonSharpBehaviour types");
             }
 
             CheckHiddenFields(context);

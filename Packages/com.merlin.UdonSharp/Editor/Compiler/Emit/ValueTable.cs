@@ -135,7 +135,11 @@ namespace UdonSharp.Compiler.Emit
                     userValue = CreateValueInternal(localSymbol.Type, userSymbol, Value.ValueFlags.Local, userSymbol.Name);
                     break;
                 case FieldSymbol fieldSymbol:
-                    userValue = GlobalTable.CreateValueInternal(fieldSymbol.Type, userSymbol, Value.ValueFlags.Field, userSymbol.Name);
+                    string fieldName = userSymbol.Name;
+                    if (fieldSymbol.IsStatic && !fieldSymbol.IsConst && !fieldSymbol.ContainingType.IsUdonSharpBehaviour)
+                        fieldName = GetStaticFieldUniqueName(fieldSymbol);
+                    
+                    userValue = GlobalTable.CreateValueInternal(fieldSymbol.Type, userSymbol, Value.ValueFlags.Field, fieldName);
                     GlobalTable._userValues.Add(userSymbol, userValue);
                     
                     userValue.SetAssociatedSymbol(userSymbol);
@@ -241,6 +245,15 @@ namespace UdonSharp.Compiler.Emit
             _nameCollisionCheckSet.Add(uniqueName);
 
             return uniqueName;
+        }
+
+        private static string GetStaticFieldUniqueName(FieldSymbol fieldSymbol)
+        {
+            string typeName = TypeSymbol.GetFullTypeName(fieldSymbol.ContainingType.RoslynSymbol);
+            ulong typeId = (ulong)Internal.UdonSharpInternalUtility.GetTypeID(typeName);
+            string fieldName = UdonSharpUtils.UnmanglePropertyFieldName(fieldSymbol.Name);
+
+            return $"__static_{typeId}_{fieldName}";
         }
 
         private Value CreateValueInternal(TypeSymbol type, Symbol associatedSymbol, Value.ValueFlags flags, string name = null)

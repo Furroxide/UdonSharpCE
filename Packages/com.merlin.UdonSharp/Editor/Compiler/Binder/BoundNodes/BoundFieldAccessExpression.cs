@@ -24,9 +24,9 @@ namespace UdonSharp.Compiler.Binder
             // if (TryCreateShimFieldAccess(context, node, fieldSymbol, sourceExpression, out BoundFieldAccessExpression createdFieldAccess))
             //     return createdFieldAccess;
 
-            if (fieldSymbol.IsStatic && !fieldSymbol.IsExtern)
+            if (fieldSymbol.IsStatic && !fieldSymbol.IsExtern && fieldSymbol.ContainingType.IsUdonSharpBehaviour)
             {
-                throw new NotSupportedException("Static fields are not yet supported on user defined types");
+                throw new NotSupportedException("Static fields are not supported on UdonSharpBehaviour types");
             }
             
             switch (fieldSymbol)
@@ -36,6 +36,8 @@ namespace UdonSharp.Compiler.Binder
                 case UdonSharpBehaviourFieldSymbol udonSharpBehaviourFieldSymbol:
                     return new BoundUdonSharpBehaviourFieldAccessExpression(node, udonSharpBehaviourFieldSymbol, sourceExpression);
                 case ImportedUdonSharpFieldSymbol importedUdonSharpFieldSymbol:
+                    if (importedUdonSharpFieldSymbol.IsStatic)
+                        return new BoundImportedTypeStaticFieldAccessExpression(context, node, importedUdonSharpFieldSymbol, sourceExpression);
                     return new BoundImportedTypeInstanceFieldAccessExpression(context, node, importedUdonSharpFieldSymbol, sourceExpression);
             }
             
@@ -291,6 +293,30 @@ namespace UdonSharp.Compiler.Binder
                 context.EmitSet(objectArrayAccess, BindAccess(context.CastValue(value, ValueType)));
                 
                 return value;
+            }
+        }
+
+        private sealed class BoundImportedTypeStaticFieldAccessExpression : BoundFieldAccessExpression
+        {
+            private ImportedUdonSharpFieldSymbol Field { get; }
+            public override TypeSymbol ValueType => Field.Type;
+
+            public BoundImportedTypeStaticFieldAccessExpression(AbstractPhaseContext context, SyntaxNode node, ImportedUdonSharpFieldSymbol fieldSymbol, BoundExpression sourceExpression)
+                : base(node, sourceExpression)
+            {
+                Field = fieldSymbol;
+            }
+
+            public override Value EmitValue(EmitContext context)
+            {
+                context.EmitStaticTypeInitialization(Field.ContainingType);
+                return context.GetUserValue(Field);
+            }
+
+            public override Value EmitSet(EmitContext context, BoundExpression valueExpression)
+            {
+                context.EmitStaticTypeInitialization(Field.ContainingType);
+                return context.EmitValueAssignment(context.GetUserValue(Field), valueExpression);
             }
         }
     }
