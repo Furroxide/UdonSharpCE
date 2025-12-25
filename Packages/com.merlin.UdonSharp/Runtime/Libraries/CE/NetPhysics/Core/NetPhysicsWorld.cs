@@ -174,10 +174,12 @@ namespace UdonSharp.CE.NetPhysics
             int ticks = _clock.ConsumeTicks(Time.fixedDeltaTime, MaxTicksPerFrame);
             for (int i = 0; i < ticks; i++)
             {
-                InputFrame localInput = new InputFrame();
+                InputFrame localInput = InputFrame.Empty;
                 if (!IsMaster && LocalInputRecorder != null)
                 {
                     localInput = LocalInputRecorder.CurrentInput;
+                    if (localInput == null)
+                        localInput = new InputFrame();
                     localInput.FrameNumber = CurrentFrame;
                 }
 
@@ -191,6 +193,8 @@ namespace UdonSharp.CE.NetPhysics
         public void SimulateSingleTick(InputFrame input)
         {
             int frame = CurrentFrame;
+            if (input == null)
+                input = InputFrame.Empty;
 
             // Apply per-entity simulation for this tick.
             for (int i = 0; i < _entityCount; i++)
@@ -199,7 +203,7 @@ namespace UdonSharp.CE.NetPhysics
                 if (vehicle == null)
                     continue;
 
-                InputFrame vehicleInput = default;
+                InputFrame vehicleInput = InputFrame.Empty;
 
                 if (IsMaster)
                 {

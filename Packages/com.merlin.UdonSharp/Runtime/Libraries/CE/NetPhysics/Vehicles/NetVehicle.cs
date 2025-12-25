@@ -135,6 +135,9 @@ namespace UdonSharp.CE.NetPhysics
         /// </summary>
         public void ApplyInput(InputFrame input)
         {
+            if (input == null)
+                input = InputFrame.Empty;
+
             Rigidbody rb = RigidbodyComponent;
             if (rb == null)
                 return;

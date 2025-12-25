@@ -31,6 +31,7 @@ namespace UdonSharp.CE.NetPhysics
             for (int i = 0; i < _capacity; i++)
             {
                 _snapshots[i] = new PhysicsSnapshot(maxEntities);
+                _inputs[i] = new InputFrame();
             }
 
             _count = 0;
@@ -49,7 +50,7 @@ namespace UdonSharp.CE.NetPhysics
 
             _snapshots[index].CopyFrom(state);
             _snapshots[index].Frame = frame;
-            _inputs[index] = input;
+            _inputs[index].CopyFrom(input);
 
             if (_count == 0)
             {
@@ -85,7 +86,7 @@ namespace UdonSharp.CE.NetPhysics
         public InputFrame GetInput(int frame)
         {
             if (!ContainsFrame(frame))
-                return default;
+                return InputFrame.Empty;
 
             return _inputs[Mod(frame, _capacity)];
         }
@@ -100,7 +101,9 @@ namespace UdonSharp.CE.NetPhysics
             {
                 if (ContainsFrame(f))
                 {
-                    output[written] = _inputs[Mod(f, _capacity)];
+                    if (output[written] == null)
+                        output[written] = new InputFrame();
+                    output[written].CopyFrom(_inputs[Mod(f, _capacity)]);
                     written++;
                 }
             }
@@ -123,4 +126,3 @@ namespace UdonSharp.CE.NetPhysics
         }
     }
 }
-

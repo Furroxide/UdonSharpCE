@@ -37,7 +37,11 @@ namespace UdonSharp.CE.NetPhysics
 
             _playerBuffers = new InputFrame[_maxPlayers][];
             for (int i = 0; i < _maxPlayers; i++)
+            {
                 _playerBuffers[i] = new InputFrame[_capacity];
+                for (int j = 0; j < _capacity; j++)
+                    _playerBuffers[i][j] = new InputFrame();
+            }
 
             _counts = new int[_maxPlayers];
             _lastConsumedFrame = new int[_maxPlayers];
@@ -45,7 +49,10 @@ namespace UdonSharp.CE.NetPhysics
             _throttleHints = new int[_maxPlayers];
 
             for (int i = 0; i < _maxPlayers; i++)
+            {
                 _lastConsumedFrame[i] = int.MinValue;
+                _lastConsumedInput[i] = new InputFrame();
+            }
         }
 
         public int GetBufferSize(int playerId) => IsValidPlayer(playerId) ? _counts[playerId] : 0;
@@ -55,6 +62,9 @@ namespace UdonSharp.CE.NetPhysics
         public void EnqueueInput(int playerId, InputFrame input)
         {
             if (!IsValidPlayer(playerId))
+                return;
+
+            if (input == null)
                 return;
 
             if (input.FrameNumber <= _lastConsumedFrame[playerId])
@@ -75,7 +85,7 @@ namespace UdonSharp.CE.NetPhysics
 
                 // Otherwise drop the oldest to make room.
                 for (int i = 1; i < count; i++)
-                    buffer[i - 1] = buffer[i];
+                    buffer[i - 1].CopyFrom(buffer[i]);
                 count--;
             }
 
@@ -88,7 +98,7 @@ namespace UdonSharp.CE.NetPhysics
                 // Replace if duplicate frame.
                 if (existingFrame == input.FrameNumber)
                 {
-                    buffer[i] = input;
+                    buffer[i].CopyFrom(input);
                     _counts[playerId] = count;
                     UpdateThrottleHint(playerId);
                     return;
@@ -103,9 +113,9 @@ namespace UdonSharp.CE.NetPhysics
 
             // Shift and insert.
             for (int i = count; i > insertIndex; i--)
-                buffer[i] = buffer[i - 1];
+                buffer[i].CopyFrom(buffer[i - 1]);
 
-            buffer[insertIndex] = input;
+            buffer[insertIndex].CopyFrom(input);
             _counts[playerId] = count + 1;
 
             UpdateThrottleHint(playerId);
@@ -144,14 +154,14 @@ namespace UdonSharp.CE.NetPhysics
             var buffer = _playerBuffers[playerId];
             int count = _counts[playerId];
 
-            InputFrame input = buffer[0];
+            InputFrame input = _lastConsumedInput[playerId];
+            input.CopyFrom(buffer[0]);
             for (int i = 1; i < count; i++)
-                buffer[i - 1] = buffer[i];
+                buffer[i - 1].CopyFrom(buffer[i]);
 
             _counts[playerId] = count - 1;
 
             _lastConsumedFrame[playerId] = input.FrameNumber;
-            _lastConsumedInput[playerId] = input;
 
             UpdateThrottleHint(playerId);
 
@@ -165,7 +175,7 @@ namespace UdonSharp.CE.NetPhysics
         public InputFrame ConsumeInput(int playerId, int currentFrame)
         {
             if (!IsValidPlayer(playerId))
-                return default;
+                return InputFrame.Empty;
 
             int count = _counts[playerId];
             if (count <= 0)

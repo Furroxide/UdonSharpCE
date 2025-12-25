@@ -14,12 +14,20 @@ namespace UdonSharp.CE.NetPhysics
 
         private readonly InputFrame[] _lastInputs;
         private readonly float[] _lastInputTimes;
+        private readonly InputFrame[] _predictedInputs;
 
         public InputPredictor(int maxPlayers = InputBuffer.DefaultMaxPlayers)
         {
             int players = Mathf.Max(1, maxPlayers);
             _lastInputs = new InputFrame[players];
             _lastInputTimes = new float[players];
+            _predictedInputs = new InputFrame[players];
+
+            for (int i = 0; i < players; i++)
+            {
+                _lastInputs[i] = new InputFrame();
+                _predictedInputs[i] = new InputFrame();
+            }
         }
 
         public void UpdateLastKnown(int playerId, InputFrame input, float time)
@@ -27,16 +35,17 @@ namespace UdonSharp.CE.NetPhysics
             if (!IsValidPlayer(playerId))
                 return;
 
-            _lastInputs[playerId] = input;
+            _lastInputs[playerId].CopyFrom(input);
             _lastInputTimes[playerId] = time;
         }
 
         public InputFrame Predict(int playerId, int frameNumber, float time)
         {
             if (!IsValidPlayer(playerId))
-                return default;
+                return InputFrame.Empty;
 
-            InputFrame input = _lastInputs[playerId];
+            InputFrame input = _predictedInputs[playerId];
+            input.CopyFrom(_lastInputs[playerId]);
             input.FrameNumber = frameNumber;
             input.Timestamp = time;
 
@@ -63,4 +72,3 @@ namespace UdonSharp.CE.NetPhysics
         private bool IsValidPlayer(int playerId) => playerId >= 0 && playerId < _lastInputs.Length;
     }
 }
-

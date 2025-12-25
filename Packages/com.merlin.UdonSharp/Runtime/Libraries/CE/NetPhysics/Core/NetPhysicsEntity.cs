@@ -1,6 +1,7 @@
 using JetBrains.Annotations;
 using UdonSharp;
 using UnityEngine;
+using VRC.Udon.Common.Interfaces;
 
 namespace UdonSharp.CE.NetPhysics
 {
@@ -8,6 +9,7 @@ namespace UdonSharp.CE.NetPhysics
     /// Base class for any network-simulated physics object.
     /// </summary>
     [PublicAPI]
+    [UdonBehaviourSyncMode(BehaviourSyncMode.Manual)]
     public abstract class NetPhysicsEntity : UdonSharpBehaviour
     {
         [Header("NetPhysics")]

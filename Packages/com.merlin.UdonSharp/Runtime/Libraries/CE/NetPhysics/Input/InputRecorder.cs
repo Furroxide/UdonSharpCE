@@ -23,7 +23,7 @@ namespace UdonSharp.CE.NetPhysics
         public string ThrottleAxis = "Vertical";
         public string SteeringAxis = "Horizontal";
         public string JumpButton = "Jump";
-        public string BoostButton = "Boost";
+        public string BoostButton = "Fire1";
         public string HandbrakeButton = "Fire3";
         public string DodgeButton = "Fire2";
 
@@ -49,9 +49,12 @@ namespace UdonSharp.CE.NetPhysics
         {
             int size = Mathf.Max(1, RedundantFrames);
             _recentInputs = new InputFrame[size];
+            for (int i = 0; i < _recentInputs.Length; i++)
+                _recentInputs[i] = new InputFrame();
             _head = 0;
             _recordedCount = 0;
             _lastSendTime = -9999f;
+            _currentInput = new InputFrame();
         }
 
         private void Update()
@@ -115,17 +118,14 @@ namespace UdonSharp.CE.NetPhysics
                 buttons |= InputFrame.BUTTON_DODGE;
             }
 
-            _currentInput = new InputFrame
-            {
-                FrameNumber = World.CurrentFrame,
-                Timestamp = Time.time,
-                Throttle = (sbyte)Mathf.RoundToInt(throttle * 127f),
-                Steering = (sbyte)Mathf.RoundToInt(steering * 127f),
-                Boost = boost,
-                Buttons = buttons,
-                DodgeX = dodgeX,
-                DodgeY = dodgeY,
-            };
+            _currentInput.FrameNumber = World.CurrentFrame;
+            _currentInput.Timestamp = Time.time;
+            _currentInput.Throttle = (sbyte)Mathf.RoundToInt(throttle * 127f);
+            _currentInput.Steering = (sbyte)Mathf.RoundToInt(steering * 127f);
+            _currentInput.Boost = boost;
+            _currentInput.Buttons = buttons;
+            _currentInput.DodgeX = dodgeX;
+            _currentInput.DodgeY = dodgeY;
         }
 
         /// <summary>
@@ -137,7 +137,7 @@ namespace UdonSharp.CE.NetPhysics
                 return;
 
             // Store into ring buffer.
-            _recentInputs[_head] = _currentInput;
+            _recentInputs[_head].CopyFrom(_currentInput);
             _head = (_head + 1) % _recentInputs.Length;
             _recordedCount = Mathf.Min(_recordedCount + 1, _recentInputs.Length);
 

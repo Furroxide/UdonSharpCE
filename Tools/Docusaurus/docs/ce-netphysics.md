@@ -79,7 +79,7 @@ Button flags in `InputFrame`:
 | `ThrottleAxis` | `Vertical` |
 | `SteeringAxis` | `Horizontal` |
 | `JumpButton` | `Jump` |
-| `BoostButton` | `Boost` |
+| `BoostButton` | `Fire1` |
 | `HandbrakeButton` | `Fire3` |
 | `DodgeButton` | `Fire2` |
 | `UseStickForDodge` | `true` |

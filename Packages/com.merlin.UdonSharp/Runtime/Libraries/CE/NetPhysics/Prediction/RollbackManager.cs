@@ -27,6 +27,8 @@ namespace UdonSharp.CE.NetPhysics
             _world = world;
             _history = history;
             _tempInputs = new InputFrame[Mathf.Max(1, MaxRollbackFrames + 4)];
+            for (int i = 0; i < _tempInputs.Length; i++)
+                _tempInputs[i] = new InputFrame();
         }
 
         /// <summary>
@@ -106,4 +108,3 @@ namespace UdonSharp.CE.NetPhysics
         }
     }
 }
-

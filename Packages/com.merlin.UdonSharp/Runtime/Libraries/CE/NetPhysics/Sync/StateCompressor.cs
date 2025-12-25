@@ -150,12 +150,12 @@ namespace UdonSharp.CE.NetPhysics
                 ((ulong)largestIndex << 45);
 
             // Write 48 bits little-endian
-            data[offset++] = (byte)(packed);
-            data[offset++] = (byte)(packed >> 8);
-            data[offset++] = (byte)(packed >> 16);
-            data[offset++] = (byte)(packed >> 24);
-            data[offset++] = (byte)(packed >> 32);
-            data[offset++] = (byte)(packed >> 40);
+            data[offset++] = (byte)(packed & 0xFF);
+            data[offset++] = (byte)((packed >> 8) & 0xFF);
+            data[offset++] = (byte)((packed >> 16) & 0xFF);
+            data[offset++] = (byte)((packed >> 24) & 0xFF);
+            data[offset++] = (byte)((packed >> 32) & 0xFF);
+            data[offset++] = (byte)((packed >> 40) & 0xFF);
         }
 
         private Quaternion ReadRotation(byte[] data, ref int offset)
@@ -213,11 +213,11 @@ namespace UdonSharp.CE.NetPhysics
 
             ulong packed = (ulong)ux | ((ulong)uy << 12) | ((ulong)uz << 24);
 
-            data[offset++] = (byte)(packed);
-            data[offset++] = (byte)(packed >> 8);
-            data[offset++] = (byte)(packed >> 16);
-            data[offset++] = (byte)(packed >> 24);
-            data[offset++] = (byte)(packed >> 32);
+            data[offset++] = (byte)(packed & 0xFF);
+            data[offset++] = (byte)((packed >> 8) & 0xFF);
+            data[offset++] = (byte)((packed >> 16) & 0xFF);
+            data[offset++] = (byte)((packed >> 24) & 0xFF);
+            data[offset++] = (byte)((packed >> 32) & 0xFF);
         }
 
         private static Vector3 ReadPackedVector3_12Bit(byte[] data, ref int offset, float precision)
@@ -299,10 +299,10 @@ namespace UdonSharp.CE.NetPhysics
 
         private static void WriteInt32(byte[] data, ref int offset, int value)
         {
-            data[offset++] = (byte)value;
-            data[offset++] = (byte)(value >> 8);
-            data[offset++] = (byte)(value >> 16);
-            data[offset++] = (byte)(value >> 24);
+            data[offset++] = (byte)(value & 0xFF);
+            data[offset++] = (byte)((value >> 8) & 0xFF);
+            data[offset++] = (byte)((value >> 16) & 0xFF);
+            data[offset++] = (byte)((value >> 24) & 0xFF);
         }
 
         private static int ReadInt32(byte[] data, ref int offset)
@@ -317,8 +317,8 @@ namespace UdonSharp.CE.NetPhysics
 
         private static void WriteUInt16(byte[] data, ref int offset, ushort value)
         {
-            data[offset++] = (byte)value;
-            data[offset++] = (byte)(value >> 8);
+            data[offset++] = (byte)(value & 0xFF);
+            data[offset++] = (byte)((value >> 8) & 0xFF);
         }
 
         private static ushort ReadUInt16(byte[] data, ref int offset)
@@ -329,4 +329,3 @@ namespace UdonSharp.CE.NetPhysics
         }
     }
 }
-

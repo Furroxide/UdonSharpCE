@@ -7,8 +7,9 @@ namespace UdonSharp.CE.NetPhysics
     /// Compact representation of player input for a single simulation frame.
     /// </summary>
     [PublicAPI]
-    public struct InputFrame
+    public class InputFrame
     {
+        public static readonly InputFrame Empty = new InputFrame();
         // Frame ID
         public int FrameNumber;
         public float Timestamp;
@@ -44,6 +45,31 @@ namespace UdonSharp.CE.NetPhysics
 
         public Vector2 DodgeDirection => new Vector2(DodgeX / 127f, DodgeY / 127f);
 
+        public void CopyFrom(InputFrame other)
+        {
+            if (other == null)
+            {
+                FrameNumber = 0;
+                Timestamp = 0f;
+                Throttle = 0;
+                Steering = 0;
+                Boost = 0;
+                Buttons = 0;
+                DodgeX = 0;
+                DodgeY = 0;
+                return;
+            }
+
+            FrameNumber = other.FrameNumber;
+            Timestamp = other.Timestamp;
+            Throttle = other.Throttle;
+            Steering = other.Steering;
+            Boost = other.Boost;
+            Buttons = other.Buttons;
+            DodgeX = other.DodgeX;
+            DodgeY = other.DodgeY;
+        }
+
         public void WriteNetworkBytes(byte[] data, ref int offset)
         {
             WriteInt32(data, ref offset, FrameNumber);
@@ -70,10 +96,10 @@ namespace UdonSharp.CE.NetPhysics
 
         private static void WriteInt32(byte[] data, ref int offset, int value)
         {
-            data[offset++] = (byte)(value);
-            data[offset++] = (byte)(value >> 8);
-            data[offset++] = (byte)(value >> 16);
-            data[offset++] = (byte)(value >> 24);
+            data[offset++] = (byte)(value & 0xFF);
+            data[offset++] = (byte)((value >> 8) & 0xFF);
+            data[offset++] = (byte)((value >> 16) & 0xFF);
+            data[offset++] = (byte)((value >> 24) & 0xFF);
         }
 
         private static int ReadInt32(byte[] data, ref int offset)
@@ -87,4 +113,3 @@ namespace UdonSharp.CE.NetPhysics
         }
     }
 }
-
