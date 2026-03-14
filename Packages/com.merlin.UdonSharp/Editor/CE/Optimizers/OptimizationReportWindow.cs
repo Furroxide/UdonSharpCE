@@ -320,6 +320,7 @@ namespace UdonSharp.CE.Editor.Optimizers
                 case "CEOPT008": return "ExternCache";
                 case "CEOPT009": return "CSE";
                 case "CEOPT010": return "LICM";
+                case "CEOPT011": return "LambdaInline";
                 default: return id;
             }
         }
@@ -336,6 +337,7 @@ namespace UdonSharp.CE.Editor.Optimizers
                 case "CEOPT008": return "Extern Call Caching";
                 case "CEOPT009": return "Common Subexpression Elimination";
                 case "CEOPT010": return "Loop Invariant Code Motion";
+                case "CEOPT011": return "Lambda Inlining";
                 default: return id;
             }
         }
@@ -375,6 +377,7 @@ namespace UdonSharp.CE.Editor.Optimizers
                     "CEOPT008" => "Extern Call Caching",
                     "CEOPT009" => "Common Subexpression Elimination",
                     "CEOPT010" => "Loop Invariant Code Motion",
+                    "CEOPT011" => "Lambda Inlining",
                     _ => id
                 };
                 sb.AppendLine($"  ✓ {name}: {count}");

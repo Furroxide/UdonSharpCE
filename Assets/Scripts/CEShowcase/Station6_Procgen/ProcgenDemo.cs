@@ -183,30 +183,14 @@ namespace CEShowcase.Station6_Procgen
                         (z - _terrainDepth * 0.5f) * _terrainScale
                     );
                     
-                    GameObject block;
-                    if (_terrainBlockPrefab != null)
+                    if (_terrainBlockPrefab == null)
                     {
-                        block = Instantiate(_terrainBlockPrefab, _terrainParent);
-                    }
-                    else
-                    {
-                        // Create a cube primitive as fallback
-                        block = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                        block.transform.SetParent(_terrainParent);
-                        block.name = $"TerrainBlock_{x}_{z}";
-                        
-                        // Remove collider to avoid physics overhead
-                        var blockCollider = block.GetComponent<Collider>();
-                        if (blockCollider != null) Destroy(blockCollider);
-                        
-                        // Apply base material
-                        var blockBaseRenderer = block.GetComponent<Renderer>();
-                        if (blockBaseRenderer != null)
-                        {
-                            blockBaseRenderer.sharedMaterial = terrainMaterial;
-                        }
+                        CELogger.Error("Procgen", "Terrain block prefab is required! GameObject.CreatePrimitive is not exposed to Udon.");
+                        return;
                     }
                     
+                    GameObject block = Instantiate(_terrainBlockPrefab, _terrainParent);
+                    block.name = "TerrainBlock_" + x + "_" + z;
                     block.transform.localPosition = position;
                     block.transform.localScale = Vector3.one * _terrainScale;
                     
@@ -232,21 +216,18 @@ namespace CEShowcase.Station6_Procgen
         }
         
         /// <summary>
-        /// Gets the fallback material or creates a default one for terrain blocks.
+        /// Gets the fallback material for terrain blocks.
+        /// Note: Runtime material creation is not supported in Udon - assign the material in the inspector.
         /// </summary>
         private Material GetOrCreateTerrainMaterial()
         {
-            if (_fallbackMaterial != null)
+            if (_fallbackMaterial == null)
             {
-                return _fallbackMaterial;
+                CELogger.Error("Procgen", "Fallback material is not assigned. Please assign a material in the inspector.");
+                return null;
             }
-            
-            // Create a simple standard material - color will be set via MaterialPropertyBlock
-            var material = new Material(Shader.Find("Standard"));
-            material.name = "TerrainMaterial_Generated";
-            material.color = Color.white;
-            
-            return material;
+
+            return _fallbackMaterial;
         }
         
         /// <summary>
@@ -542,7 +523,6 @@ namespace CEShowcase.Station6_Procgen
         }
     }
 }
-
 
 
 

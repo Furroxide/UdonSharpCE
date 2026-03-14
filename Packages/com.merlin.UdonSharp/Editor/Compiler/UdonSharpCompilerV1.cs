@@ -281,6 +281,10 @@ namespace UdonSharp.Compiler
             EditorApplication.UnlockReloadAssemblies();
 
             CurrentJob = null;
+            
+            // Clear serialization caches to ensure field layouts match the newly compiled programs
+            UdonVariableStorageInterface.ClearCache();
+            UdonSharpBehaviourFormatterEmitter.ClearCache();
         }
 
         private static void PrintStageTime(string stageName, Stopwatch stopwatch)
@@ -461,7 +465,7 @@ namespace UdonSharp.Compiler
 
             // Run CE compile-time optimizers on syntax trees
             Stopwatch optimizerTimer = Stopwatch.StartNew();
-            RunCompileTimeOptimizers(syntaxTrees);
+            syntaxTrees = RunCompileTimeOptimizers(compilationContext, syntaxTrees);
             PrintStageTime("CE Optimizers", optimizerTimer);
 
             foreach (ModuleBinding binding in syntaxTrees)
@@ -1157,10 +1161,10 @@ namespace UdonSharp.Compiler
         /// Runs compile-time optimizers on all syntax trees.
         /// Optimizers transform syntax trees before Roslyn compilation to generate more efficient Udon code.
         /// </summary>
-        private static void RunCompileTimeOptimizers(ModuleBinding[] syntaxTrees)
+        private static ModuleBinding[] RunCompileTimeOptimizers(CompilationContext compilationContext, ModuleBinding[] syntaxTrees)
         {
             if (syntaxTrees == null || syntaxTrees.Length == 0)
-                return;
+                return syntaxTrees;
 
             try
             {
@@ -1174,19 +1178,47 @@ namespace UdonSharp.Compiler
                 // Run all registered optimizers
                 var optimizedTuples = CompileTimeOptimizerRegistry.RunOptimizers(treeTuples);
 
-                // Update the module bindings with optimized trees
-                for (int i = 0; i < syntaxTrees.Length; i++)
+                if (optimizedTuples == null || optimizedTuples.Length == 0)
+                    return syntaxTrees;
+
+                var bindingByPath = new Dictionary<string, ModuleBinding>(StringComparer.Ordinal);
+                foreach (var binding in syntaxTrees)
                 {
-                    if (optimizedTuples[i].tree != syntaxTrees[i].tree)
+                    if (!string.IsNullOrEmpty(binding.filePath))
+                        bindingByPath[binding.filePath] = binding;
+                }
+
+                var updatedBindings = new ModuleBinding[optimizedTuples.Length];
+                for (int i = 0; i < optimizedTuples.Length; i++)
+                {
+                    var (tree, filePath) = optimizedTuples[i];
+                    if (bindingByPath.TryGetValue(filePath, out var binding))
                     {
-                        syntaxTrees[i].tree = optimizedTuples[i].tree;
+                        binding.tree = tree;
+                        binding.filePath = filePath;
+                        binding.sourceText = tree.GetText().ToString();
+                        updatedBindings[i] = binding;
+                    }
+                    else
+                    {
+                        updatedBindings[i] = new ModuleBinding
+                        {
+                            tree = tree,
+                            filePath = filePath,
+                            sourceText = tree.GetText().ToString()
+                        };
                     }
                 }
+
+                compilationContext.ReplaceModuleBindings(updatedBindings);
+                return updatedBindings;
             }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[UdonSharp] Compile-time optimization failed: {ex.Message}");
             }
+
+            return syntaxTrees;
         }
     }
 }

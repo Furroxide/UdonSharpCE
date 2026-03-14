@@ -9,7 +9,18 @@ namespace UdonSharp.CE.NetPhysics
     [PublicAPI]
     public class InputFrame
     {
-        public static readonly InputFrame Empty = new InputFrame();
+        private static InputFrame _empty;
+
+        public static InputFrame Empty
+        {
+            get
+            {
+                if (_empty == null)
+                    _empty = new InputFrame();
+                return _empty;
+            }
+        }
+
         // Frame ID
         public int FrameNumber;
         public float Timestamp;
@@ -85,12 +96,12 @@ namespace UdonSharp.CE.NetPhysics
         {
             InputFrame frame = new InputFrame();
             frame.FrameNumber = ReadInt32(data, ref offset);
-            frame.Throttle = (sbyte)data[offset++];
-            frame.Steering = (sbyte)data[offset++];
+            frame.Throttle = ReadSByte(data[offset++]);
+            frame.Steering = ReadSByte(data[offset++]);
             frame.Boost = data[offset++];
             frame.Buttons = data[offset++];
-            frame.DodgeX = (sbyte)data[offset++];
-            frame.DodgeY = (sbyte)data[offset++];
+            frame.DodgeX = ReadSByte(data[offset++]);
+            frame.DodgeY = ReadSByte(data[offset++]);
             return frame;
         }
 
@@ -110,6 +121,11 @@ namespace UdonSharp.CE.NetPhysics
                         | (data[offset + 3] << 24);
             offset += 4;
             return value;
+        }
+
+        private static sbyte ReadSByte(byte value)
+        {
+            return value > 127 ? (sbyte)(value - 256) : (sbyte)value;
         }
     }
 }

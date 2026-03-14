@@ -212,6 +212,10 @@ namespace UdonSharpEditor
         {
             _programAssetLookup = null;
             _programAssetTypeLookup = null;
+            
+            // Clear serialization caches to ensure field layouts are up to date after recompilation
+            UdonVariableStorageInterface.ClearCache();
+            UdonSharpBehaviourFormatterEmitter.ClearCache();
         }
 
         private static UdonSharpProgramAsset GetUdonSharpProgramAsset(MonoScript programScript)

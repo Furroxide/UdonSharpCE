@@ -202,7 +202,7 @@ namespace UdonSharp.CE.Persistence
                 return 1;
 
             // Check if it's an integer value
-            if (value == (int)value && value >= -2147483648 && value <= 2147483647)
+            if (value == (int)value)
                 return EstimateIntegerSize((int)value);
 
             return FLOAT_MAX_SIZE;
@@ -222,7 +222,7 @@ namespace UdonSharp.CE.Persistence
                 return 1;
 
             // Check if it's an integer value
-            if (value == (long)value && value >= long.MinValue && value <= long.MaxValue)
+            if (value == (long)value)
                 return EstimateIntegerSize((long)value);
 
             return DOUBLE_MAX_SIZE;

@@ -43,6 +43,7 @@ namespace UdonSharp.CE.Editor.Optimizers
             {
                 // Priority 0-99: Early optimizations
                 new AsyncMethodTransformOptimizer(), // Priority 1 - Transform async/await FIRST before anything else
+                new LambdaInliningOptimizer(), // Priority 2 - Inline supported lambdas before callback transforms
                 new ActionToCallbackTransformer(), // Priority 3 - Transform Action delegates to CECallback before other optimizations
                 new CELoggerTransformOptimizer(),  // Priority 5 - Transform CELogger calls before other optimizations
 

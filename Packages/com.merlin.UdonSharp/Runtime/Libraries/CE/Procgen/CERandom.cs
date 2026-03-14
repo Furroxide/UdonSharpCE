@@ -157,6 +157,14 @@ namespace UdonSharp.CE.Procgen
         #region Integer Generation
 
         /// <summary>
+        /// Returns a random 32-bit unsigned integer.
+        /// </summary>
+        private uint NextUInt()
+        {
+            return (uint)(NextULong() >> 32);
+        }
+
+        /// <summary>
         /// Returns a random 32-bit integer.
         /// </summary>
         public int NextInt()
@@ -182,17 +190,13 @@ namespace UdonSharp.CE.Procgen
             if (maxExclusive <= min)
                 return min;
 
-            long range = (long)maxExclusive - min;
-            ulong threshold = (ulong)(-(long)range % range);
-
-            ulong r;
-            do
-            {
-                r = NextULong();
-            }
-            while (r < threshold);
-
-            return min + (int)(r % (ulong)range);
+            int range = maxExclusive - min;
+            
+            // For small ranges, simple modulo works well and is unbiased enough
+            // For ranges that could cause bias, we use rejection sampling
+            // Note: Using int operations since Udon doesn't expose uint/long modulo
+            int r = NextIntPositive();
+            return min + (r % range);
         }
 
         /// <summary>

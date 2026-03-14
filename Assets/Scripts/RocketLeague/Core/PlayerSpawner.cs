@@ -31,7 +31,6 @@ namespace RocketLeague
         [UdonSynced] private int _orangePlayerCount;
 
         private const int MAX_PLAYERS = 16;
-        private bool _initialized;
 
         private void Start()
         {
@@ -40,8 +39,6 @@ namespace RocketLeague
                 _playerTeams[i] = -1;
                 _playerVehicleIndices[i] = -1;
             }
-
-            _initialized = true;
         }
 
         public override void OnPlayerJoined(VRCPlayerApi player)

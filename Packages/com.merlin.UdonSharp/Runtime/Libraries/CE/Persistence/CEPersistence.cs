@@ -85,7 +85,7 @@ namespace UdonSharp.CE.Persistence
     /// </code>
     /// </example>
     [PublicAPI]
-    public static class CEPersistence
+    public static partial class CEPersistence
     {
         #region Constants
 
@@ -130,15 +130,19 @@ namespace UdonSharp.CE.Persistence
             int version = 1,
             Func<T, List<ValidationError>> validate = null)
         {
+#if COMPILER_UDONSHARP
+            Debug.LogError($"[CE.Persistence] Register<{GetTypeName<T>()}>: delegate-based converters are not supported in Udon. Use the converter object overload.");
+            return;
+#else
             if (toData == null || fromData == null)
             {
-                Debug.LogError($"[CE.Persistence] Register<{typeof(T).Name}>: converters cannot be null");
+                Debug.LogError($"[CE.Persistence] Register<{GetTypeName<T>()}>: converters cannot be null");
                 return;
             }
 
             if (string.IsNullOrEmpty(key))
             {
-                Debug.LogError($"[CE.Persistence] Register<{typeof(T).Name}>: key cannot be null or empty");
+                Debug.LogError($"[CE.Persistence] Register<{GetTypeName<T>()}>: key cannot be null or empty");
                 return;
             }
 
@@ -146,7 +150,8 @@ namespace UdonSharp.CE.Persistence
             PersistenceModelStorage<T>.Key = key;
             PersistenceModelStorage<T>.Version = version;
 
-            Debug.Log($"[CE.Persistence] Registered persistent model: {typeof(T).Name} (key: {key}, version: {version})");
+            Debug.Log($"[CE.Persistence] Registered persistent model: {GetTypeName<T>()} (key: {key}, version: {version})");
+#endif
         }
 
         /// <summary>
@@ -191,43 +196,61 @@ namespace UdonSharp.CE.Persistence
         /// <returns>The result of the save operation.</returns>
         public static SaveResult Save<T>(T model)
         {
+#if COMPILER_UDONSHARP
+            PersistenceModelConverter<T> converter = null;
+#else
             var converter = PersistenceModelStorage<T>.Converter;
+#endif
             if (converter == null)
             {
-                Debug.LogError($"[CE.Persistence] Save<{typeof(T).Name}>: type not registered. Call Register<{typeof(T).Name}>() first.");
-                return SaveResult.NotRegistered;
+                Debug.LogError($"[CE.Persistence] Save<{GetTypeName<T>()}>: type not registered. Call Register<{GetTypeName<T>()}>() first.");
+                return FinalizeSave<T>(SaveResult.NotRegistered);
             }
 
             if (model == null)
             {
-                Debug.LogError($"[CE.Persistence] Save<{typeof(T).Name}>: model cannot be null");
-                return SaveResult.ValidationFailed;
+                Debug.LogError($"[CE.Persistence] Save<{GetTypeName<T>()}>: model cannot be null");
+                return FinalizeSave<T>(SaveResult.ValidationFailed);
             }
 
             // Validate if validator is registered
+            List<ValidationError> validationErrors = null;
+#if !COMPILER_UDONSHARP
             if (converter.Validate != null)
             {
-                var errors = converter.Validate(model);
-                if (errors != null && errors.Count > 0)
+                validationErrors = converter.Validate(model);
+            }
+#endif
+
+            if (validationErrors != null && validationErrors.Count > 0)
+            {
+                foreach (var error in validationErrors)
                 {
-                    foreach (var error in errors)
-                    {
-                        Debug.LogError($"[CE.Persistence] Validation error: {error}");
-                    }
-                    return SaveResult.ValidationFailed;
+                    Debug.LogError($"[CE.Persistence] Validation error: {error}");
                 }
+                return FinalizeSave<T>(SaveResult.ValidationFailed);
             }
 
             // Convert to DataDictionary
             DataDictionary data;
+#if COMPILER_UDONSHARP
+            data = new DataDictionary();
+#else
             try
             {
                 data = converter.ToData(model);
             }
             catch (Exception e)
             {
-                Debug.LogError($"[CE.Persistence] Save<{typeof(T).Name}>: conversion failed - {e.Message}");
-                return SaveResult.ValidationFailed;
+                Debug.LogError($"[CE.Persistence] Save<{GetTypeName<T>()}>: conversion failed - {e.Message}");
+                return FinalizeSave<T>(SaveResult.ValidationFailed);
+            }
+#endif
+
+            if (data == null)
+            {
+                Debug.LogError($"[CE.Persistence] Save<{GetTypeName<T>()}>: converter returned null DataDictionary");
+                data = new DataDictionary();
             }
 
             // Add metadata
@@ -240,45 +263,53 @@ namespace UdonSharp.CE.Persistence
             int estimatedSize = SizeEstimator.EstimateDataDictionarySize(data);
             if (estimatedSize > PLAYER_DATA_QUOTA)
             {
-                Debug.LogError($"[CE.Persistence] Save<{typeof(T).Name}>: estimated size ({estimatedSize} bytes) exceeds quota ({PLAYER_DATA_QUOTA} bytes)");
-                return SaveResult.QuotaExceeded;
+                Debug.LogError($"[CE.Persistence] Save<{GetTypeName<T>()}>: estimated size ({estimatedSize} bytes) exceeds quota ({PLAYER_DATA_QUOTA} bytes)");
+                return FinalizeSave<T>(SaveResult.QuotaExceeded);
             }
 
             if (estimatedSize > PLAYER_DATA_QUOTA * 0.8f)
             {
-                Debug.LogWarning($"[CE.Persistence] Save<{typeof(T).Name}>: estimated size ({estimatedSize} bytes) is approaching quota limit ({PLAYER_DATA_QUOTA} bytes)");
+                Debug.LogWarning($"[CE.Persistence] Save<{GetTypeName<T>()}>: estimated size ({estimatedSize} bytes) is approaching quota limit ({PLAYER_DATA_QUOTA} bytes)");
             }
 
             // Save to VRChat PlayerData
-            try
+#if COMPILER_UDONSHARP
             {
                 VRCPlayerApi localPlayer = Networking.LocalPlayer;
                 if (localPlayer == null || !localPlayer.IsValid())
                 {
-                    Debug.LogError($"[CE.Persistence] Save<{typeof(T).Name}>: local player not available");
-                    return SaveResult.NotAllowed;
+                    Debug.LogError($"[CE.Persistence] Save<{GetTypeName<T>()}>: local player not available");
+                    return FinalizeSave<T>(SaveResult.NotAllowed);
                 }
 
                 // Note: VRChat's actual PlayerData API will be used here
                 // For now, this serves as a placeholder that shows the intended flow
                 // The actual implementation depends on VRChat SDK version
-                Debug.Log($"[CE.Persistence] Saved {typeof(T).Name} to key '{key}' ({estimatedSize} bytes)");
+                Debug.Log($"[CE.Persistence] Saved {GetTypeName<T>()} to key '{key}' ({estimatedSize} bytes)");
+                return FinalizeSave<T>(SaveResult.Success);
+            }
+#else
+            try
+            {
+                VRCPlayerApi localPlayer = Networking.LocalPlayer;
+                if (localPlayer == null || !localPlayer.IsValid())
+                {
+                    Debug.LogError($"[CE.Persistence] Save<{GetTypeName<T>()}>: local player not available");
+                    return FinalizeSave<T>(SaveResult.NotAllowed);
+                }
 
-                // Notify lifecycle callbacks
-                PersistenceLifecycle.NotifyDataSaved(SaveResult.Success, key);
-
-                return SaveResult.Success;
+                // Note: VRChat's actual PlayerData API will be used here
+                // For now, this serves as a placeholder that shows the intended flow
+                // The actual implementation depends on VRChat SDK version
+                Debug.Log($"[CE.Persistence] Saved {GetTypeName<T>()} to key '{key}' ({estimatedSize} bytes)");
+                return FinalizeSave<T>(SaveResult.Success);
             }
             catch (Exception e)
             {
-                Debug.LogError($"[CE.Persistence] Save<{typeof(T).Name}>: failed - {e.Message}");
-
-                // Notify lifecycle callbacks of failure
-                string key2 = PersistenceModelStorage<T>.Key;
-                PersistenceLifecycle.NotifyDataSaved(SaveResult.NetworkError, key2);
-
-                return SaveResult.NetworkError;
+                Debug.LogError($"[CE.Persistence] Save<{GetTypeName<T>()}>: failed - {e.Message}");
+                return FinalizeSave<T>(SaveResult.NetworkError);
             }
+#endif
         }
 
         /// <summary>
@@ -290,10 +321,14 @@ namespace UdonSharp.CE.Persistence
         /// <returns>The DataDictionary representation, or empty dictionary on error.</returns>
         public static DataDictionary ToData<T>(T model)
         {
+#if COMPILER_UDONSHARP
+            PersistenceModelConverter<T> converter = null;
+#else
             var converter = PersistenceModelStorage<T>.Converter;
+#endif
             if (converter == null)
             {
-                Debug.LogError($"[CE.Persistence] ToData<{typeof(T).Name}>: type not registered");
+                Debug.LogError($"[CE.Persistence] ToData<{GetTypeName<T>()}>: type not registered");
                 return new DataDictionary();
             }
 
@@ -302,18 +337,38 @@ namespace UdonSharp.CE.Persistence
                 return new DataDictionary();
             }
 
+#if COMPILER_UDONSHARP
+            DataDictionary data;
+            data = new DataDictionary();
+
+            if (data == null)
+            {
+                Debug.LogError($"[CE.Persistence] ToData<{GetTypeName<T>()}>: converter returned null DataDictionary");
+                return new DataDictionary();
+            }
+            data[VERSION_KEY] = PersistenceModelStorage<T>.Version;
+            data[MODEL_KEY] = PersistenceModelStorage<T>.Key;
+            return data;
+#else
             try
             {
-                DataDictionary data = converter.ToData(model);
+                DataDictionary data;
+                data = converter.ToData(model);
+                if (data == null)
+                {
+                    Debug.LogError($"[CE.Persistence] ToData<{GetTypeName<T>()}>: converter returned null DataDictionary");
+                    return new DataDictionary();
+                }
                 data[VERSION_KEY] = PersistenceModelStorage<T>.Version;
                 data[MODEL_KEY] = PersistenceModelStorage<T>.Key;
                 return data;
             }
             catch (Exception e)
             {
-                Debug.LogError($"[CE.Persistence] ToData<{typeof(T).Name}>: conversion failed - {e.Message}");
+                Debug.LogError($"[CE.Persistence] ToData<{GetTypeName<T>()}>: conversion failed - {e.Message}");
                 return new DataDictionary();
             }
+#endif
         }
 
         /// <summary>
@@ -333,7 +388,7 @@ namespace UdonSharp.CE.Persistence
                 return jsonToken.String;
             }
 
-            Debug.LogError($"[CE.Persistence] ToJson<{typeof(T).Name}>: serialization failed");
+            Debug.LogError($"[CE.Persistence] ToJson<{GetTypeName<T>()}>: serialization failed");
             return "{}";
         }
 
@@ -351,23 +406,27 @@ namespace UdonSharp.CE.Persistence
         {
             model = default;
 
+#if COMPILER_UDONSHARP
+            PersistenceModelConverter<T> converter = null;
+#else
             var converter = PersistenceModelStorage<T>.Converter;
+#endif
             if (converter == null)
             {
-                Debug.LogError($"[CE.Persistence] Restore<{typeof(T).Name}>: type not registered");
-                return RestoreResult.ParseError;
+                Debug.LogError($"[CE.Persistence] Restore<{GetTypeName<T>()}>: type not registered");
+                return FinalizeRestore<T>(RestoreResult.ParseError);
             }
 
             string key = PersistenceModelStorage<T>.Key;
             int expectedVersion = PersistenceModelStorage<T>.Version;
 
-            try
+#if COMPILER_UDONSHARP
             {
                 VRCPlayerApi localPlayer = Networking.LocalPlayer;
                 if (localPlayer == null || !localPlayer.IsValid())
                 {
-                    Debug.LogWarning($"[CE.Persistence] Restore<{typeof(T).Name}>: local player not available");
-                    return RestoreResult.NotReady;
+                    Debug.LogWarning($"[CE.Persistence] Restore<{GetTypeName<T>()}>: local player not available");
+                    return FinalizeRestore<T>(RestoreResult.NotReady);
                 }
 
                 // Note: VRChat's actual PlayerData API will be used here
@@ -375,22 +434,33 @@ namespace UdonSharp.CE.Persistence
                 // The actual implementation depends on VRChat SDK version
 
                 // For demonstration, return NoData
-                Debug.Log($"[CE.Persistence] Restore<{typeof(T).Name}>: no existing data for key '{key}'");
+                Debug.Log($"[CE.Persistence] Restore<{GetTypeName<T>()}>: no existing data for key '{key}'");
+                return FinalizeRestore<T>(RestoreResult.NoData);
+            }
+#else
+            try
+            {
+                VRCPlayerApi localPlayer = Networking.LocalPlayer;
+                if (localPlayer == null || !localPlayer.IsValid())
+                {
+                    Debug.LogWarning($"[CE.Persistence] Restore<{GetTypeName<T>()}>: local player not available");
+                    return FinalizeRestore<T>(RestoreResult.NotReady);
+                }
 
-                // Notify lifecycle callbacks
-                PersistenceLifecycle.NotifyDataRestored(RestoreResult.NoData, key);
+                // Note: VRChat's actual PlayerData API will be used here
+                // This is a placeholder showing the intended flow
+                // The actual implementation depends on VRChat SDK version
 
-                return RestoreResult.NoData;
+                // For demonstration, return NoData
+                Debug.Log($"[CE.Persistence] Restore<{GetTypeName<T>()}>: no existing data for key '{key}'");
+                return FinalizeRestore<T>(RestoreResult.NoData);
             }
             catch (Exception e)
             {
-                Debug.LogError($"[CE.Persistence] Restore<{typeof(T).Name}>: failed - {e.Message}");
-
-                // Notify lifecycle callbacks of failure
-                PersistenceLifecycle.NotifyDataRestored(RestoreResult.NetworkError, key);
-
-                return RestoreResult.NetworkError;
+                Debug.LogError($"[CE.Persistence] Restore<{GetTypeName<T>()}>: failed - {e.Message}");
+                return FinalizeRestore<T>(RestoreResult.NetworkError);
             }
+#endif
         }
 
         /// <summary>
@@ -404,10 +474,14 @@ namespace UdonSharp.CE.Persistence
         {
             model = default;
 
+#if COMPILER_UDONSHARP
+            PersistenceModelConverter<T> converter = null;
+#else
             var converter = PersistenceModelStorage<T>.Converter;
+#endif
             if (converter == null)
             {
-                Debug.LogError($"[CE.Persistence] FromData<{typeof(T).Name}>: type not registered");
+                Debug.LogError($"[CE.Persistence] FromData<{GetTypeName<T>()}>: type not registered");
                 return RestoreResult.ParseError;
             }
 
@@ -416,18 +490,51 @@ namespace UdonSharp.CE.Persistence
                 return RestoreResult.NoData;
             }
 
+            string expectedKey = PersistenceModelStorage<T>.Key;
+            if (data.TryGetValue(MODEL_KEY, out DataToken modelToken))
+            {
+                if (modelToken.TokenType != TokenType.String)
+                {
+                    string details = $"Model key token type {modelToken.TokenType} is invalid";
+                    Debug.LogError($"[CE.Persistence] FromData<{GetTypeName<T>()}>: {details}");
+                    PersistenceLifecycle.NotifyDataCorrupted(new CorruptionInfo(expectedKey, MODEL_KEY, CorruptionType.InvalidType, details));
+                    return RestoreResult.ParseError;
+                }
+
+                string storedKey = modelToken.String;
+                if (!string.IsNullOrEmpty(expectedKey) && storedKey != expectedKey)
+                {
+                    string details = $"Stored key '{storedKey}' does not match expected '{expectedKey}'";
+                    Debug.LogError($"[CE.Persistence] FromData<{GetTypeName<T>()}>: {details}");
+                    PersistenceLifecycle.NotifyDataCorrupted(new CorruptionInfo(expectedKey, MODEL_KEY, CorruptionType.SchemaViolation, details));
+                    return RestoreResult.ParseError;
+                }
+            }
+
             // Check version
             int expectedVersion = PersistenceModelStorage<T>.Version;
             if (data.TryGetValue(VERSION_KEY, out DataToken versionToken))
             {
+                if (!IsNumericToken(versionToken.TokenType))
+                {
+                    string details = $"Version token type {versionToken.TokenType} is invalid";
+                    Debug.LogError($"[CE.Persistence] FromData<{GetTypeName<T>()}>: {details}");
+                    PersistenceLifecycle.NotifyDataCorrupted(new CorruptionInfo(expectedKey, VERSION_KEY, CorruptionType.InvalidType, details));
+                    return RestoreResult.ParseError;
+                }
+
                 int storedVersion = (int)versionToken.Double;
                 if (storedVersion != expectedVersion)
                 {
-                    Debug.LogWarning($"[CE.Persistence] FromData<{typeof(T).Name}>: version mismatch (stored: {storedVersion}, expected: {expectedVersion})");
+                    Debug.LogWarning($"[CE.Persistence] FromData<{GetTypeName<T>()}>: version mismatch (stored: {storedVersion}, expected: {expectedVersion})");
                     return RestoreResult.VersionMismatch;
                 }
             }
 
+#if COMPILER_UDONSHARP
+            model = default;
+            return RestoreResult.ParseError;
+#else
             try
             {
                 model = converter.FromData(data);
@@ -435,9 +542,11 @@ namespace UdonSharp.CE.Persistence
             }
             catch (Exception e)
             {
-                Debug.LogError($"[CE.Persistence] FromData<{typeof(T).Name}>: conversion failed - {e.Message}");
+                Debug.LogError($"[CE.Persistence] FromData<{GetTypeName<T>()}>: conversion failed - {e.Message}");
+                PersistenceLifecycle.NotifyDataCorrupted(new CorruptionInfo(expectedKey, null, CorruptionType.SchemaViolation, e.Message));
                 return RestoreResult.ParseError;
             }
+#endif
         }
 
         /// <summary>
@@ -458,13 +567,17 @@ namespace UdonSharp.CE.Persistence
 
             if (!VRCJson.TryDeserializeFromJson(json, out DataToken token))
             {
-                Debug.LogError($"[CE.Persistence] FromJson<{typeof(T).Name}>: JSON parse failed");
+                Debug.LogError($"[CE.Persistence] FromJson<{GetTypeName<T>()}>: JSON parse failed");
+                string modelKey = PersistenceModelStorage<T>.Key;
+                PersistenceLifecycle.NotifyDataCorrupted(new CorruptionInfo(modelKey, null, CorruptionType.MalformedJson, "JSON parse failed"));
                 return RestoreResult.ParseError;
             }
 
             if (token.TokenType != TokenType.DataDictionary)
             {
-                Debug.LogError($"[CE.Persistence] FromJson<{typeof(T).Name}>: expected object, got {token.TokenType}");
+                Debug.LogError($"[CE.Persistence] FromJson<{GetTypeName<T>()}>: expected object, got {token.TokenType}");
+                string modelKey = PersistenceModelStorage<T>.Key;
+                PersistenceLifecycle.NotifyDataCorrupted(new CorruptionInfo(modelKey, null, CorruptionType.SchemaViolation, $"Expected object, got {token.TokenType}"));
                 return RestoreResult.ParseError;
             }
 
@@ -486,10 +599,14 @@ namespace UdonSharp.CE.Persistence
         {
             errors = new List<ValidationError>();
 
+#if COMPILER_UDONSHARP
+            PersistenceModelConverter<T> converter = null;
+#else
             var converter = PersistenceModelStorage<T>.Converter;
+#endif
             if (converter == null)
             {
-                errors.Add(new ValidationError("_type", "_type", $"Type {typeof(T).Name} is not registered"));
+                errors.Add(new ValidationError("_type", "_type", $"Type {GetTypeName<T>()} is not registered"));
                 return false;
             }
 
@@ -499,10 +616,12 @@ namespace UdonSharp.CE.Persistence
                 return false;
             }
 
+#if !COMPILER_UDONSHARP
             if (converter.Validate != null)
             {
                 errors = converter.Validate(model) ?? new List<ValidationError>();
             }
+#endif
 
             return errors.Count == 0;
         }
@@ -519,10 +638,14 @@ namespace UdonSharp.CE.Persistence
         /// <returns>Estimated size in bytes, or -1 on error.</returns>
         public static int EstimateSize<T>(T model)
         {
+#if COMPILER_UDONSHARP
+            PersistenceModelConverter<T> converter = null;
+#else
             var converter = PersistenceModelStorage<T>.Converter;
+#endif
             if (converter == null)
             {
-                Debug.LogError($"[CE.Persistence] EstimateSize<{typeof(T).Name}>: type not registered");
+                Debug.LogError($"[CE.Persistence] EstimateSize<{GetTypeName<T>()}>: type not registered");
                 return -1;
             }
 
@@ -531,18 +654,38 @@ namespace UdonSharp.CE.Persistence
                 return 0;
             }
 
+#if COMPILER_UDONSHARP
+            DataDictionary data;
+            data = new DataDictionary();
+
+            if (data == null)
+            {
+                Debug.LogError($"[CE.Persistence] EstimateSize<{GetTypeName<T>()}>: converter returned null DataDictionary");
+                return -1;
+            }
+            data[VERSION_KEY] = PersistenceModelStorage<T>.Version;
+            data[MODEL_KEY] = PersistenceModelStorage<T>.Key;
+            return SizeEstimator.EstimateDataDictionarySize(data);
+#else
             try
             {
-                DataDictionary data = converter.ToData(model);
+                DataDictionary data;
+                data = converter.ToData(model);
+                if (data == null)
+                {
+                    Debug.LogError($"[CE.Persistence] EstimateSize<{GetTypeName<T>()}>: converter returned null DataDictionary");
+                    return -1;
+                }
                 data[VERSION_KEY] = PersistenceModelStorage<T>.Version;
                 data[MODEL_KEY] = PersistenceModelStorage<T>.Key;
                 return SizeEstimator.EstimateDataDictionarySize(data);
             }
             catch (Exception e)
             {
-                Debug.LogError($"[CE.Persistence] EstimateSize<{typeof(T).Name}>: failed - {e.Message}");
+                Debug.LogError($"[CE.Persistence] EstimateSize<{GetTypeName<T>()}>: failed - {e.Message}");
                 return -1;
             }
+#endif
         }
 
         /// <summary>
@@ -554,6 +697,53 @@ namespace UdonSharp.CE.Persistence
             // Note: This would need VRChat API support to determine actual usage
             // For now, return the full quota as a placeholder
             return PLAYER_DATA_QUOTA;
+        }
+
+        #endregion
+
+        #region Helpers
+
+        private static string GetTypeName<T>()
+        {
+#if COMPILER_UDONSHARP
+            return "T";
+#else
+            return typeof(T).Name;
+#endif
+        }
+
+        private static SaveResult FinalizeSave<T>(SaveResult result)
+        {
+            string modelKey = PersistenceModelStorage<T>.Key;
+            PersistenceLifecycle.NotifyDataSaved(result, modelKey);
+            return result;
+        }
+
+        private static RestoreResult FinalizeRestore<T>(RestoreResult result)
+        {
+            string modelKey = PersistenceModelStorage<T>.Key;
+            PersistenceLifecycle.NotifyDataRestored(result, modelKey);
+            return result;
+        }
+
+        private static bool IsNumericToken(TokenType tokenType)
+        {
+            switch (tokenType)
+            {
+                case TokenType.SByte:
+                case TokenType.Byte:
+                case TokenType.Short:
+                case TokenType.UShort:
+                case TokenType.Int:
+                case TokenType.UInt:
+                case TokenType.Long:
+                case TokenType.ULong:
+                case TokenType.Float:
+                case TokenType.Double:
+                    return true;
+                default:
+                    return false;
+            }
         }
 
         #endregion

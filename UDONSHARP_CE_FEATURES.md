@@ -107,7 +107,7 @@ Key APIs:
 Limitations:
 
 - Save and Restore are placeholders for future PlayerData integration.
-- Model converters must be registered manually.
+- Auto-registration supports primitives, strings, DataList/DataDictionary, and arrays of those types; unsupported fields require manual converters.
 
 ## CE.DevTools
 

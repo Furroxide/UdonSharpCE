@@ -651,6 +651,23 @@ namespace UdonSharp.Compiler.Binder
 
         public override BoundNode VisitAssignmentExpression(AssignmentExpressionSyntax node)
         {
+            // Handle discard pattern: _ = expr (fire-and-forget, ignore return value)
+            if (node.Kind() == SyntaxKind.SimpleAssignmentExpression && 
+                node.Left is IdentifierNameSyntax identifierName && 
+                identifierName.Identifier.ValueText == "_")
+            {
+                // Check if this is actually a discard (not a variable named _)
+                ISymbol symbol = SymbolLookupModel.GetSymbolInfo(node.Left).Symbol;
+                if (symbol == null || symbol is IDiscardSymbol)
+                {
+                    // This is a discard - evaluate the right side but discard the result
+                    BoundExpression rhsExpression = VisitExpression(node.Right);
+                    TypeSymbol discardType = rhsExpression.ValueType;
+                    BoundAccessExpression discardTarget = BoundAccessExpression.BindDiscardAccess(discardType, node);
+                    return new BoundAssignmentExpression(node, discardTarget, rhsExpression);
+                }
+            }
+            
             BoundAccessExpression assignmentTarget = VisitAccessExpression(node.Left);
 
             if (node.Kind() != SyntaxKind.SimpleAssignmentExpression)

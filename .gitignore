@@ -132,3 +132,15 @@ LocalDocs/
 # Screenshots
 Assets/Screenshots/
 Assets/Screenshots.meta
+
+# Personaplex tools
+Tools/Personaplex/.venv/
+Tools/Personaplex/_vendor/
+Tools/Personaplex/.pulse_modules
+
+# ...
+.venv/
+.venv-personaplex-bridge/
+
+.commands.txt
+.cursor/plans/

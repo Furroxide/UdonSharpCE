@@ -257,57 +257,57 @@ namespace UdonSharp.CE.Editor.Optimizers
             /// </summary>
             public override SyntaxNode VisitParenthesizedLambdaExpression(ParenthesizedLambdaExpressionSyntax node)
             {
-                // Check for () => Method() pattern
-                if (node.ParameterList.Parameters.Count == 0 && 
-                    node.ExpressionBody is InvocationExpressionSyntax invocation &&
-                    invocation.ArgumentList.Arguments.Count == 0 &&
-                    invocation.Expression is IdentifierNameSyntax methodName)
+                // Skip if inside [CEPreserveAction] scope
+                if (IsInPreserveActionScope(node))
                 {
-                    RecordTransformation(node, $"Lambda: () => {methodName.Identifier.ValueText}() → new CECallback(this, \"{methodName.Identifier.ValueText}\")");
-                    ChangesMade = true;
-
-                    return SyntaxFactory.ObjectCreationExpression(
-                        SyntaxFactory.IdentifierName("CECallback"))
-                        .WithArgumentList(
-                            SyntaxFactory.ArgumentList(
-                                SyntaxFactory.SeparatedList(new[]
-                                {
-                                    SyntaxFactory.Argument(SyntaxFactory.ThisExpression()),
-                                    SyntaxFactory.Argument(
-                                        SyntaxFactory.LiteralExpression(
-                                            SyntaxKind.StringLiteralExpression,
-                                            SyntaxFactory.Literal(methodName.Identifier.ValueText)))
-                                })))
-                        .WithTriviaFrom(node);
+                    return base.VisitParenthesizedLambdaExpression(node);
                 }
 
-                // Check for () => this.Method() pattern
-                if (node.ParameterList.Parameters.Count == 0 && 
-                    node.ExpressionBody is InvocationExpressionSyntax invocation2 &&
-                    invocation2.ArgumentList.Arguments.Count == 0 &&
-                    invocation2.Expression is MemberAccessExpressionSyntax memberAccess &&
-                    memberAccess.Expression is ThisExpressionSyntax &&
-                    memberAccess.Name is IdentifierNameSyntax methodName2)
+                // Check for () => Method() pattern
+                if (node.ParameterList.Parameters.Count == 0 &&
+                    TryGetParameterlessMethodName(node.ExpressionBody, out string methodName))
                 {
-                    RecordTransformation(node, $"Lambda: () => this.{methodName2.Identifier.ValueText}() → new CECallback(this, \"{methodName2.Identifier.ValueText}\")");
+                    RecordTransformation(node, $"Lambda: () => {methodName}() → new CECallback(this, \"{methodName}\")");
                     ChangesMade = true;
 
-                    return SyntaxFactory.ObjectCreationExpression(
-                        SyntaxFactory.IdentifierName("CECallback"))
-                        .WithArgumentList(
-                            SyntaxFactory.ArgumentList(
-                                SyntaxFactory.SeparatedList(new[]
-                                {
-                                    SyntaxFactory.Argument(SyntaxFactory.ThisExpression()),
-                                    SyntaxFactory.Argument(
-                                        SyntaxFactory.LiteralExpression(
-                                            SyntaxKind.StringLiteralExpression,
-                                            SyntaxFactory.Literal(methodName2.Identifier.ValueText)))
-                                })))
-                        .WithTriviaFrom(node);
+                    return CreateCallbackCreation(methodName).WithTriviaFrom(node);
+                }
+
+                // Check for () => { Method(); } block pattern
+                if (node.ParameterList.Parameters.Count == 0 &&
+                    node.Block != null &&
+                    TryGetBlockSingleInvocationMethodName(node.Block, out string blockMethodName))
+                {
+                    RecordTransformation(node, $"Lambda block: () => {{ {blockMethodName}(); }} → new CECallback(this, \"{blockMethodName}\")");
+                    ChangesMade = true;
+
+                    return CreateCallbackCreation(blockMethodName).WithTriviaFrom(node);
                 }
 
                 return base.VisitParenthesizedLambdaExpression(node);
+            }
+
+            /// <summary>
+            /// Transforms anonymous methods delegate { Method(); } to CECallback creation.
+            /// </summary>
+            public override SyntaxNode VisitAnonymousMethodExpression(AnonymousMethodExpressionSyntax node)
+            {
+                // Skip if inside [CEPreserveAction] scope
+                if (IsInPreserveActionScope(node))
+                {
+                    return base.VisitAnonymousMethodExpression(node);
+                }
+
+                if ((node.ParameterList == null || node.ParameterList.Parameters.Count == 0) &&
+                    node.Block != null &&
+                    TryGetBlockSingleInvocationMethodName(node.Block, out string methodName))
+                {
+                    RecordTransformation(node, $"Anonymous method: delegate {{ {methodName}(); }} → new CECallback(this, \"{methodName}\")");
+                    ChangesMade = true;
+                    return CreateCallbackCreation(methodName).WithTriviaFrom(node);
+                }
+
+                return base.VisitAnonymousMethodExpression(node);
             }
 
             /// <summary>
@@ -318,6 +318,64 @@ namespace UdonSharp.CE.Editor.Optimizers
             {
                 // We don't transform simple lambdas with parameters as CECallback doesn't support parameters
                 return base.VisitSimpleLambdaExpression(node);
+            }
+
+            private static bool TryGetParameterlessMethodName(ExpressionSyntax expression, out string methodName)
+            {
+                methodName = null;
+
+                if (expression is InvocationExpressionSyntax invocation &&
+                    invocation.ArgumentList.Arguments.Count == 0)
+                {
+                    if (invocation.Expression is IdentifierNameSyntax identifier)
+                    {
+                        methodName = identifier.Identifier.ValueText;
+                        return true;
+                    }
+
+                    if (invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
+                        memberAccess.Expression is ThisExpressionSyntax &&
+                        memberAccess.Name is IdentifierNameSyntax memberIdentifier)
+                    {
+                        methodName = memberIdentifier.Identifier.ValueText;
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            private static bool TryGetBlockSingleInvocationMethodName(BlockSyntax block, out string methodName)
+            {
+                methodName = null;
+
+                if (block == null || block.Statements.Count != 1)
+                    return false;
+
+                if (block.Statements[0] is ExpressionStatementSyntax exprStmt &&
+                    TryGetParameterlessMethodName(exprStmt.Expression, out string found))
+                {
+                    methodName = found;
+                    return true;
+                }
+
+                return false;
+            }
+
+            private static ObjectCreationExpressionSyntax CreateCallbackCreation(string methodName)
+            {
+                return SyntaxFactory.ObjectCreationExpression(
+                        SyntaxFactory.IdentifierName("CECallback"))
+                    .WithArgumentList(
+                        SyntaxFactory.ArgumentList(
+                            SyntaxFactory.SeparatedList(new[]
+                            {
+                                SyntaxFactory.Argument(SyntaxFactory.ThisExpression()),
+                                SyntaxFactory.Argument(
+                                    SyntaxFactory.LiteralExpression(
+                                        SyntaxKind.StringLiteralExpression,
+                                        SyntaxFactory.Literal(methodName)))
+                            })));
             }
 
             /// <summary>
@@ -357,4 +415,3 @@ namespace UdonSharp.CE.Editor.Optimizers
         }
     }
 }
-

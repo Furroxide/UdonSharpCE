@@ -237,6 +237,28 @@ namespace UdonSharp.CE.Persistence
                 }
             }
 
+            // Fallback: search for an existing slot by player reference
+            for (int i = 0; i < MAX_PLAYER_OBJECTS; i++)
+            {
+                if (_slotOccupied[i] && _playerSlots[i] == player)
+                {
+                    if (playerId >= 0 && playerId < _playerIdToSlot.Length)
+                    {
+                        _playerIdToSlot[playerId] = i;
+                    }
+
+                    if (player.isLocal)
+                    {
+                        _localPlayerSlot = i;
+                    }
+
+                    if (debugLogging)
+                        Debug.Log($"[CE.PlayerObjectHelper] Player {player.displayName} already in slot {i}");
+
+                    return i;
+                }
+            }
+
             // Find first available slot
             for (int slot = 0; slot < MAX_PLAYER_OBJECTS; slot++)
             {

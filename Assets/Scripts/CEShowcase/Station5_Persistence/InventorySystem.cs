@@ -3,21 +3,23 @@ using UdonSharp.CE.Data;
 using UdonSharp.CE.DevTools;
 using UdonSharp.CE.Persistence;
 using UnityEngine;
+using UnityEngine.UI;
 using VRC.SDK3.Data;
 using VRC.SDKBase;
 
 namespace CEShowcase.Station5_Persistence
 {
     /// <summary>
-    /// Station 5: Persistent Inventory - Demonstrates CEPersistence for saving/loading player data.
+    /// Station 5: Treasure Hunt - An interactive demo of CEPersistence.
     /// 
     /// This showcases:
-    /// - [PlayerData] attribute for marking persistent models
-    /// - [PersistKey] attribute for field-to-key mapping
-    /// - CEPersistence.Register() for model registration
-    /// - CEPersistence.Save() / Restore() for persistence operations
-    /// - CEPersistence.EstimateSize() for quota management
-    /// - JSON serialization via CEPersistence.ToJson()
+    /// - AUTOMATIC persistence (no save button needed!)
+    /// - Visual feedback with rarity tiers and achievements
+    /// - Collection progress and goals
+    /// - Real-time quota monitoring
+    /// 
+    /// The system saves automatically whenever you collect an item.
+    /// Come back later and your progress is still there!
     /// </summary>
     [UdonBehaviourSyncMode(BehaviourSyncMode.None)]
     public class InventorySystem : UdonSharpBehaviour
@@ -25,29 +27,49 @@ namespace CEShowcase.Station5_Persistence
         [Header("Inventory Settings")]
         [SerializeField] private int _maxSlots = 20;
         
-        [Header("UI")]
-        [SerializeField] private TMPro.TextMeshProUGUI _inventoryText;
-        [SerializeField] private TMPro.TextMeshProUGUI _statsText;
-        [SerializeField] private TMPro.TextMeshProUGUI _jsonPreviewText;
+        [Header("Main UI")]
+        [SerializeField] private TMPro.TMP_Text _titleText;
+        [SerializeField] private TMPro.TMP_Text _progressText;
+        [SerializeField] private TMPro.TMP_Text _statsText;
+        [SerializeField] private TMPro.TMP_Text _recentActivityText;
+        [SerializeField] private Slider _progressBar;
         
-        [Header("Collectible Configuration")]
-        [SerializeField] private string[] _itemNames;
+        [Header("Visual Inventory Grid")]
+        [SerializeField] private Image[] _inventorySlotImages;
+        [SerializeField] private TMPro.TMP_Text[] _inventorySlotCounts;
+        [SerializeField] private Sprite[] _itemSprites;  // Icons for each item type
+        [SerializeField] private Sprite _emptySlotSprite;
         
-        // ========================================
-        // PERSISTENCE MODEL
-        // ========================================
-        // In a full implementation, this would be a separate class with attributes:
-        //
-        // [PlayerData("ce_demo_inventory", Version = 1)]
-        // public class InventorySaveData
-        // {
-        //     [PersistKey("items")] public int[] itemIds;
-        //     [PersistKey("counts")] public int[] itemCounts;
-        //     [PersistKey("total")] public int totalCollected;
-        //     [PersistKey("time")] public float playTime;
-        // }
-        //
-        // For UdonSharp compatibility, we store fields directly in this class.
+        [Header("Achievement Display")]
+        [SerializeField] private TMPro.TMP_Text _achievementText;
+        [SerializeField] private GameObject _achievementPopup;
+        [SerializeField] private TMPro.TMP_Text _achievementPopupText;
+        [SerializeField] private AudioSource _achievementSound;
+        
+        [Header("Collection Feedback")]
+        [SerializeField] private AudioSource _collectSound;
+        [SerializeField] private AudioSource _rareCollectSound;
+        [SerializeField] private AudioSource _legendaryCollectSound;
+        [SerializeField] private ParticleSystem _collectParticles;
+        [SerializeField] private ParticleSystem _rareParticles;
+        [SerializeField] private ParticleSystem _legendaryParticles;
+        
+        [Header("Treasure Configuration")]
+        [SerializeField] private string[] _itemNames = new string[]
+        {
+            "Gold Coin", "Silver Coin", "Ruby", "Emerald", "Sapphire",
+            "Diamond", "Ancient Key", "Magic Scroll", "Crystal Shard", "Dragon Scale"
+        };
+        [SerializeField] private int[] _itemRarities = new int[]  // 0=common, 1=rare, 2=legendary
+        {
+            0, 0, 1, 1, 1,
+            2, 2, 1, 0, 2
+        };
+        [SerializeField] private int[] _itemPoints = new int[]
+        {
+            10, 5, 50, 50, 50,
+            200, 150, 75, 15, 250
+        };
         
         // Inventory data (persisted)
         private int[] _itemIds;
@@ -56,38 +78,81 @@ namespace CEShowcase.Station5_Persistence
         private int _uniqueItemCount;
         
         // Player stats (persisted)
+        private int _totalScore;
         private int _totalCollected;
         private int _sessionCollected;
         private float _playTime;
+        private int _commonCount;
+        private int _rareCount;
+        private int _legendaryCount;
+        
+        // Achievements (persisted)
+        private bool _achieveFirstItem;
+        private bool _achieveTenItems;
+        private bool _achieveHundredItems;
+        private bool _achieveFirstRare;
+        private bool _achieveFirstLegendary;
+        private bool _achieveAllTypes;
+        private bool _achieve1000Points;
+        private bool _achieve5000Points;
+        
+        // UI state
+        private string[] _recentActivity;
+        private int _recentActivityIndex;
+        private const int RECENT_ACTIVITY_SIZE = 5;
+        private float _achievementPopupTimer;
+        private const float ACHIEVEMENT_POPUP_DURATION = 3f;
         
         // Persistence state
-        private bool _hasUnsavedChanges;
-        private int _saveCount;
-        private int _loadCount;
         private int _estimatedSize;
+        private int _autoSaveCount;
+        
+        // Rarity colors
+        private readonly Color COMMON_COLOR = new Color(0.8f, 0.8f, 0.8f);
+        private readonly Color RARE_COLOR = new Color(0.2f, 0.6f, 1f);
+        private readonly Color LEGENDARY_COLOR = new Color(1f, 0.8f, 0.2f);
         
         // Constants
         private const string SAVE_KEY = "ce_demo_inventory";
-        private const int SAVE_VERSION = 1;
+        private const int SAVE_VERSION = 2;
+        private const int GOAL_ITEMS = 50;
         
         void Start()
         {
+            if (_maxSlots < 1)
+            {
+                _maxSlots = 1;
+                CELogger.Warning("Inventory", "Max slots was less than 1. Clamped to 1.");
+            }
+
+            EnsurePersistenceRegistration();
             InitializeInventory();
-            RegisterPersistenceModel();
+            InitializeUI();
             LoadInventory();
             
-            CELogger.Info("Inventory", "Persistent Inventory System initialized with CEPersistence");
+            CELogger.Info("Inventory", "Treasure Hunt initialized - persistence is AUTOMATIC!");
         }
         
         void Update()
         {
             _playTime += Time.deltaTime;
+            
+            // Update achievement popup timer
+            if (_achievementPopupTimer > 0)
+            {
+                _achievementPopupTimer -= Time.deltaTime;
+                if (_achievementPopupTimer <= 0 && _achievementPopup != null)
+                {
+                    _achievementPopup.SetActive(false);
+                }
+            }
         }
         
         private void InitializeInventory()
         {
             _itemIds = new int[_maxSlots];
             _itemCounts = new int[_maxSlots];
+            _recentActivity = new string[RECENT_ACTIVITY_SIZE];
             
             for (int i = 0; i < _maxSlots; i++)
             {
@@ -95,32 +160,23 @@ namespace CEShowcase.Station5_Persistence
                 _itemCounts[i] = 0;
             }
             
-            // Initialize default item names if not set
-            if (_itemNames == null || _itemNames.Length == 0)
+            for (int i = 0; i < RECENT_ACTIVITY_SIZE; i++)
             {
-                _itemNames = new string[]
-                {
-                    "Sword", "Shield", "Potion", "Key", "Gem",
-                    "Ring", "Scroll", "Coin", "Crystal", "Feather"
-                };
+                _recentActivity[i] = "";
             }
         }
         
-        /// <summary>
-        /// Registers the persistence model with CEPersistence.
-        /// This demonstrates the registration pattern with custom converters.
-        /// </summary>
-        private void RegisterPersistenceModel()
+        private void InitializeUI()
         {
-            // In a full CE implementation, this would be:
-            // CEPersistence.Register<InventorySaveData>(
-            //     toData: ToDataDictionary,
-            //     fromData: FromDataDictionary,
-            //     key: SAVE_KEY,
-            //     version: SAVE_VERSION
-            // );
+            if (_titleText != null)
+            {
+                _titleText.text = "<size=150%>TREASURE HUNT</size>\n<size=80%>Collect treasures - progress saves automatically!</size>";
+            }
             
-            CELogger.Debug("Inventory", $"Registered persistence model '{SAVE_KEY}' version {SAVE_VERSION}");
+            if (_achievementPopup != null)
+            {
+                _achievementPopup.SetActive(false);
+            }
         }
         
         // ========================================
@@ -128,52 +184,137 @@ namespace CEShowcase.Station5_Persistence
         // ========================================
         
         /// <summary>
-        /// Adds an item to the inventory. Returns true if successful.
+        /// Adds an item to the inventory. Automatically saves!
         /// </summary>
         public bool AddItem(int itemId)
         {
-            if (itemId < 0) return false;
+            if (_itemNames == null || _itemNames.Length == 0) return false;
+            if (itemId < 0 || itemId >= _itemNames.Length) return false;
+            
+            int rarity = GetItemRarity(itemId);
+            int points = GetItemPoints(itemId);
+            string itemName = GetItemName(itemId);
             
             // Check if we already have this item
             int existingSlot = FindItemSlot(itemId);
             if (existingSlot >= 0)
             {
                 _itemCounts[existingSlot]++;
-                _totalItemCount++;
-                _totalCollected++;
-                _sessionCollected++;
-                _hasUnsavedChanges = true;
-                
-                UpdateDisplay();
-                return true;
             }
-            
-            // Find empty slot
-            int emptySlot = FindEmptySlot();
-            if (emptySlot < 0)
+            else
             {
-                CELogger.Warning("Inventory", "Inventory full!");
-                return false;
+                // Find empty slot
+                int emptySlot = FindEmptySlot();
+                if (emptySlot < 0)
+                {
+                    AddRecentActivity($"<color=#FF6666>Inventory full!</color>");
+                    UpdateDisplay();
+                    return false;
+                }
+                
+                _itemIds[emptySlot] = itemId;
+                _itemCounts[emptySlot] = 1;
+                _uniqueItemCount++;
             }
             
-            // Add new item
-            _itemIds[emptySlot] = itemId;
-            _itemCounts[emptySlot] = 1;
             _totalItemCount++;
-            _uniqueItemCount++;
             _totalCollected++;
             _sessionCollected++;
-            _hasUnsavedChanges = true;
+            _totalScore += points;
+
+            // Track by rarity only for successful collections
+            switch (rarity)
+            {
+                case 0: _commonCount++; break;
+                case 1: _rareCount++; break;
+                case 2: _legendaryCount++; break;
+            }
             
-            CELogger.Info("Inventory", $"Collected: {GetItemName(itemId)}");
+            // Visual and audio feedback based on rarity
+            PlayCollectFeedback(rarity);
+            
+            // Add to recent activity
+            string rarityTag = GetRarityTag(rarity);
+            AddRecentActivity($"{rarityTag} {itemName} <color=#88FF88>+{points} pts</color>");
+            
+            // Check achievements
+            CheckAchievements();
+            
+            // *** AUTOMATIC PERSISTENCE! ***
+            // This is the key feature - no save button needed
+            AutoSave();
             
             UpdateDisplay();
             return true;
         }
         
-        /// <summary>
-        /// Removes an item from inventory. Returns true if successful.
-        /// </summary>
+        private void PlayCollectFeedback(int rarity)
+        {
+            switch (rarity)
+            {
+                case 0: // Common
+                    if (_collectSound != null) _collectSound.Play();
+                    if (_collectParticles != null) _collectParticles.Play();
+                    break;
+                case 1: // Rare
+                    if (_rareCollectSound != null)
+                    {
+                        _rareCollectSound.Play();
+                    }
+                    else if (_collectSound != null)
+                    {
+                        PlayCollectSoundWithPitch(1.2f);
+                    }
+                    if (_rareParticles != null) _rareParticles.Play();
+                    else if (_collectParticles != null) _collectParticles.Play();
+                    break;
+                case 2: // Legendary
+                    if (_legendaryCollectSound != null)
+                    {
+                        _legendaryCollectSound.Play();
+                    }
+                    else if (_collectSound != null)
+                    {
+                        PlayCollectSoundWithPitch(1.5f);
+                    }
+                    if (_legendaryParticles != null) _legendaryParticles.Play();
+                    else if (_collectParticles != null) _collectParticles.Play();
+                    break;
+            }
+        }
+
+        private void PlayCollectSoundWithPitch(float pitch)
+        {
+            if (_collectSound == null) return;
+
+            float originalPitch = _collectSound.pitch;
+            _collectSound.pitch = pitch;
+            _collectSound.Play();
+            _collectSound.pitch = originalPitch;
+        }
+        
+        private string GetRarityTag(int rarity)
+        {
+            switch (rarity)
+            {
+                case 1: return "<color=#3399FF>[RARE]</color>";
+                case 2: return "<color=#FFD700>[LEGENDARY]</color>";
+                default: return "";
+            }
+        }
+        
+        private int GetItemRarity(int itemId)
+        {
+            if (itemId < 0 || _itemRarities == null || itemId >= _itemRarities.Length) return 0;
+            return _itemRarities[itemId];
+        }
+        
+        private int GetItemPoints(int itemId)
+        {
+            if (itemId < 0 || _itemPoints == null || itemId >= _itemPoints.Length) return 10;
+            return _itemPoints[itemId];
+        }
+        
         public bool RemoveItem(int itemId)
         {
             int slot = FindItemSlot(itemId);
@@ -189,7 +330,7 @@ namespace CEShowcase.Station5_Persistence
                 _uniqueItemCount--;
             }
             
-            _hasUnsavedChanges = true;
+            AutoSave();
             UpdateDisplay();
             return true;
         }
@@ -206,10 +347,7 @@ namespace CEShowcase.Station5_Persistence
         {
             for (int i = 0; i < _maxSlots; i++)
             {
-                if (_itemIds[i] == itemId)
-                {
-                    return i;
-                }
+                if (_itemIds[i] == itemId) return i;
             }
             return -1;
         }
@@ -218,10 +356,7 @@ namespace CEShowcase.Station5_Persistence
         {
             for (int i = 0; i < _maxSlots; i++)
             {
-                if (_itemIds[i] < 0)
-                {
-                    return i;
-                }
+                if (_itemIds[i] < 0) return i;
             }
             return -1;
         }
@@ -230,28 +365,162 @@ namespace CEShowcase.Station5_Persistence
         {
             if (itemId < 0 || _itemNames == null || itemId >= _itemNames.Length)
             {
-                return $"Item #{itemId}";
+                return $"Treasure #{itemId}";
             }
             return _itemNames[itemId];
         }
         
         // ========================================
-        // CEPERSISTENCE OPERATIONS
+        // ACHIEVEMENTS
+        // ========================================
+        
+        private void CheckAchievements()
+        {
+            bool newAchievement = false;
+            string achievementName = "";
+            
+            if (!_achieveFirstItem && _totalCollected >= 1)
+            {
+                _achieveFirstItem = true;
+                achievementName = "🏆 First Discovery!";
+                newAchievement = true;
+            }
+            else if (!_achieveTenItems && _totalCollected >= 10)
+            {
+                _achieveTenItems = true;
+                achievementName = "🏆 Novice Collector (10 items)";
+                newAchievement = true;
+            }
+            else if (!_achieveHundredItems && _totalCollected >= 100)
+            {
+                _achieveHundredItems = true;
+                achievementName = "🏆 Master Collector (100 items)";
+                newAchievement = true;
+            }
+            else if (!_achieveFirstRare && _rareCount >= 1)
+            {
+                _achieveFirstRare = true;
+                achievementName = "💎 First Rare Find!";
+                newAchievement = true;
+            }
+            else if (!_achieveFirstLegendary && _legendaryCount >= 1)
+            {
+                _achieveFirstLegendary = true;
+                achievementName = "⭐ Legendary Discovery!";
+                newAchievement = true;
+            }
+            else if (!_achieve1000Points && _totalScore >= 1000)
+            {
+                _achieve1000Points = true;
+                achievementName = "💰 Treasure Hunter (1000 pts)";
+                newAchievement = true;
+            }
+            else if (!_achieve5000Points && _totalScore >= 5000)
+            {
+                _achieve5000Points = true;
+                achievementName = "👑 Treasure Master (5000 pts)";
+                newAchievement = true;
+            }
+            else if (!_achieveAllTypes && _itemNames != null && _uniqueItemCount >= _itemNames.Length)
+            {
+                _achieveAllTypes = true;
+                achievementName = "🌟 Complete Collection!";
+                newAchievement = true;
+            }
+            
+            if (newAchievement)
+            {
+                ShowAchievementPopup(achievementName);
+            }
+        }
+        
+        private void ShowAchievementPopup(string achievementName)
+        {
+            if (_achievementPopup != null)
+            {
+                _achievementPopup.SetActive(true);
+                _achievementPopupTimer = ACHIEVEMENT_POPUP_DURATION;
+                
+                if (_achievementPopupText != null)
+                {
+                    _achievementPopupText.text = achievementName;
+                }
+            }
+            
+            if (_achievementSound != null)
+            {
+                _achievementSound.Play();
+            }
+            
+            AddRecentActivity($"<color=#FFD700>{achievementName}</color>");
+            CELogger.Info("Inventory", $"Achievement unlocked: {achievementName}");
+        }
+        
+        private int CountAchievements()
+        {
+            int count = 0;
+            if (_achieveFirstItem) count++;
+            if (_achieveTenItems) count++;
+            if (_achieveHundredItems) count++;
+            if (_achieveFirstRare) count++;
+            if (_achieveFirstLegendary) count++;
+            if (_achieve1000Points) count++;
+            if (_achieve5000Points) count++;
+            if (_achieveAllTypes) count++;
+            return count;
+        }
+        
+        // ========================================
+        // AUTOMATIC PERSISTENCE
         // ========================================
         
         /// <summary>
-        /// Converts inventory to DataDictionary for persistence.
-        /// This is the toData converter for CEPersistence.Register().
+        /// Automatically saves inventory - called after every change.
+        /// This is the key feature of CEPersistence: NO manual save needed!
         /// </summary>
+        private void AutoSave()
+        {
+            if (!Utilities.IsValid(Networking.LocalPlayer))
+            {
+                return;
+            }
+
+            EnsurePersistenceRegistration();
+            InventorySaveData saveData = CreateSaveData();
+            DataDictionary data = saveData.data;
+            _estimatedSize = EstimateDataSize(data);
+            
+            // Check quota
+            if (_estimatedSize > CEPersistence.PLAYER_DATA_QUOTA)
+            {
+                CELogger.Error("Inventory", $"Data size ({_estimatedSize} bytes) exceeds quota!");
+                return;
+            }
+            
+            SaveResult result = CEPersistence.Save(saveData);
+            if (result == SaveResult.Success)
+            {
+                _autoSaveCount++;
+                
+                // Only log occasionally to avoid spam
+                if (_autoSaveCount % 10 == 0)
+                {
+                    CELogger.Debug("Inventory", $"Auto-saved ({_autoSaveCount} saves, {_estimatedSize} bytes)");
+                }
+            }
+            else if (result != SaveResult.NotAllowed)
+            {
+                CELogger.Warning("Inventory", $"Auto-save failed: {result}");
+            }
+        }
+        
         private DataDictionary ToDataDictionary()
         {
             DataDictionary data = new DataDictionary();
             
-            // Metadata (added automatically by CEPersistence)
             data["__ce_version"] = SAVE_VERSION;
             data["__ce_model"] = SAVE_KEY;
             
-            // Inventory items as DataList
             DataList items = new DataList();
             for (int i = 0; i < _maxSlots; i++)
             {
@@ -265,41 +534,32 @@ namespace CEShowcase.Station5_Persistence
             }
             data["items"] = items;
             
-            // Stats
+            data["score"] = _totalScore;
             data["total_collected"] = _totalCollected;
             data["play_time"] = _playTime;
-            data["unique_items"] = _uniqueItemCount;
+            data["common"] = _commonCount;
+            data["rare"] = _rareCount;
+            data["legendary"] = _legendaryCount;
+            
+            // Achievement flags
+            data["ach_first"] = _achieveFirstItem;
+            data["ach_10"] = _achieveTenItems;
+            data["ach_100"] = _achieveHundredItems;
+            data["ach_rare"] = _achieveFirstRare;
+            data["ach_leg"] = _achieveFirstLegendary;
+            data["ach_all"] = _achieveAllTypes;
+            data["ach_1k"] = _achieve1000Points;
+            data["ach_5k"] = _achieve5000Points;
             
             return data;
         }
         
-        /// <summary>
-        /// Restores inventory from DataDictionary.
-        /// This is the fromData converter for CEPersistence.Register().
-        /// </summary>
         private bool FromDataDictionary(DataDictionary data)
         {
             if (data == null) return false;
-            
-            // Check version
-            if (data.TryGetValue("__ce_version", out DataToken versionToken))
-            {
-                int storedVersion = (int)versionToken.Double;
-                if (storedVersion != SAVE_VERSION)
-                {
-                    CELogger.Warning("Inventory", $"Version mismatch: stored {storedVersion}, expected {SAVE_VERSION}");
-                    // In a full implementation, migration logic would go here
-                }
-            }
-            
-            // Clear current inventory
-            for (int i = 0; i < _maxSlots; i++)
-            {
-                _itemIds[i] = -1;
-                _itemCounts[i] = 0;
-            }
-            _uniqueItemCount = 0;
-            _totalItemCount = 0;
+
+            ResetLoadedState();
+            int configuredItemTypeCount = _itemNames != null ? _itemNames.Length : 0;
             
             // Load items
             if (data.TryGetValue("items", out DataToken itemsToken) && 
@@ -312,8 +572,16 @@ namespace CEShowcase.Station5_Persistence
                         itemToken.TokenType == TokenType.DataDictionary)
                     {
                         DataDictionary itemData = itemToken.DataDictionary;
-                        int id = (int)itemData["id"].Double;
-                        int count = (int)itemData["count"].Double;
+                        if (!TryReadInt(itemData, "id", out int id) ||
+                            !TryReadInt(itemData, "count", out int count))
+                        {
+                            continue;
+                        }
+
+                        if (id < 0 || id >= configuredItemTypeCount || count <= 0)
+                        {
+                            continue;
+                        }
                         
                         _itemIds[_uniqueItemCount] = id;
                         _itemCounts[_uniqueItemCount] = count;
@@ -324,123 +592,174 @@ namespace CEShowcase.Station5_Persistence
             }
             
             // Load stats
-            if (data.TryGetValue("total_collected", out DataToken totalToken))
-            {
-                _totalCollected = (int)totalToken.Double;
-            }
+            TryReadInt(data, "score", out _totalScore);
+            TryReadInt(data, "total_collected", out _totalCollected);
+            TryReadFloat(data, "play_time", out _playTime);
+            TryReadInt(data, "common", out _commonCount);
+            TryReadInt(data, "rare", out _rareCount);
+            TryReadInt(data, "legendary", out _legendaryCount);
             
-            if (data.TryGetValue("play_time", out DataToken timeToken))
-            {
-                _playTime = (float)timeToken.Double;
-            }
+            // Load achievements
+            TryReadBool(data, "ach_first", out _achieveFirstItem);
+            TryReadBool(data, "ach_10", out _achieveTenItems);
+            TryReadBool(data, "ach_100", out _achieveHundredItems);
+            TryReadBool(data, "ach_rare", out _achieveFirstRare);
+            TryReadBool(data, "ach_leg", out _achieveFirstLegendary);
+            TryReadBool(data, "ach_all", out _achieveAllTypes);
+            TryReadBool(data, "ach_1k", out _achieve1000Points);
+            TryReadBool(data, "ach_5k", out _achieve5000Points);
             
             return true;
         }
-        
-        /// <summary>
-        /// Saves inventory using CEPersistence pattern.
-        /// Demonstrates CEPersistence.Save() workflow.
-        /// </summary>
-        public void SaveInventory()
+
+        private void ResetLoadedState()
         {
-            CELogger.Info("Inventory", "Saving inventory via CEPersistence...");
-            
-            // Convert to DataDictionary
-            DataDictionary data = ToDataDictionary();
-            
-            // Estimate size (demonstrates CEPersistence.EstimateSize)
-            _estimatedSize = EstimateDataSize(data);
-            
-            // Check quota
-            if (_estimatedSize > CEPersistence.PLAYER_DATA_QUOTA)
-            {
-                CELogger.Error("Inventory", $"Data size ({_estimatedSize} bytes) exceeds quota!");
-                return;
-            }
-            
-            if (_estimatedSize > CEPersistence.PLAYER_DATA_QUOTA * 0.8f)
-            {
-                CELogger.Warning("Inventory", $"Data size ({_estimatedSize} bytes) approaching quota limit");
-            }
-            
-            // In a full implementation:
-            // SaveResult result = CEPersistence.Save(inventorySaveData);
-            // if (result == SaveResult.Success) { ... }
-            
-            _saveCount++;
-            _hasUnsavedChanges = false;
-            
-            CELogger.Info("Inventory", $"Inventory saved! ({_estimatedSize} bytes, save #{_saveCount})");
-            UpdateDisplay();
-        }
-        
-        /// <summary>
-        /// Loads inventory using CEPersistence pattern.
-        /// Demonstrates CEPersistence.Restore() workflow.
-        /// </summary>
-        public void LoadInventory()
-        {
-            CELogger.Info("Inventory", "Loading inventory via CEPersistence...");
-            
-            // In a full implementation:
-            // RestoreResult result = CEPersistence.Restore(out InventorySaveData data);
-            // switch (result) {
-            //     case RestoreResult.Success: FromDataDictionary(data); break;
-            //     case RestoreResult.NoData: /* fresh start */ break;
-            //     case RestoreResult.VersionMismatch: /* migrate */ break;
-            // }
-            
-            _loadCount++;
-            
-            // For demo, check if we have simulated data
-            // A real implementation would load from VRChat's PlayerData API
-            
-            CELogger.Info("Inventory", $"Inventory loaded (load #{_loadCount})");
-            UpdateDisplay();
-        }
-        
-        /// <summary>
-        /// Wipes all saved data.
-        /// </summary>
-        public void WipeData()
-        {
-            CELogger.Warning("Inventory", "Wiping all persistence data!");
-            
-            // Clear inventory
             for (int i = 0; i < _maxSlots; i++)
             {
                 _itemIds[i] = -1;
                 _itemCounts[i] = 0;
             }
-            
-            _totalItemCount = 0;
+
             _uniqueItemCount = 0;
+            _totalItemCount = 0;
+            _totalScore = 0;
             _totalCollected = 0;
-            _playTime = 0f;
             _sessionCollected = 0;
-            
-            _hasUnsavedChanges = false;
-            _estimatedSize = 0;
-            
-            UpdateDisplay();
-            CELogger.Info("Inventory", "All persistence data wiped");
+            _playTime = 0f;
+            _commonCount = 0;
+            _rareCount = 0;
+            _legendaryCount = 0;
+
+            _achieveFirstItem = false;
+            _achieveTenItems = false;
+            _achieveHundredItems = false;
+            _achieveFirstRare = false;
+            _achieveFirstLegendary = false;
+            _achieveAllTypes = false;
+            _achieve1000Points = false;
+            _achieve5000Points = false;
+        }
+
+        private bool TryReadInt(DataDictionary source, string key, out int value)
+        {
+            value = 0;
+            if (source == null) return false;
+            if (!source.TryGetValue(key, out DataToken token)) return false;
+            if (!IsNumericToken(token)) return false;
+
+            value = (int)token.Double;
+            return true;
+        }
+
+        private bool TryReadFloat(DataDictionary source, string key, out float value)
+        {
+            value = 0f;
+            if (source == null) return false;
+            if (!source.TryGetValue(key, out DataToken token)) return false;
+            if (!IsNumericToken(token)) return false;
+
+            value = (float)token.Double;
+            return true;
+        }
+
+        private bool TryReadBool(DataDictionary source, string key, out bool value)
+        {
+            value = false;
+            if (source == null) return false;
+            if (!source.TryGetValue(key, out DataToken token)) return false;
+            if (token.TokenType != TokenType.Boolean) return false;
+
+            value = token.Boolean;
+            return true;
+        }
+
+        private bool IsNumericToken(DataToken token)
+        {
+            switch (token.TokenType)
+            {
+                case TokenType.SByte:
+                case TokenType.Byte:
+                case TokenType.Short:
+                case TokenType.UShort:
+                case TokenType.Int:
+                case TokenType.UInt:
+                case TokenType.Long:
+                case TokenType.ULong:
+                case TokenType.Float:
+                case TokenType.Double:
+                    return true;
+                default:
+                    return false;
+            }
         }
         
-        /// <summary>
-        /// Estimates serialized data size.
-        /// Mirrors CEPersistence.EstimateSize() behavior.
-        /// </summary>
+        public void LoadInventory()
+        {
+            CELogger.Info("Inventory", "Loading inventory via CEPersistence...");
+
+            if (!Utilities.IsValid(Networking.LocalPlayer))
+            {
+                CELogger.Debug("Inventory", "Skipping restore - local player not available.");
+                UpdateDisplay();
+                return;
+            }
+
+            EnsurePersistenceRegistration();
+            
+            RestoreResult result = CEPersistence.Restore(out InventorySaveData savedData);
+            if (result == RestoreResult.Success && savedData != null)
+            {
+                ApplySaveData(savedData);
+                CELogger.Info("Inventory", "Inventory loaded - welcome back!");
+            }
+            else if (result == RestoreResult.NoData)
+            {
+                CELogger.Info("Inventory", "No saved data found - starting fresh");
+            }
+            else
+            {
+                CELogger.Warning("Inventory", $"Restore failed: {result}");
+            }
+            
+            UpdateDisplay();
+        }
+
+        private void EnsurePersistenceRegistration()
+        {
+#if COMPILER_UDONSHARP
+            // CE persistence models are auto-registered during Udon compile.
+            // Runtime registration with delegates is editor-only.
+            return;
+#else
+            if (CEPersistence.IsRegistered<InventorySaveData>())
+            {
+                return;
+            }
+
+            CEPersistence.Register<InventorySaveData>(
+                toData: model => model != null && model.data != null ? model.data : new DataDictionary(),
+                fromData: data => new InventorySaveData { data = data },
+                key: SAVE_KEY,
+                version: SAVE_VERSION);
+#endif
+        }
+
+        private InventorySaveData CreateSaveData()
+        {
+            return new InventorySaveData { data = ToDataDictionary() };
+        }
+        
+        private void ApplySaveData(InventorySaveData saveData)
+        {
+            if (saveData == null || saveData.data == null) return;
+            FromDataDictionary(saveData.data);
+        }
+        
         private int EstimateDataSize(DataDictionary data)
         {
-            // Base overhead for JSON structure
-            int size = 50;
-            
-            // Per-item overhead
-            size += _uniqueItemCount * 30;
-            
-            // Stats and metadata
-            size += 100;
-            
+            int size = 100; // Base overhead
+            size += _uniqueItemCount * 30; // Per-item
+            size += 200; // Stats and achievements
             return size;
         }
         
@@ -448,92 +767,156 @@ namespace CEShowcase.Station5_Persistence
         // UI DISPLAY
         // ========================================
         
-        private void UpdateDisplay()
+        private void AddRecentActivity(string activity)
         {
-            UpdateInventoryDisplay();
-            UpdateStatsDisplay();
-            UpdateJsonPreview();
+            // Shift existing entries down
+            for (int i = RECENT_ACTIVITY_SIZE - 1; i > 0; i--)
+            {
+                _recentActivity[i] = _recentActivity[i - 1];
+            }
+            _recentActivity[0] = activity;
         }
         
-        private void UpdateInventoryDisplay()
+        private void UpdateDisplay()
         {
-            if (_inventoryText == null) return;
-            
-            string text = "<b>INVENTORY</b>\n\n";
-            
-            bool hasItems = false;
-            for (int i = 0; i < _maxSlots; i++)
+            UpdateProgressDisplay();
+            UpdateInventoryGrid();
+            UpdateStatsDisplay();
+            UpdateRecentActivityDisplay();
+            UpdateAchievementDisplay();
+        }
+        
+        private void UpdateProgressDisplay()
+        {
+            int itemTypeCount = _itemNames != null ? _itemNames.Length : 0;
+
+            if (_progressText != null)
             {
-                if (_itemIds[i] >= 0)
+                float progress = Mathf.Min((float)_totalCollected / GOAL_ITEMS, 1f);
+                string status = _totalCollected >= GOAL_ITEMS ? "<color=#FFD700>GOAL REACHED!</color>" : $"{_totalCollected}/{GOAL_ITEMS}";
+                
+                _progressText.text = $"<b>SCORE: <color=#FFD700>{_totalScore:N0}</color></b>   |   " +
+                                    $"Collected: {status}   |   " +
+                                    $"Types: {_uniqueItemCount}/{itemTypeCount}";
+            }
+            
+            if (_progressBar != null)
+            {
+                _progressBar.value = Mathf.Min((float)_totalCollected / GOAL_ITEMS, 1f);
+            }
+        }
+        
+        private void UpdateInventoryGrid()
+        {
+            if (_inventorySlotImages == null) return;
+            
+            for (int i = 0; i < _inventorySlotImages.Length; i++)
+            {
+                if (_inventorySlotImages[i] == null) continue;
+                
+                if (i < _maxSlots && _itemIds[i] >= 0)
                 {
-                    string itemName = GetItemName(_itemIds[i]);
-                    int count = _itemCounts[i];
+                    int itemId = _itemIds[i];
+                    int rarity = GetItemRarity(itemId);
                     
-                    text += $"• {itemName}";
-                    if (count > 1)
+                    // Set sprite
+                    if (_itemSprites != null && itemId < _itemSprites.Length && _itemSprites[itemId] != null)
                     {
-                        text += $" <color=#888888>x{count}</color>";
+                        _inventorySlotImages[i].sprite = _itemSprites[itemId];
                     }
-                    text += "\n";
-                    hasItems = true;
+                    
+                    // Color by rarity
+                    switch (rarity)
+                    {
+                        case 0: _inventorySlotImages[i].color = COMMON_COLOR; break;
+                        case 1: _inventorySlotImages[i].color = RARE_COLOR; break;
+                        case 2: _inventorySlotImages[i].color = LEGENDARY_COLOR; break;
+                    }
+                    
+                    // Count display
+                    if (_inventorySlotCounts != null && i < _inventorySlotCounts.Length && _inventorySlotCounts[i] != null)
+                    {
+                        _inventorySlotCounts[i].text = _itemCounts[i] > 1 ? $"x{_itemCounts[i]}" : "";
+                    }
+                }
+                else
+                {
+                    // Empty slot
+                    if (_emptySlotSprite != null)
+                    {
+                        _inventorySlotImages[i].sprite = _emptySlotSprite;
+                    }
+                    _inventorySlotImages[i].color = new Color(0.3f, 0.3f, 0.3f, 0.5f);
+                    
+                    if (_inventorySlotCounts != null && i < _inventorySlotCounts.Length && _inventorySlotCounts[i] != null)
+                    {
+                        _inventorySlotCounts[i].text = "";
+                    }
                 }
             }
-            
-            if (!hasItems)
-            {
-                text += "<color=#888888>Empty - collect some items!</color>\n";
-            }
-            
-            text += $"\n<size=80%>Slots: {_uniqueItemCount}/{_maxSlots}</size>";
-            
-            _inventoryText.text = text;
         }
         
         private void UpdateStatsDisplay()
         {
             if (_statsText == null) return;
             
-            DataDictionary data = ToDataDictionary();
-            _estimatedSize = EstimateDataSize(data);
             float quotaPercent = (_estimatedSize / (float)CEPersistence.PLAYER_DATA_QUOTA) * 100f;
             
-            string saveStatus = _hasUnsavedChanges ? "<color=#FFFF00>Unsaved</color>" : "<color=#00FF00>Saved</color>";
-            
-            _statsText.text = $"<b>CEPERSISTENCE METRICS</b>\n" +
-                             $"Total Collected: {_totalCollected}\n" +
+            _statsText.text = $"<b>TREASURE STATS</b>\n" +
+                             $"<color=#AAAAAA>Common:</color> {_commonCount}   " +
+                             $"<color=#3399FF>Rare:</color> {_rareCount}   " +
+                             $"<color=#FFD700>Legendary:</color> {_legendaryCount}\n" +
+                             $"Play Time: {FormatTime(_playTime)}   |   " +
                              $"This Session: {_sessionCollected}\n" +
-                             $"Play Time: {FormatTime(_playTime)}\n" +
-                             $"Data Size: ~{_estimatedSize} bytes\n" +
-                             $"Quota: {quotaPercent:F1}% of 100KB\n" +
-                             $"Status: {saveStatus}\n" +
-                             $"Saves: {_saveCount} | Loads: {_loadCount}\n" +
-                             $"<color=#FFFF00>Using: [PlayerData] + [PersistKey]</color>";
+                             $"<size=80%><color=#88FF88>✓ Auto-saved ({_autoSaveCount}x) • {quotaPercent:F1}% quota used</color></size>";
         }
         
-        private void UpdateJsonPreview()
+        private void UpdateRecentActivityDisplay()
         {
-            if (_jsonPreviewText == null) return;
+            if (_recentActivityText == null) return;
             
-            // Demonstrate CEPersistence.ToJson()
-            DataDictionary data = ToDataDictionary();
-            
-            string json;
-            if (VRCJson.TrySerializeToJson(data, JsonExportType.Beautify, out DataToken jsonToken))
+            string text = "<b>RECENT ACTIVITY</b>\n";
+            for (int i = 0; i < RECENT_ACTIVITY_SIZE; i++)
             {
-                json = jsonToken.String;
-            }
-            else
-            {
-                json = "{ \"error\": \"serialization failed\" }";
+                if (!string.IsNullOrEmpty(_recentActivity[i]))
+                {
+                    text += $"• {_recentActivity[i]}\n";
+                }
             }
             
-            // Truncate for display
-            if (json.Length > 400)
+            if (string.IsNullOrEmpty(_recentActivity[0]))
             {
-                json = json.Substring(0, 400) + "\n  ...";
+                text += "<color=#888888>Explore the area to find treasures!</color>";
             }
             
-            _jsonPreviewText.text = $"<b>JSON (CEPersistence.ToJson):</b>\n<size=65%>{json}</size>";
+            _recentActivityText.text = text;
+        }
+        
+        private void UpdateAchievementDisplay()
+        {
+            if (_achievementText == null) return;
+            
+            int totalAchievements = 8;
+            int earned = CountAchievements();
+            
+            string text = $"<b>ACHIEVEMENTS ({earned}/{totalAchievements})</b>\n";
+            
+            text += _achieveFirstItem ? "<color=#88FF88>✓</color> " : "<color=#666666>○</color> ";
+            text += "First Discovery\n";
+            
+            text += _achieveTenItems ? "<color=#88FF88>✓</color> " : "<color=#666666>○</color> ";
+            text += "Novice Collector\n";
+            
+            text += _achieveFirstRare ? "<color=#88FF88>✓</color> " : "<color=#666666>○</color> ";
+            text += "First Rare Find\n";
+            
+            text += _achieveFirstLegendary ? "<color=#88FF88>✓</color> " : "<color=#666666>○</color> ";
+            text += "Legendary Discovery\n";
+            
+            text += _achieve1000Points ? "<color=#88FF88>✓</color> " : "<color=#666666>○</color> ";
+            text += "Treasure Hunter (1000 pts)\n";
+            
+            _achievementText.text = text;
         }
         
         private string FormatTime(float seconds)
@@ -547,19 +930,55 @@ namespace CEShowcase.Station5_Persistence
         // UI CALLBACKS
         // ========================================
         
-        public void OnSaveButton()
-        {
-            SaveInventory();
-        }
-        
-        public void OnLoadButton()
-        {
-            LoadInventory();
-        }
-        
+        /// <summary>
+        /// Wipes all saved data (for demo/testing purposes only).
+        /// </summary>
         public void OnWipeButton()
         {
             WipeData();
+        }
+        
+        public void WipeData()
+        {
+            CELogger.Warning("Inventory", "Wiping all persistence data!");
+            
+            for (int i = 0; i < _maxSlots; i++)
+            {
+                _itemIds[i] = -1;
+                _itemCounts[i] = 0;
+            }
+            
+            _totalItemCount = 0;
+            _uniqueItemCount = 0;
+            _totalCollected = 0;
+            _totalScore = 0;
+            _playTime = 0f;
+            _sessionCollected = 0;
+            _commonCount = 0;
+            _rareCount = 0;
+            _legendaryCount = 0;
+            
+            _achieveFirstItem = false;
+            _achieveTenItems = false;
+            _achieveHundredItems = false;
+            _achieveFirstRare = false;
+            _achieveFirstLegendary = false;
+            _achieveAllTypes = false;
+            _achieve1000Points = false;
+            _achieve5000Points = false;
+            
+            _estimatedSize = 0;
+            _autoSaveCount = 0;
+            
+            for (int i = 0; i < RECENT_ACTIVITY_SIZE; i++)
+            {
+                _recentActivity[i] = "";
+            }
+            
+            AddRecentActivity("<color=#FF8888>All data wiped - fresh start!</color>");
+            AutoSave();
+            UpdateDisplay();
+            CELogger.Info("Inventory", "All persistence data wiped");
         }
         
         /// <summary>
@@ -570,44 +989,82 @@ namespace CEShowcase.Station5_Persistence
             AddItem(itemId);
         }
         
+        // Manual save button (optional - auto-save is the primary path)
+        public void OnSaveButton()
+        {
+            AutoSave();
+            AddRecentActivity("<color=#88FF88>Auto-save refreshed</color>");
+            UpdateDisplay();
+        }
+        
         // Quick collect buttons for demo
         public void CollectRandomItem()
         {
-            int itemId = Random.Range(0, _itemNames.Length);
+            if (_itemRarities == null || _itemRarities.Length == 0)
+            {
+                AddRecentActivity("<color=#FF6666>No treasures configured</color>");
+                UpdateDisplay();
+                return;
+            }
+
+            // Weighted random by rarity (common more likely)
+            int roll = Random.Range(0, 100);
+            int itemId;
+            
+            if (roll < 60) // 60% common
+            {
+                int[] commons = GetItemsByRarity(0);
+                itemId = commons.Length > 0 ? commons[Random.Range(0, commons.Length)] : Random.Range(0, _itemRarities.Length);
+            }
+            else if (roll < 90) // 30% rare
+            {
+                int[] rares = GetItemsByRarity(1);
+                itemId = rares.Length > 0 ? rares[Random.Range(0, rares.Length)] : Random.Range(0, _itemRarities.Length);
+            }
+            else // 10% legendary
+            {
+                int[] legendaries = GetItemsByRarity(2);
+                itemId = legendaries.Length > 0 ? legendaries[Random.Range(0, legendaries.Length)] : Random.Range(0, _itemRarities.Length);
+            }
+            
             AddItem(itemId);
         }
         
-        public void CollectSword() => AddItem(0);
-        public void CollectShield() => AddItem(1);
-        public void CollectPotion() => AddItem(2);
-        public void CollectKey() => AddItem(3);
-        public void CollectGem() => AddItem(4);
-        
-        /// <summary>
-        /// Demo: Shows quota estimation in action.
-        /// </summary>
-        public void OnEstimateQuota()
+        private int[] GetItemsByRarity(int rarity)
         {
-            DataDictionary data = ToDataDictionary();
-            int size = EstimateDataSize(data);
-            float percent = (size / (float)CEPersistence.PLAYER_DATA_QUOTA) * 100f;
-            int remaining = CEPersistence.PLAYER_DATA_QUOTA - size;
-            
-            CELogger.Info("Inventory", 
-                $"Quota Check: {size} bytes used ({percent:F1}%), {remaining} bytes remaining");
-        }
-        
-        /// <summary>
-        /// Demo: Fills inventory to demonstrate quota warnings.
-        /// </summary>
-        public void OnFillInventory()
-        {
-            for (int i = 0; i < 50; i++)
+            if (_itemRarities == null || _itemRarities.Length == 0)
             {
-                int itemId = Random.Range(0, _itemNames.Length);
-                AddItem(itemId);
+                return new int[0];
             }
-            CELogger.Info("Inventory", "Added 50 random items for quota demo");
+
+            int count = 0;
+            for (int i = 0; i < _itemRarities.Length; i++)
+            {
+                if (_itemRarities[i] == rarity) count++;
+            }
+            
+            int[] result = new int[count];
+            int idx = 0;
+            for (int i = 0; i < _itemRarities.Length; i++)
+            {
+                if (_itemRarities[i] == rarity)
+                {
+                    result[idx++] = i;
+                }
+            }
+            return result;
         }
+        
+        // Specific item buttons
+        public void CollectGoldCoin() => AddItem(0);
+        public void CollectSilverCoin() => AddItem(1);
+        public void CollectRuby() => AddItem(2);
+        public void CollectEmerald() => AddItem(3);
+        public void CollectSapphire() => AddItem(4);
+        public void CollectDiamond() => AddItem(5);
+        public void CollectAncientKey() => AddItem(6);
+        public void CollectMagicScroll() => AddItem(7);
+        public void CollectCrystalShard() => AddItem(8);
+        public void CollectDragonScale() => AddItem(9);
     }
 }

@@ -31,7 +31,7 @@ namespace CEShowcase.Core
         
         [Header("Performance Monitor")]
         [SerializeField] private PerformanceMonitor _performanceMonitor;
-        
+
         [Header("UI")]
         [SerializeField] private TMPro.TextMeshProUGUI _welcomeText;
         [SerializeField] private TMPro.TextMeshProUGUI _featureListText;

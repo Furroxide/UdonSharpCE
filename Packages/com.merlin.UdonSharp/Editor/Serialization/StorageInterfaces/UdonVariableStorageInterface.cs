@@ -104,6 +104,16 @@ namespace UdonSharp.Serialization
 
         private UdonBehaviour udonBehaviour;
         private static Dictionary<UdonSharpProgramAsset, Dictionary<string, Type>> _variableTypeLookup = new Dictionary<UdonSharpProgramAsset, Dictionary<string, Type>>();
+
+        /// <summary>
+        /// Clears the cached variable type lookups. Should be called when scripts are recompiled
+        /// to ensure field definitions are up to date.
+        /// </summary>
+        internal static void ClearCache()
+        {
+            _variableTypeLookup.Clear();
+        }
+
         private Type GetElementType(string elementKey)
         {
             UdonSharpProgramAsset programAsset = (UdonSharpProgramAsset)udonBehaviour.programSource;

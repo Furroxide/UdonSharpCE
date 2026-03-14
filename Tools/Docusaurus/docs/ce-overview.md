@@ -45,7 +45,7 @@ public class CEQuickStart : UdonSharpBehaviour
 - `UdonTask<T>` exists, but awaited result assignment is not wired in the current transformer.
 - `[Sync]`, `[Rpc]`, and `[MergeStrategy]` are analysis helpers; they do not replace normal sync or network event calls.
 - `[SyncOnJoin]` and `LateJoinerSync` are scaffolding; serialization and application are placeholders.
-- `CEPersistence.Save` and `CEPersistence.Restore` are placeholders; use `ToData`/`FromData` or JSON helpers for now.
+- `CEPersistence.Save` and `CEPersistence.Restore` are placeholders; use `ToData`/`FromData` or JSON helpers for now. Models are auto-registered from `[PlayerData]`/`[PersistKey]` at compile time.
 - Optimization attributes like `[CEInline]` and `[CENoOptimize]` are declared but not yet enforced (only `[CEPreserveAction]` is active).
 - `[CEComponent]` and `[CESystem]` are metadata only; CEWorld does not auto-register them yet.
 - `CELogger` calls are transformed to `Debug.Log` in Udon compilation; in-world console integration requires manual wiring.

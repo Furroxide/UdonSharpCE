@@ -46,20 +46,28 @@ namespace CEShowcase.Station5_Persistence
         
         void Start()
         {
-            _startPosition = transform.position;
+            if (_visualObject == null)
+            {
+                _visualObject = gameObject;
+            }
+
+            _startPosition = _visualObject.transform.position;
             
             if (!string.IsNullOrEmpty(_interactionText))
             {
                 InteractionText = $"{_interactionText} {_itemName}";
             }
             
-            // Reset to uncollected state
-            _isCollected = false;
-            _localCollected = false;
+            _localCollected = _isCollected;
             
             if (_visualObject != null)
             {
-                _visualObject.SetActive(true);
+                _visualObject.SetActive(!_localCollected);
+            }
+
+            if (_canRespawn && _localCollected)
+            {
+                _respawnTimer = _respawnTime;
             }
         }
         
@@ -82,7 +90,7 @@ namespace CEShowcase.Station5_Persistence
                 _respawnTimer -= Time.deltaTime;
                 if (_respawnTimer <= 0)
                 {
-                    Respawn();
+                    Respawn(true);
                 }
             }
         }
@@ -90,6 +98,7 @@ namespace CEShowcase.Station5_Persistence
         public override void Interact()
         {
             if (_localCollected) return;
+            if (!Utilities.IsValid(Networking.LocalPlayer)) return;
             
             // Request ownership if needed for syncing
             if (!Networking.IsOwner(gameObject))
@@ -143,7 +152,7 @@ namespace CEShowcase.Station5_Persistence
             }
         }
         
-        private void Respawn()
+        private void Respawn(bool syncState)
         {
             _localCollected = false;
             _isCollected = false;
@@ -155,7 +164,7 @@ namespace CEShowcase.Station5_Persistence
             }
             
             // Sync respawn
-            if (Networking.IsOwner(gameObject))
+            if (syncState && Networking.IsOwner(gameObject))
             {
                 RequestSerialization();
             }
@@ -184,7 +193,7 @@ namespace CEShowcase.Station5_Persistence
             else if (!_isCollected && _localCollected)
             {
                 // Item was respawned
-                Respawn();
+                Respawn(false);
             }
         }
         

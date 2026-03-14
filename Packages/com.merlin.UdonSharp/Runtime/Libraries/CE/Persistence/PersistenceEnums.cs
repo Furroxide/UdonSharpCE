@@ -114,22 +114,42 @@ namespace UdonSharp.CE.Persistence
         /// <summary>
         /// The name of the field that failed validation.
         /// </summary>
-        public string FieldName { get; }
+        public string FieldName
+#if COMPILER_UDONSHARP
+        ;
+#else
+        { get; }
+#endif
 
         /// <summary>
         /// The persistence key of the field.
         /// </summary>
-        public string PersistKey { get; }
+        public string PersistKey
+#if COMPILER_UDONSHARP
+        ;
+#else
+        { get; }
+#endif
 
         /// <summary>
         /// A human-readable error message describing the validation failure.
         /// </summary>
-        public string Message { get; }
+        public string Message
+#if COMPILER_UDONSHARP
+        ;
+#else
+        { get; }
+#endif
 
         /// <summary>
         /// The actual value that failed validation.
         /// </summary>
-        public object ActualValue { get; }
+        public object ActualValue
+#if COMPILER_UDONSHARP
+        ;
+#else
+        { get; }
+#endif
 
         /// <summary>
         /// Creates a new validation error.

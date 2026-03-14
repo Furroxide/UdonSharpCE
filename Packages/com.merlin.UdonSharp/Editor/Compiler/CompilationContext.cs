@@ -92,6 +92,11 @@ namespace UdonSharp.Compiler
         public ConcurrentBag<CompileDiagnostic> Diagnostics { get; } = new ConcurrentBag<CompileDiagnostic>();
         
         public ModuleBinding[] ModuleBindings { get; private set; }
+
+        internal void ReplaceModuleBindings(ModuleBinding[] bindings)
+        {
+            ModuleBindings = bindings;
+        }
         
         private ConcurrentDictionary<ITypeSymbol, TypeSymbol> _typeSymbolLookup = new ConcurrentDictionary<ITypeSymbol, TypeSymbol>();
 

@@ -133,6 +133,19 @@ namespace UdonSharp.Serialization
 
         private static Dictionary<Type, IFormatter> _formatters = new Dictionary<Type, IFormatter>();
 
+        /// <summary>
+        /// Clears the cached formatters. Should be called when scripts are recompiled
+        /// to ensure field layouts are up to date.
+        /// </summary>
+        internal static void ClearCache()
+        {
+            lock (_emitLock)
+            {
+                _formatters.Clear();
+                _generatedMethods.Clear();
+            }
+        }
+
         private static readonly object _emitLock = new object();
         private static AssemblyBuilder _runtimeEmittedAssembly;
         private static ModuleBuilder _runtimeEmittedModule;

@@ -75,6 +75,11 @@ namespace UdonSharp.Compiler.Symbols
 
         internal T GetAttribute<T>() where T : Attribute
         {
+            if (SymbolAttributes.IsDefaultOrEmpty)
+            {
+                return null;
+            }
+            
             foreach (Attribute symbolAttribute in SymbolAttributes)
             {
                 if (symbolAttribute is T symbolT)

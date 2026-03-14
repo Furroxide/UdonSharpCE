@@ -61,6 +61,17 @@ CE converts parameterless `Action` usage to `CECallback` at compile time. This m
 - Simple lambdas like `() => Method()` are converted, but closures are not.
 - Use `callback.Invoke()` (not `callback?.Invoke()`) after transformation.
 
+## Lambda Inlining (Supported Subset)
+
+CE can inline a small subset of lambdas to avoid delegate usage:
+
+- Immediate invocation: `(() => { ... })();` is inlined as a direct block.
+- CE collection helpers: `List`, `Queue`, `Stack`, and `CEList` support `ForEach`, `ForEachWithIndex`, and `ForEachUntil` with lambdas.
+
+Notes:
+- `ForEachUntil` requires an expression body or a single `return` statement.
+- For unsupported lambda shapes, rewrite as explicit loops or extract a method and use `CECallback`.
+
 ## Common Pitfalls
 
 ### Bad

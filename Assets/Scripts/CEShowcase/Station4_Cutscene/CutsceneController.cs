@@ -397,7 +397,7 @@ namespace CEShowcase.Station4_Cutscene
             
             // Fire off the async cutscene!
             // The compiler generates the state machine - we just write clean code.
-            PlayCutsceneAsync();
+            _ = PlayCutsceneAsync();
         }
         
         public void OnSkipCutscene()
@@ -427,7 +427,7 @@ namespace CEShowcase.Station4_Cutscene
         /// </summary>
         public void OnDemoFade()
         {
-            DemoFadeAsync();
+            _ = DemoFadeAsync();
         }
         
         private async UdonTask DemoFadeAsync()
@@ -442,7 +442,7 @@ namespace CEShowcase.Station4_Cutscene
         /// </summary>
         public void OnDemoCurtains()
         {
-            DemoCurtainsAsync();
+            _ = DemoCurtainsAsync();
         }
         
         private async UdonTask DemoCurtainsAsync()
@@ -461,7 +461,7 @@ namespace CEShowcase.Station4_Cutscene
         /// </summary>
         public void OnDemoSpotlight()
         {
-            SpotlightSequenceAsync(3f);
+            _ = SpotlightSequenceAsync(3f);
         }
     }
 }

@@ -81,6 +81,11 @@ namespace UdonSharp.CE.Net
         private const int MAX_CHUNK_SIZE = 16000;
 
         /// <summary>
+        /// Maximum number of chunks allowed per sync.
+        /// </summary>
+        private const int MAX_CHUNKS = 100;
+
+        /// <summary>
         /// Delay between sync chunks in seconds.
         /// </summary>
         private const float CHUNK_DELAY = 0.2f;
@@ -178,6 +183,16 @@ namespace UdonSharp.CE.Net
         /// </summary>
         private int _chunksReceived;
 
+        /// <summary>
+        /// Tracks which chunks have been received for the current sync.
+        /// </summary>
+        private bool[] _chunkReceived;
+
+        /// <summary>
+        /// Snapshot of chunks being sent by the master.
+        /// </summary>
+        private string[] _currentChunks;
+
         #endregion
 
         #region Unity Lifecycle
@@ -186,7 +201,8 @@ namespace UdonSharp.CE.Net
         {
             _behaviours = new UdonSharpBehaviour[MAX_BEHAVIOURS];
             _priorities = new int[MAX_BEHAVIOURS];
-            _chunkBuffer = new string[100]; // Max 100 chunks
+            _chunkBuffer = new string[MAX_CHUNKS];
+            _chunkReceived = new bool[MAX_CHUNKS];
             Status = LateJoinerSyncStatus.Idle;
         }
 
@@ -288,13 +304,29 @@ namespace UdonSharp.CE.Net
             if (_targetPlayerId != localPlayer.playerId)
                 return;
 
-            // Store chunk
+            if (_totalChunks > _chunkBuffer.Length)
+            {
+                Debug.LogError($"[LateJoinerSync] Sync exceeded buffer size ({_totalChunks} chunks, max {_chunkBuffer.Length})");
+                return;
+            }
+
+            if (_currentChunk == 0)
+            {
+                ResetReceiveBuffer();
+            }
+
+            // Store chunk if it hasn't been received yet
             if (_currentChunk >= 0 && _currentChunk < _chunkBuffer.Length)
             {
-                _chunkBuffer[_currentChunk] = _syncData;
-                _chunksReceived++;
+                if (!_chunkReceived[_currentChunk])
+                {
+                    _chunkBuffer[_currentChunk] = _syncData;
+                    _chunkReceived[_currentChunk] = true;
+                    _chunksReceived++;
+                }
 
-                Progress = (float)_chunksReceived / Mathf.Max(1, _totalChunks);
+                int expectedChunks = Mathf.Max(1, _totalChunks);
+                Progress = (float)_chunksReceived / expectedChunks;
 
                 // Check if all chunks received
                 if (_chunksReceived >= _totalChunks)
@@ -327,23 +359,26 @@ namespace UdonSharp.CE.Net
             string fullData = SerializeAllBehaviours();
 
             // Split into chunks
-            string[] chunks = SplitIntoChunks(fullData, MAX_CHUNK_SIZE);
+            _currentChunks = SplitIntoChunks(fullData, MAX_CHUNK_SIZE);
 
             // Start sending
             _targetPlayerId = player.playerId;
-            _totalChunks = chunks.Length;
+            _totalChunks = _currentChunks.Length;
             _currentChunk = 0;
             _syncSequence++;
 
-            SendNextChunk(chunks);
+            SendNextChunk();
         }
 
         /// <summary>
         /// Sends the next chunk of sync data.
         /// </summary>
-        private void SendNextChunk(string[] chunks)
+        private void SendNextChunk()
         {
-            if (_currentChunk >= chunks.Length)
+            if (_currentChunks == null)
+                return;
+
+            if (_currentChunk >= _currentChunks.Length)
             {
                 // Sync complete
                 Status = LateJoinerSyncStatus.Complete;
@@ -352,10 +387,10 @@ namespace UdonSharp.CE.Net
                 return;
             }
 
-            _syncData = chunks[_currentChunk];
+            _syncData = _currentChunks[_currentChunk];
             RequestSerialization();
 
-            Progress = (float)_currentChunk / chunks.Length;
+            Progress = (float)_currentChunk / _currentChunks.Length;
 
             _currentChunk++;
             _syncSequence++;
@@ -380,25 +415,7 @@ namespace UdonSharp.CE.Net
                 return;
             }
 
-            // Re-serialize and continue (in case state changed)
-            string fullData = SerializeAllBehaviours();
-            string[] chunks = SplitIntoChunks(fullData, MAX_CHUNK_SIZE);
-
-            if (_currentChunk < chunks.Length)
-            {
-                _syncData = chunks[_currentChunk];
-                RequestSerialization();
-                Progress = (float)_currentChunk / chunks.Length;
-                _currentChunk++;
-                _syncSequence++;
-                SendCustomEventDelayedSeconds(nameof(_ContinueSync), CHUNK_DELAY);
-            }
-            else
-            {
-                Status = LateJoinerSyncStatus.Complete;
-                Progress = 1f;
-                _syncingPlayer = null;
-            }
+            SendNextChunk();
         }
 
         #endregion
@@ -473,7 +490,8 @@ namespace UdonSharp.CE.Net
         {
             // Reassemble chunks
             string fullData = "";
-            for (int i = 0; i < _totalChunks; i++)
+            int totalChunks = Mathf.Min(_totalChunks, _chunkBuffer.Length);
+            for (int i = 0; i < totalChunks; i++)
             {
                 if (_chunkBuffer[i] != null)
                 {
@@ -481,7 +499,7 @@ namespace UdonSharp.CE.Net
                     _chunkBuffer[i] = null;
                 }
             }
-            _chunksReceived = 0;
+            ResetReceiveBuffer();
 
             // Parse and apply to behaviours
             DeserializeAllBehaviours(fullData);
@@ -531,6 +549,17 @@ namespace UdonSharp.CE.Net
         {
             // Full implementation would use reflection to set fields
             // This is a placeholder for the actual deserialization
+        }
+
+        private void ResetReceiveBuffer()
+        {
+            for (int i = 0; i < _chunkBuffer.Length; i++)
+            {
+                _chunkBuffer[i] = null;
+                _chunkReceived[i] = false;
+            }
+
+            _chunksReceived = 0;
         }
 
         #endregion

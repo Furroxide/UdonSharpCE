@@ -111,20 +111,25 @@ namespace UdonSharp.CE.Persistence
     ///         PersistenceLifecycle.RegisterCallback(this);
     ///     }
     ///
-    ///     public void OnDataRestored(RestoreResult result, string modelKey)
+    ///     public void OnDataRestored()
     ///     {
+    ///         RestoreResult result = PersistenceLifecycle.GetPendingRestoreResult();
+    ///         string modelKey = PersistenceLifecycle.GetPendingModelKey();
     ///         if (result == RestoreResult.Success)
     ///             Debug.Log($"Data loaded for {modelKey}!");
     ///     }
     ///
-    ///     public void OnDataSaved(SaveResult result, string modelKey)
+    ///     public void OnDataSaved()
     ///     {
+    ///         SaveResult result = PersistenceLifecycle.GetPendingSaveResult();
+    ///         string modelKey = PersistenceLifecycle.GetPendingModelKey();
     ///         if (result == SaveResult.Success)
     ///             Debug.Log($"Data saved for {modelKey}!");
     ///     }
     ///
-    ///     public void OnDataCorrupted(CorruptionInfo info)
+    ///     public void OnDataCorrupted()
     ///     {
+    ///         CorruptionInfo info = PersistenceLifecycle.GetPendingCorruptionInfo();
     ///         Debug.LogError($"Data corruption: {info}");
     ///     }
     /// }
@@ -136,22 +141,17 @@ namespace UdonSharp.CE.Persistence
         /// <summary>
         /// Called after a data restore operation completes.
         /// </summary>
-        /// <param name="result">The result of the restore operation.</param>
-        /// <param name="modelKey">The persistence key of the model that was restored.</param>
-        void OnDataRestored(RestoreResult result, string modelKey);
+        void OnDataRestored();
 
         /// <summary>
         /// Called after a data save operation completes.
         /// </summary>
-        /// <param name="result">The result of the save operation.</param>
-        /// <param name="modelKey">The persistence key of the model that was saved.</param>
-        void OnDataSaved(SaveResult result, string modelKey);
+        void OnDataSaved();
 
         /// <summary>
         /// Called when data corruption is detected during a restore operation.
         /// </summary>
-        /// <param name="info">Details about the corruption that was detected.</param>
-        void OnDataCorrupted(CorruptionInfo info);
+        void OnDataCorrupted();
     }
 
     /// <summary>
@@ -163,8 +163,8 @@ namespace UdonSharp.CE.Persistence
     /// </summary>
     /// <remarks>
     /// Due to Udon limitations, callbacks are invoked via SendCustomEvent rather
-    /// than direct method calls. Registered behaviours must implement the callback
-    /// methods and mark them with appropriate attributes for event export.
+    /// than direct method calls. Use the GetPending* accessors inside the callback
+    /// to read the result data for the current event.
     /// </remarks>
     [PublicAPI]
     public static class PersistenceLifecycle
@@ -177,9 +177,9 @@ namespace UdonSharp.CE.Persistence
         public const int MAX_CALLBACKS = 32;
 
         // Event method names for SendCustomEvent
-        private const string EVENT_ON_DATA_RESTORED = "_CE_OnDataRestored";
-        private const string EVENT_ON_DATA_SAVED = "_CE_OnDataSaved";
-        private const string EVENT_ON_DATA_CORRUPTED = "_CE_OnDataCorrupted";
+        private const string EVENT_ON_DATA_RESTORED = "OnDataRestored";
+        private const string EVENT_ON_DATA_SAVED = "OnDataSaved";
+        private const string EVENT_ON_DATA_CORRUPTED = "OnDataCorrupted";
 
         #endregion
 
@@ -220,6 +220,10 @@ namespace UdonSharp.CE.Persistence
             {
                 _callbacks = new UdonSharpBehaviour[MAX_CALLBACKS];
                 _callbackCount = 0;
+            }
+            else
+            {
+                CleanupDestroyedCallbacks();
             }
 
             // Check if already registered
@@ -324,6 +328,8 @@ namespace UdonSharp.CE.Persistence
             if (_callbacks == null || _callbackCount == 0)
                 return;
 
+            CleanupDestroyedCallbacks();
+
             _pendingRestoreResult = result;
             _pendingModelKey = modelKey;
 
@@ -332,6 +338,9 @@ namespace UdonSharp.CE.Persistence
                 var callback = _callbacks[i];
                 if (callback != null && callback.gameObject != null)
                 {
+#if COMPILER_UDONSHARP
+                    callback.SendCustomEvent(EVENT_ON_DATA_RESTORED);
+#else
                     try
                     {
                         callback.SendCustomEvent(EVENT_ON_DATA_RESTORED);
@@ -340,6 +349,7 @@ namespace UdonSharp.CE.Persistence
                     {
                         Debug.LogError($"[CE.Persistence] NotifyDataRestored: callback {callback.name} failed - {e.Message}");
                     }
+#endif
                 }
             }
 
@@ -358,6 +368,8 @@ namespace UdonSharp.CE.Persistence
             if (_callbacks == null || _callbackCount == 0)
                 return;
 
+            CleanupDestroyedCallbacks();
+
             _pendingSaveResult = result;
             _pendingModelKey = modelKey;
 
@@ -366,6 +378,9 @@ namespace UdonSharp.CE.Persistence
                 var callback = _callbacks[i];
                 if (callback != null && callback.gameObject != null)
                 {
+#if COMPILER_UDONSHARP
+                    callback.SendCustomEvent(EVENT_ON_DATA_SAVED);
+#else
                     try
                     {
                         callback.SendCustomEvent(EVENT_ON_DATA_SAVED);
@@ -374,6 +389,7 @@ namespace UdonSharp.CE.Persistence
                     {
                         Debug.LogError($"[CE.Persistence] NotifyDataSaved: callback {callback.name} failed - {e.Message}");
                     }
+#endif
                 }
             }
 
@@ -397,6 +413,8 @@ namespace UdonSharp.CE.Persistence
                 return;
             }
 
+            CleanupDestroyedCallbacks();
+
             _pendingCorruptionInfo = info;
             _pendingModelKey = info.ModelKey;
 
@@ -407,6 +425,9 @@ namespace UdonSharp.CE.Persistence
                 var callback = _callbacks[i];
                 if (callback != null && callback.gameObject != null)
                 {
+#if COMPILER_UDONSHARP
+                    callback.SendCustomEvent(EVENT_ON_DATA_CORRUPTED);
+#else
                     try
                     {
                         callback.SendCustomEvent(EVENT_ON_DATA_CORRUPTED);
@@ -415,6 +436,7 @@ namespace UdonSharp.CE.Persistence
                     {
                         Debug.LogError($"[CE.Persistence] NotifyDataCorrupted: callback {callback.name} failed - {e.Message}");
                     }
+#endif
                 }
             }
 

@@ -43,6 +43,9 @@ namespace UdonSharp.CE.Editor.Analyzers
             // Phase 3: CE.Async analyzers
             new AsyncMethodAnalyzer(),
 
+            // Phase 2: Lambda validation
+            new LambdaUsageAnalyzer(),
+
             // Phase 2: CE.Persistence analyzers
             new PlayerDataSizeAnalyzer()
         };

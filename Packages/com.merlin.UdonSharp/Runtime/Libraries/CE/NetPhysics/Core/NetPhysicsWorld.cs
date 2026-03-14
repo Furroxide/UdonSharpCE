@@ -109,6 +109,8 @@ namespace UdonSharp.CE.NetPhysics
             // Prevent duplicates.
             for (int i = 0; i < _entityCount; i++)
             {
+                if (_entities[i] == null)
+                    continue;
                 if (_entities[i] == entity || _entities[i].EntityId == entity.EntityId)
                     return;
             }
@@ -117,7 +119,7 @@ namespace UdonSharp.CE.NetPhysics
 
             // Insert sorted by EntityId for stable snapshot ordering.
             int insertIndex = _entityCount;
-            while (insertIndex > 0 && _entities[insertIndex - 1].EntityId > entity.EntityId)
+            while (insertIndex > 0 && _entities[insertIndex - 1] != null && _entities[insertIndex - 1].EntityId > entity.EntityId)
             {
                 _entities[insertIndex] = _entities[insertIndex - 1];
                 insertIndex--;
@@ -199,9 +201,15 @@ namespace UdonSharp.CE.NetPhysics
             // Apply per-entity simulation for this tick.
             for (int i = 0; i < _entityCount; i++)
             {
-                var vehicle = _entities[i] as NetVehicle;
-                if (vehicle == null)
+                if (_entities[i] == null)
                     continue;
+                
+                // Check entity type first - the 'as' cast doesn't perform runtime type checking in Udon
+                EntityType entityType = _entities[i].EntityType;
+                if (entityType != EntityType.LocalVehicle && entityType != EntityType.OtherVehicle)
+                    continue;
+                
+                var vehicle = (NetVehicle)_entities[i];
 
                 InputFrame vehicleInput = InputFrame.Empty;
 

@@ -19,7 +19,7 @@ namespace RocketLeague
         public RocketLeagueManager Manager;
 
         [Header("Settings")]
-        public string InteractionText = "Play Rocket League";
+        public new string InteractionText = "Play Rocket League";
 
         public override void Interact()
         {

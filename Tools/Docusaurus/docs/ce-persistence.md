@@ -22,22 +22,7 @@ public class SaveManager : UdonSharpBehaviour
 
     void Start()
     {
-        CEPersistence.Register<PlayerSaveData>(
-            toData: data =>
-            {
-                var dict = new DataDictionary();
-                dict["xp"] = data.experience;
-                dict["lvl"] = data.level;
-                return dict;
-            },
-            fromData: dict => new PlayerSaveData
-            {
-                experience = (int)dict["xp"].Double,
-                level = (int)dict["lvl"].Double
-            },
-            key: "rpg_save",
-            version: 1
-        );
+        // No manual registration required.
     }
 
     public void SaveLocal()
@@ -46,6 +31,19 @@ public class SaveManager : UdonSharpBehaviour
     }
 }
 ```
+
+## Auto Registration
+
+CE.Persistence auto-registers `[PlayerData]` models during Udon compilation. You only need the attributes.
+
+Supported field types:
+
+- Primitives (`bool`, `int`, `float`, etc.)
+- `string`
+- `DataList` / `DataDictionary`
+- Arrays of the above
+
+If you need custom conversion (complex types, nested models, etc.), register a converter manually with `CEPersistence.Register`.
 
 ## API Reference
 
@@ -64,7 +62,7 @@ public class SaveManager : UdonSharpBehaviour
 
 | Member | Description |
 | --- | --- |
-| `Register<T>(toData, fromData, key, version, validate)` | Register a data model and converters. |
+| `Register<T>(toData, fromData, key, version, validate)` | Register a data model and converters (optional; only for custom converters). |
 | `IsRegistered<T>()` | Check if a model is registered. |
 | `Save<T>(T model)` | Save a model (placeholder flow; see limitations). |
 | `Restore<T>(out T model)` | Restore a model (placeholder flow; see limitations). |
@@ -99,23 +97,21 @@ Callbacks are invoked by name. Implement `_CE_OnDataRestored`, `_CE_OnDataSaved`
 ## Current Limitations
 
 - `Save` and `Restore` are placeholders for future PlayerData integration.
-- You must register model converters manually via `Register<T>`.
-- JSON numbers deserialize as doubles; cast carefully in `fromData`.
+- Auto-registration runs during Udon compilation and supports primitives, strings, DataList/DataDictionary, and arrays of those types.
+- Unsupported field types require manual converters via `Register<T>`.
+- JSON numbers deserialize as doubles; cast carefully in custom converters.
 
 ## Common Pitfalls
 
 ### Bad
 
 ```csharp
-// Missing registration causes Save/Restore to fail.
+// Using unsupported field types without a custom converter.
 CEPersistence.Save(_data);
 ```
 
 ### Good
 
 ```csharp
-if (!CEPersistence.IsRegistered<PlayerSaveData>())
-{
-    // Register converters in Start() before saving.
-}
+// Keep persistence fields to supported types, or register a custom converter.
 ```

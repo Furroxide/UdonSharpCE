@@ -151,9 +151,6 @@ namespace CEShowcase.UI
                 }
             }
             
-            // Target line (16.67ms = 60fps)
-            float targetLine = 16.67f;
-            
             // Build graph rows (8 rows)
             const int GRAPH_HEIGHT = 8;
             float range = Mathf.Max(maxTime - minTime, 10f);
