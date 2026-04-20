@@ -10,3 +10,5 @@ com.vrchat.core.vpm-resolver/
 
 # Keep our custom UdonSharp package
 !com.merlin.UdonSharp/
+/*/
+!com.vrchat.core.*/

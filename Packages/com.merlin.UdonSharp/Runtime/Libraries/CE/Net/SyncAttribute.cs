@@ -26,26 +26,10 @@ namespace UdonSharp.CE.Net
     /// }
     /// </code>
     /// </example>
-    /// <remarks>
-    /// The [Sync] attribute works alongside [UdonSynced]. If both are present on a field,
-    /// [Sync] settings take precedence for CE analyzers but the underlying [UdonSynced]
-    /// behavior is preserved for VRChat compatibility.
-    ///
-    /// VRChat Limits:
-    /// - Continuous sync: ~200 bytes maximum
-    /// - Network budget: ~11 KB/s shared across all objects
-    /// - String length: ~50 characters
-    /// </remarks>
     [PublicAPI]
     [AttributeUsage(AttributeTargets.Field)]
-    public class SyncAttribute : Attribute
+    public class SyncAttribute : UdonSyncedAttribute
     {
-        /// <summary>
-        /// The underlying UdonSyncMode to use.
-        /// Automatically derived from InterpolationMode.
-        /// </summary>
-        public UdonSyncMode SyncMode { get; }
-
         /// <summary>
         /// Interpolation mode for this variable.
         /// Determines how values are smoothed between sync updates.
@@ -93,9 +77,14 @@ namespace UdonSharp.CE.Net
         /// </summary>
         /// <param name="interpolation">The interpolation mode to use. Defaults to None.</param>
         public SyncAttribute(InterpolationMode interpolation = InterpolationMode.None)
+            : base(GetSyncMode(interpolation))
         {
             Interpolation = interpolation;
-            SyncMode = interpolation switch
+        }
+
+        private static UdonSyncMode GetSyncMode(InterpolationMode interpolation)
+        {
+            return interpolation switch
             {
                 InterpolationMode.Linear => UdonSyncMode.Linear,
                 InterpolationMode.Smooth => UdonSyncMode.Smooth,

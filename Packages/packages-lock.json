@@ -1,13 +1,20 @@
 {
   "dependencies": {
     "com.coplaydev.unity-mcp": {
-      "version": "9.5.3",
+      "version": "9.6.6",
       "depth": 0,
       "source": "registry",
       "dependencies": {
         "com.unity.nuget.newtonsoft-json": "3.0.2",
         "com.unity.test-framework": "1.1.31"
       },
+      "url": "https://package.openupm.com"
+    },
+    "com.cysharp.unitask": {
+      "version": "2.5.10",
+      "depth": 0,
+      "source": "registry",
+      "dependencies": {},
       "url": "https://package.openupm.com"
     },
     "com.merlin.udonsharp": {
@@ -71,7 +78,7 @@
     },
     "com.unity.cinemachine": {
       "version": "2.9.7",
-      "depth": 1,
+      "depth": 0,
       "source": "registry",
       "dependencies": {
         "com.unity.test-framework": "1.1.31"
@@ -124,7 +131,7 @@
     },
     "com.unity.inputsystem": {
       "version": "1.7.0",
-      "depth": 1,
+      "depth": 0,
       "source": "registry",
       "dependencies": {
         "com.unity.modules.uielements": "1.0.0"

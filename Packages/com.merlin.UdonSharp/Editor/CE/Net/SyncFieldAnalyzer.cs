@@ -115,16 +115,6 @@ namespace UdonSharp.CE.Editor.Analyzers
                     ));
                 }
 
-                // Check: Both [Sync] and [UdonSynced] present
-                if (field.IsSynced)
-                {
-                    diagnostics.Add(AnalyzerDiagnostic.Info(
-                        location,
-                        $"Field '{field.Name}' has both [Sync] and [UdonSynced] attributes. [Sync] settings will be used for CE analysis.",
-                        AnalyzerId,
-                        AnalyzerId
-                    ));
-                }
             }
 
             return diagnostics;
