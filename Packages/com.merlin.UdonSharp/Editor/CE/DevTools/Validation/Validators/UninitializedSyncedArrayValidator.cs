@@ -1,18 +1,19 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using UdonSharp;
 
 namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
 {
     /// <summary>
-    /// Validates that [UdonSynced] arrays are initialized.
+    /// Validates that synced arrays are initialized.
     /// Uninitialized synced arrays cause NullReferenceException on join.
     /// </summary>
     public class UninitializedSyncedArrayValidator : IValidator
     {
         public string Name => "Uninitialized Synced Array";
         public string Category => "Networking";
-        public string Description => "Detects [UdonSynced] arrays that are not initialized.";
+        public string Description => "Detects synced arrays that are not initialized.";
         public bool IsEnabledByDefault => true;
 
         public IEnumerable<ValidationIssue> Validate(ValidationContext context)
@@ -29,7 +30,7 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
                     if (!field.FieldType.IsArray)
                         continue;
 
-                    // Check if field has [UdonSynced] attribute
+                    // Check if field participates in Udon sync.
                     if (!HasUdonSyncedAttribute(field))
                         continue;
 
@@ -42,7 +43,7 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
                             ValidatorName = Name,
                             Message = $"Synced array '{field.Name}' is not initialized",
                             Details = "Uninitialized synced arrays cause NullReferenceException on player join. " +
-                                     "Initialize in field declaration: `[UdonSynced] public int[] data = new int[16];`",
+                                     "Initialize in field declaration: `[UdonSynced]` or `[Sync] public int[] data = new int[16];`",
                             RelatedType = type,
                             RelatedField = field,
                             FilePath = context.GetSourceFile(type)
@@ -56,14 +57,7 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
 
         private bool HasUdonSyncedAttribute(FieldInfo field)
         {
-            var attrs = field.GetCustomAttributes(true);
-            foreach (var attr in attrs)
-            {
-                string attrName = attr.GetType().Name;
-                if (attrName == "UdonSyncedAttribute" || attrName == "UdonSynced")
-                    return true;
-            }
-            return false;
+            return field.GetCustomAttribute<UdonSyncedAttribute>(true) != null;
         }
 
         private bool IsFieldInitialized(Type type, FieldInfo field)
@@ -83,15 +77,15 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
                 // Look for field declaration with initializer
                 // Patterns:
                 //   [UdonSynced] public int[] field = new int[N];
-                //   [UdonSynced] private int[] field = new int[] { 1, 2, 3 };
+                //   [Sync] private int[] field = new int[] { 1, 2, 3 };
 
                 // Find field declaration
                 var patterns = new[]
                 {
-                    // With type array syntax: Type[] name = ...
-                    $@"\[\s*UdonSynced[^\]]*\][^;]*\b{field.FieldType.GetElementType()?.Name}\s*\[\s*\]\s+{field.Name}\s*=\s*new",
-                    // With var and explicit type
-                    $@"\[\s*UdonSynced[^\]]*\][^;]*\b{field.Name}\s*=\s*new\s+{field.FieldType.GetElementType()?.Name}\s*\[",
+                    // Field initializer with explicit array type
+                    $@"\b{field.FieldType.GetElementType()?.Name}\s*\[\s*\]\s+{field.Name}\s*=\s*new",
+                    // Field initializer with an explicit construction type
+                    $@"\b{field.Name}\s*=\s*new\s+{field.FieldType.GetElementType()?.Name}\s*\[",
                     // Generic pattern for any array initializer
                     $@"\b{field.Name}\s*=\s*new\s+\w+\s*\["
                 };

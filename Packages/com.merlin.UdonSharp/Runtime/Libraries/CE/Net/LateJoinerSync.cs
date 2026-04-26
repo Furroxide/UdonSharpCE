@@ -2,6 +2,7 @@ using JetBrains.Annotations;
 using UdonSharp;
 using UnityEngine;
 using VRC.SDKBase;
+using VRC.Udon;
 
 namespace UdonSharp.CE.Net
 {
@@ -95,6 +96,11 @@ namespace UdonSharp.CE.Net
         /// </summary>
         private const float SYNC_TIMEOUT = 30f;
 
+        private const string SyncOnJoinPayloadField = "_CE_SyncOnJoinPayload";
+        private const string SyncOnJoinInboundField = "_CE_SyncOnJoinInbound";
+        private const string SyncOnJoinSerializeEvent = "_CE_SyncOnJoin_Serialize";
+        private const string SyncOnJoinDeserializeEvent = "_CE_SyncOnJoin_Deserialize_Trigger";
+
         #endregion
 
         #region Synced Variables
@@ -149,6 +155,11 @@ namespace UdonSharp.CE.Net
         private int[] _priorities;
 
         /// <summary>
+        /// Stable registration identifiers used to route payloads back to the correct behaviour.
+        /// </summary>
+        private string[] _behaviourIds;
+
+        /// <summary>
         /// Current sync status.
         /// </summary>
         public LateJoinerSyncStatus Status { get; private set; }
@@ -201,6 +212,7 @@ namespace UdonSharp.CE.Net
         {
             _behaviours = new UdonSharpBehaviour[MAX_BEHAVIOURS];
             _priorities = new int[MAX_BEHAVIOURS];
+            _behaviourIds = new string[MAX_BEHAVIOURS];
             _chunkBuffer = new string[MAX_CHUNKS];
             _chunkReceived = new bool[MAX_CHUNKS];
             Status = LateJoinerSyncStatus.Idle;
@@ -229,6 +241,7 @@ namespace UdonSharp.CE.Net
 
             _behaviours[_behaviourCount] = behaviour;
             _priorities[_behaviourCount] = priority;
+            _behaviourIds[_behaviourCount] = BuildBehaviourRegistrationId(behaviour);
             _behaviourCount++;
 
             // Sort by priority
@@ -252,9 +265,11 @@ namespace UdonSharp.CE.Net
                     {
                         _behaviours[j] = _behaviours[j + 1];
                         _priorities[j] = _priorities[j + 1];
+                        _behaviourIds[j] = _behaviourIds[j + 1];
                     }
                     _behaviourCount--;
                     _behaviours[_behaviourCount] = null;
+                    _behaviourIds[_behaviourCount] = null;
                     return;
                 }
             }
@@ -435,11 +450,7 @@ namespace UdonSharp.CE.Net
                 if (behaviour == null)
                     continue;
 
-                // Use behaviour name as key
-                string key = behaviour.name;
-
-                // For now, use simple field serialization
-                // In a full implementation, this would scan for [SyncOnJoin] fields
+                string key = _behaviourIds[i];
                 string data = SerializeBehaviour(behaviour);
 
                 result += $"{key}|{data}\n";
@@ -453,9 +464,24 @@ namespace UdonSharp.CE.Net
         /// </summary>
         private string SerializeBehaviour(UdonSharpBehaviour behaviour)
         {
-            // Simple implementation - serialize public fields
-            // Full implementation would use reflection on [SyncOnJoin] fields
-            return behaviour.name;
+            UdonBehaviour udonBehaviour = GetBackingUdonBehaviour(behaviour);
+            if (udonBehaviour == null)
+            {
+                Debug.LogError($"[LateJoinerSync] Failed to find backing UdonBehaviour for '{behaviour}'.");
+                return "";
+            }
+
+            udonBehaviour.SendCustomEvent(SyncOnJoinSerializeEvent);
+
+            object payload = udonBehaviour.GetProgramVariable(SyncOnJoinPayloadField);
+            if (payload == null)
+                return "";
+
+            if (payload is string payloadString)
+                return payloadString;
+
+            Debug.LogError($"[LateJoinerSync] Generated payload field on '{behaviour.name}' was not a string.");
+            return "";
         }
 
         /// <summary>
@@ -533,7 +559,7 @@ namespace UdonSharp.CE.Net
                 // Find matching behaviour
                 for (int j = 0; j < _behaviourCount; j++)
                 {
-                    if (_behaviours[j] != null && _behaviours[j].name == key)
+                    if (_behaviours[j] != null && _behaviourIds[j] == key)
                     {
                         DeserializeBehaviour(_behaviours[j], payload);
                         break;
@@ -547,8 +573,15 @@ namespace UdonSharp.CE.Net
         /// </summary>
         private void DeserializeBehaviour(UdonSharpBehaviour behaviour, string data)
         {
-            // Full implementation would use reflection to set fields
-            // This is a placeholder for the actual deserialization
+            UdonBehaviour udonBehaviour = GetBackingUdonBehaviour(behaviour);
+            if (udonBehaviour == null)
+            {
+                Debug.LogError($"[LateJoinerSync] Failed to find backing UdonBehaviour for '{behaviour}'.");
+                return;
+            }
+
+            udonBehaviour.SetProgramVariable(SyncOnJoinInboundField, data ?? "");
+            udonBehaviour.SendCustomEvent(SyncOnJoinDeserializeEvent);
         }
 
         private void ResetReceiveBuffer()
@@ -583,12 +616,69 @@ namespace UdonSharp.CE.Net
                         _behaviours[j] = _behaviours[j + 1];
                         _behaviours[j + 1] = tempBehaviour;
 
+                        string tempBehaviourId = _behaviourIds[j];
+                        _behaviourIds[j] = _behaviourIds[j + 1];
+                        _behaviourIds[j + 1] = tempBehaviourId;
+
                         int tempPriority = _priorities[j];
                         _priorities[j] = _priorities[j + 1];
                         _priorities[j + 1] = tempPriority;
                     }
                 }
             }
+        }
+
+        private static string BuildBehaviourRegistrationId(UdonSharpBehaviour behaviour)
+        {
+            if (behaviour == null)
+                return string.Empty;
+
+            UdonBehaviour backingBehaviour = GetBackingUdonBehaviour(behaviour);
+            int componentIndex = GetBackingBehaviourIndex(backingBehaviour);
+            return $"{BuildHierarchyPath(behaviour.transform)}#{componentIndex}";
+        }
+
+        private static string BuildHierarchyPath(Transform transform)
+        {
+            if (transform == null)
+                return string.Empty;
+
+            string path = string.Empty;
+            Transform current = transform;
+            while (current != null)
+            {
+                path = "/" + current.GetSiblingIndex() + path;
+                current = current.parent;
+            }
+
+            return path;
+        }
+
+        private static int GetBackingBehaviourIndex(UdonBehaviour backingBehaviour)
+        {
+            if (backingBehaviour == null)
+                return -1;
+
+            UdonBehaviour[] behaviours = backingBehaviour.GetComponents<UdonBehaviour>();
+            for (int i = 0; i < behaviours.Length; i++)
+            {
+                if (behaviours[i] == backingBehaviour)
+                    return i;
+            }
+
+            return -1;
+        }
+
+        private static UdonBehaviour GetBackingUdonBehaviour(UdonSharpBehaviour behaviour)
+        {
+            if (behaviour == null)
+                return null;
+
+            UdonBehaviour backingBehaviour = behaviour.GetComponent<UdonBehaviour>();
+            if (backingBehaviour != null)
+                return backingBehaviour;
+
+            return (UdonBehaviour)(Component)behaviour;
         }
 
         #endregion

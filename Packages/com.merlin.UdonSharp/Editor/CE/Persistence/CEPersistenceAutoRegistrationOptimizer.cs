@@ -864,6 +864,7 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("using System.Collections.Generic;");
                 sb.AppendLine("using UnityEngine;");
                 sb.AppendLine("using VRC.SDK3.Data;");
+                sb.AppendLine("using VRC.SDK3.Persistence;");
                 sb.AppendLine("using VRC.SDKBase;");
                 sb.AppendLine();
                 sb.AppendLine("namespace UdonSharp.CE.Persistence");
@@ -942,6 +943,14 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("                return SaveResult.NotAllowed;");
                 sb.AppendLine("            }");
                 sb.AppendLine();
+                sb.AppendLine("            if (!VRCJson.TrySerializeToJson(data, JsonExportType.Minify, out DataToken jsonToken))");
+                sb.AppendLine("            {");
+                sb.AppendLine($"                Debug.LogError(\"[CE.Persistence] Save<{displayName}>: JSON serialization failed\");");
+                sb.AppendLine("                PersistenceLifecycle.NotifyDataSaved(SaveResult.ValidationFailed, key);");
+                sb.AppendLine("                return SaveResult.ValidationFailed;");
+                sb.AppendLine("            }");
+                sb.AppendLine();
+                sb.AppendLine("            PlayerData.SetString(key, jsonToken.String);");
                 sb.AppendLine($"            Debug.Log(\"[CE.Persistence] Saved {displayName} to key '\" + key + \"' (\" + estimatedSize + \" bytes)\");");
                 sb.AppendLine("            PersistenceLifecycle.NotifyDataSaved(SaveResult.Success, key);");
                 sb.AppendLine("            return SaveResult.Success;");
@@ -996,9 +1005,17 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("                return RestoreResult.NotReady;");
                 sb.AppendLine("            }");
                 sb.AppendLine();
-                sb.AppendLine($"            Debug.Log(\"[CE.Persistence] Restore<{displayName}>: no existing data for key '\" + key + \"'\");");
-                sb.AppendLine("            PersistenceLifecycle.NotifyDataRestored(RestoreResult.NoData, key);");
-                sb.AppendLine("            return RestoreResult.NoData;");
+                sb.AppendLine("            string json;");
+                sb.AppendLine("            if (!PlayerData.TryGetString(localPlayer, key, out json))");
+                sb.AppendLine("            {");
+                sb.AppendLine($"                Debug.Log(\"[CE.Persistence] Restore<{displayName}>: no existing data for key '\" + key + \"'\");");
+                sb.AppendLine("                PersistenceLifecycle.NotifyDataRestored(RestoreResult.NoData, key);");
+                sb.AppendLine("                return RestoreResult.NoData;");
+                sb.AppendLine("            }");
+                sb.AppendLine();
+                sb.AppendLine("            RestoreResult result = FromJson(json, out model);");
+                sb.AppendLine("            PersistenceLifecycle.NotifyDataRestored(result, key);");
+                sb.AppendLine("            return result;");
                 sb.AppendLine("        }");
                 sb.AppendLine();
 

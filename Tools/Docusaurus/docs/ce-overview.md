@@ -43,9 +43,10 @@ public class CEQuickStart : UdonSharpBehaviour
 
 - Async transformation currently supports `await UdonTask.Delay`, `DelayFrames`, and `Yield`. Awaiting tasks that return values or `WhenAll/WhenAny` is not yet implemented.
 - `UdonTask<T>` exists, but awaited result assignment is not wired in the current transformer.
-- `[Sync]`, `[Rpc]`, and `[MergeStrategy]` are analysis helpers; they do not replace normal sync or network event calls.
-- `[SyncOnJoin]` and `LateJoinerSync` are scaffolding; serialization and application are placeholders.
-- `CEPersistence.Save` and `CEPersistence.Restore` are placeholders; use `ToData`/`FromData` or JSON helpers for now. Models are auto-registered from `[PlayerData]`/`[PersistKey]` at compile time.
+- `[Sync]` participates in UdonSharp's normal synced-variable pipeline by inheriting `UdonSyncedAttribute`. Do not combine `[Sync]` and `[UdonSynced]` on the same field.
+- `[SyncOnJoin]` and `LateJoinerSync` emit and use generated JSON glue for supported pure data graphs. Scene/object references, polymorphic data, and cyclic graphs require `[SyncSerializer]`; CE0032 warns when generated glue is omitted.
+- `CEPersistence.Save` and `CEPersistence.Restore` use VRChat PlayerData string storage through JSON. Models are auto-registered from `[PlayerData]`/`[PersistKey]` at compile time.
+- `DeltaEncode` is advisory only; use manual sync plus a custom payload for true delta-style updates.
 - Optimization attributes like `[CEInline]` and `[CENoOptimize]` are declared but not yet enforced (only `[CEPreserveAction]` is active).
 - `[CEComponent]` and `[CESystem]` are metadata only; CEWorld does not auto-register them yet.
 - `CELogger` calls are transformed to `Debug.Log` in Udon compilation; in-world console integration requires manual wiring.
@@ -65,7 +66,8 @@ using UdonSharp.CE.Net;
 
 public class Scoreboard : UdonSharpBehaviour
 {
-    [Sync] public int score; // No runtime sync without UdonSynced
+    [UdonSynced]
+    [Sync] public int score; // Invalid: choose one sync attribute
 }
 ```
 
@@ -77,7 +79,6 @@ using UdonSharp.CE.Net;
 
 public class Scoreboard : UdonSharpBehaviour
 {
-    [UdonSynced]
     [Sync(InterpolationMode.None)]
     public int score;
 }

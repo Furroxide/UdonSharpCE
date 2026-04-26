@@ -3,6 +3,8 @@ using System;
 using Microsoft.CodeAnalysis;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Linq;
+using System.Reflection;
 using UdonSharp.Compiler.Binder;
 
 namespace UdonSharp.Compiler.Symbols
@@ -59,31 +61,29 @@ namespace UdonSharp.Compiler.Symbols
 
         internal bool HasAttribute<T>() where T : Attribute
         {
-            if (SymbolAttributes.IsDefaultOrEmpty)
-            {
-                return false;
-            }
-            
-            foreach (Attribute symbolAttribute in SymbolAttributes)
-            {
-                if (symbolAttribute is T)
-                    return true;
-            }
-
-            return false;
+            return GetAttribute<T>() != null;
         }
 
         internal T GetAttribute<T>() where T : Attribute
         {
-            if (SymbolAttributes.IsDefaultOrEmpty)
+            if (!SymbolAttributes.IsDefaultOrEmpty)
             {
-                return null;
+                foreach (Attribute symbolAttribute in SymbolAttributes)
+                {
+                    if (symbolAttribute is T symbolT)
+                        return symbolT;
+                }
             }
-            
-            foreach (Attribute symbolAttribute in SymbolAttributes)
+
+            if (RoslynSymbol == null)
+                return null;
+
+            foreach (AttributeData attributeData in RoslynSymbol.GetAttributes())
             {
-                if (symbolAttribute is T symbolT)
-                    return symbolT;
+                if (!(TryCreateAttributeInstance(attributeData) is T symbolAttribute))
+                    continue;
+
+                return symbolAttribute;
             }
 
             return null;
@@ -131,6 +131,88 @@ namespace UdonSharp.Compiler.Symbols
 
         public abstract void Bind(BindContext context);
 
+        private static object ConvertAttributeValue(TypedConstant constant)
+        {
+            if (constant.IsNull)
+                return null;
+
+            if (constant.Kind == TypedConstantKind.Array)
+            {
+                if (!(constant.Type is IArrayTypeSymbol arrayTypeSymbol) ||
+                    !TypeSymbol.TryGetSystemType(arrayTypeSymbol.ElementType, out Type elementType))
+                {
+                    return constant.Values.Select(ConvertAttributeValue).ToArray();
+                }
+
+                Array values = Array.CreateInstance(elementType, constant.Values.Length);
+                for (int i = 0; i < constant.Values.Length; ++i)
+                {
+                    values.SetValue(ConvertAttributeValue(constant.Values[i]), i);
+                }
+
+                return values;
+            }
+
+            if (constant.Type != null &&
+                constant.Type.TypeKind == TypeKind.Enum &&
+                TypeSymbol.TryGetSystemType(constant.Type, out Type enumType))
+            {
+                return Enum.ToObject(enumType, constant.Value);
+            }
+
+            if (constant.Value is ITypeSymbol typeSymbol &&
+                TypeSymbol.TryGetSystemType(typeSymbol, out Type systemType))
+            {
+                return systemType;
+            }
+
+            return constant.Value;
+        }
+
+        private static Attribute TryCreateAttributeInstance(AttributeData attribute)
+        {
+            if (attribute.AttributeClass == null ||
+                !TypeSymbol.TryGetSystemType(attribute.AttributeClass, out Type attributeType) ||
+                !typeof(Attribute).IsAssignableFrom(attributeType))
+            {
+                return null;
+            }
+
+            object[] attributeArgs = new object[attribute.ConstructorArguments.Length];
+            for (int i = 0; i < attributeArgs.Length; ++i)
+            {
+                attributeArgs[i] = ConvertAttributeValue(attribute.ConstructorArguments[i]);
+            }
+
+            try
+            {
+                if (!(Activator.CreateInstance(attributeType, attributeArgs) is Attribute attributeInstance))
+                    return null;
+
+                const BindingFlags bindingFlags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                foreach (KeyValuePair<string, TypedConstant> namedArgument in attribute.NamedArguments)
+                {
+                    object namedValue = ConvertAttributeValue(namedArgument.Value);
+
+                    PropertyInfo property = attributeType.GetProperty(namedArgument.Key, bindingFlags);
+                    if (property?.CanWrite == true)
+                    {
+                        property.SetValue(attributeInstance, namedValue);
+                        continue;
+                    }
+
+                    FieldInfo field = attributeType.GetField(namedArgument.Key, bindingFlags);
+                    field?.SetValue(attributeInstance, namedValue);
+                }
+
+                return attributeInstance;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
         protected void SetupAttributes(BindContext context)
         {
             var attribData = RoslynSymbol.GetAttributes();
@@ -139,48 +221,10 @@ namespace UdonSharp.Compiler.Symbols
             for (int i = 0; i < attribData.Length; ++i)
             {
                 AttributeData attribute = attribData[i];
-                
-                // Skip marking attributes as referenced types by using the bind context
-                TypeSymbol type = context.CompileContext.GetTypeSymbol(attribute.AttributeClass, context);
 
-                if (!type.IsExtern)
-                    continue;
-
-                object[] attributeArgs = new object[attribute.ConstructorArguments.Length];
-
-                for (int j = 0; j < attributeArgs.Length; ++j)
-                {
-                    object attribValue;
-
-                    var constructorArg = attribute.ConstructorArguments[j];
-                    
-                    if (constructorArg.Type != null &&
-                        constructorArg.Type.TypeKind == TypeKind.Enum)
-                    {
-                        TypeSymbol typeSymbol = context.GetTypeSymbol(constructorArg.Type);
-                        attribValue = Enum.ToObject(typeSymbol.UdonType.SystemType, constructorArg.Value);
-                    }
-                    else if (constructorArg.Value is ITypeSymbol typeSymbol)
-                    {
-                        attribValue = context.GetTypeSymbol(typeSymbol).UdonType.SystemType;
-                    }
-                    else
-                    {
-                        attribValue = attribute.ConstructorArguments[j].Value;
-                    }
-
-                    attributeArgs[j] = attribValue;
-                }
-
-                try
-                {
-                    if (type.IsExtern)
-                        attributes.Add((Attribute)Activator.CreateInstance(type.UdonType.SystemType, attributeArgs));
-                }
-                catch (Exception)
-                {
-                    // ignored
-                }
+                Attribute attributeInstance = TryCreateAttributeInstance(attribute);
+                if (attributeInstance != null)
+                    attributes.Add(attributeInstance);
             }
 
             SetAttributes(attributes.ToImmutableArray());

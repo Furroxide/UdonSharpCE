@@ -106,6 +106,7 @@ namespace CEShowcase.Station5_Persistence
         // Persistence state
         private int _estimatedSize;
         private int _autoSaveCount;
+        private bool _playerDataReady;
         
         // Rarity colors
         private readonly Color COMMON_COLOR = new Color(0.8f, 0.8f, 0.8f);
@@ -128,9 +129,20 @@ namespace CEShowcase.Station5_Persistence
             EnsurePersistenceRegistration();
             InitializeInventory();
             InitializeUI();
-            LoadInventory();
+            UpdateDisplay();
             
             CELogger.Info("Inventory", "Treasure Hunt initialized - persistence is AUTOMATIC!");
+        }
+
+        public override void OnPlayerRestored(VRCPlayerApi player)
+        {
+            if (!Utilities.IsValid(player) || !player.isLocal)
+            {
+                return;
+            }
+
+            _playerDataReady = true;
+            LoadInventory();
         }
         
         void Update()
@@ -482,6 +494,12 @@ namespace CEShowcase.Station5_Persistence
         {
             if (!Utilities.IsValid(Networking.LocalPlayer))
             {
+                return;
+            }
+
+            if (!_playerDataReady)
+            {
+                CELogger.Debug("Inventory", "Skipping auto-save until local PlayerData is restored.");
                 return;
             }
 

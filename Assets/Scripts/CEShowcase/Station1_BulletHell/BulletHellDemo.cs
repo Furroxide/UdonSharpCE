@@ -100,6 +100,7 @@ namespace CEShowcase.Station1_BulletHell
             CELogger.Debug(LogTag, "=== BulletHellDemo Starting ===");
             LogConfiguration();
             ValidateConfiguration();
+            InitializeUI();
             
             InitializeECS();
             InitializePool();
@@ -259,6 +260,8 @@ namespace CEShowcase.Station1_BulletHell
             
             _createdThisFrame = 0;
             _destroyedThisFrame = 0;
+
+            SyncSpawnRateFromSlider();
             
             // Spawn new bullets
             SpawnBullets(dt);
@@ -289,6 +292,37 @@ namespace CEShowcase.Station1_BulletHell
             for (int i = 0; i < toSpawn; i++)
             {
                 SpawnBullet();
+            }
+        }
+
+        private void InitializeUI()
+        {
+            if (_spawnRateSlider == null) return;
+
+            _spawnRateSlider.minValue = 50f;
+            _spawnRateSlider.maxValue = 2000f;
+            _spawnRateSlider.wholeNumbers = false;
+            _spawnRateSlider.value = _spawnRate;
+        }
+
+        private void SyncSpawnRateFromSlider()
+        {
+            if (_spawnRateSlider == null) return;
+
+            float sliderValue = _spawnRateSlider.value;
+            if (Mathf.Abs(sliderValue - _spawnRate) > 0.01f)
+            {
+                _spawnRate = sliderValue;
+            }
+        }
+
+        private void SetSpawnRate(float value)
+        {
+            _spawnRate = Mathf.Clamp(value, 50f, 2000f);
+
+            if (_spawnRateSlider != null)
+            {
+                _spawnRateSlider.value = _spawnRate;
             }
         }
         
@@ -641,7 +675,7 @@ namespace CEShowcase.Station1_BulletHell
             if (_spawnRateSlider != null)
             {
                 float oldRate = _spawnRate;
-                _spawnRate = _spawnRateSlider.value;
+                SetSpawnRate(_spawnRateSlider.value);
                 CELogger.Debug(LogTag, $"Spawn rate changed via slider: {oldRate:F0} -> {_spawnRate:F0}/sec");
             }
         }
@@ -670,7 +704,7 @@ namespace CEShowcase.Station1_BulletHell
         public void IncreaseSpawnRate()
         {
             float oldRate = _spawnRate;
-            _spawnRate = Mathf.Min(_spawnRate + 100, 2000);
+            SetSpawnRate(_spawnRate + 100);
             
             if (_spawnRate >= 2000)
             {
@@ -685,7 +719,7 @@ namespace CEShowcase.Station1_BulletHell
         public void DecreaseSpawnRate()
         {
             float oldRate = _spawnRate;
-            _spawnRate = Mathf.Max(_spawnRate - 100, 50);
+            SetSpawnRate(_spawnRate - 100);
             
             if (_spawnRate <= 50)
             {
@@ -734,4 +768,3 @@ namespace CEShowcase.Station1_BulletHell
         #endregion
     }
 }
-

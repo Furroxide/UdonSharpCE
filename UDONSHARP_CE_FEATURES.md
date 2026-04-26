@@ -1,7 +1,7 @@
 # UdonSharp CE - Feature Reference
 
 Version: 1.1
-Last Updated: 2025-12-21
+Last Updated: 2026-04-26
 
 This document summarizes the implemented UdonSharp CE features and their current status. For step-by-step usage and code examples, see the Docusaurus docs:
 
@@ -31,8 +31,8 @@ This document summarizes the implemented UdonSharp CE features and their current
 | CE.Core | Implemented | CECallback is active; most optimization attributes are placeholders. |
 | CE.Async | Partial | Delay/Yield awaits work; result-awaiting is not wired. |
 | CE.Data | Implemented | CEList, CEDictionary, and manual data bridge converters. |
-| CE.Net | Partial | Analysis helpers and utilities; SyncOnJoin is placeholder. |
-| CE.Persistence | Partial | Conversion and validation work; Save/Restore are placeholders. |
+| CE.Net | Partial | `[Sync]` uses the upstream Udon synced-variable pipeline; `[SyncOnJoin]` emits late-join glue for supported data graphs. |
+| CE.Persistence | Partial | Conversion, validation, and PlayerData-backed Save/Restore are wired; quota introspection remains limited. |
 | CE.DevTools | Implemented | Runtime logging, console, profiler, and monitor utilities. |
 | CE.Perf | Implemented | ECS-lite world, pools, grids, LOD, batching. |
 | CE.Procgen | Implemented | Deterministic RNG, noise, dungeon, and WFC tools. |
@@ -91,9 +91,10 @@ Key APIs:
 
 Limitations:
 
-- Sync and Rpc are analysis helpers; they do not replace normal sync or network event calls.
-- Quantize and DeltaEncode are estimation hints only.
-- SyncOnJoin and LateJoinerSync contain placeholder serialization logic.
+- `[Sync]` inherits `UdonSyncedAttribute`, so it participates in UdonSharp's normal synced-variable pipeline. Do not apply both `[Sync]` and `[UdonSynced]` to the same field.
+- `Quantize` rounds float-compatible values before serialization. `DeltaEncode` / `DeltaEncodeHint` is advisory only; VRChat does not expose true delta sync for Udon fields.
+- `[SyncOnJoin]` emits JSON glue for primitives, enums, strings, supported Unity value structs, `DataDictionary`/`DataList`, arrays, `List<T>`, and Unity-serializable pure data models. Scene/object references and cyclic or polymorphic graphs require `[SyncSerializer]`; CE0032 warns when generated glue is omitted.
+- `[Rpc]` is still an analyzer/documentation helper; it does not send network events automatically.
 
 ## CE.Persistence
 
@@ -106,8 +107,10 @@ Key APIs:
 
 Limitations:
 
-- Save and Restore are placeholders for future PlayerData integration.
+- Save serializes registered model `DataDictionary` JSON into VRChat PlayerData with `PlayerData.SetString`; Restore reads it with `PlayerData.TryGetString`.
+- Restore can return `NotReady` before local PlayerData is available and `NoData` when no key has been stored yet.
 - Auto-registration supports primitives, strings, DataList/DataDictionary, and arrays of those types; unsupported fields require manual converters.
+- `GetRemainingQuota()` still returns the full quota because VRChat does not expose per-key usage.
 
 ## CE.DevTools
 
@@ -183,6 +186,7 @@ Analyzers (examples):
 - CE0010: Sync attribute validation.
 - CE0011: RPC signature validation.
 - CE0012: LocalOnly network misuse.
+- CE0032: SyncOnJoin field requires a custom serializer for generated late-join glue.
 - CE0020: Async method validation.
 - CE0030: PlayerData size estimation.
 

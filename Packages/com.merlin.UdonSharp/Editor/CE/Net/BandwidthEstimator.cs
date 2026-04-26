@@ -468,7 +468,7 @@ namespace UdonSharp.CE.Editor.Net
                     // Check named arguments
                     foreach (var namedArg in attr.NamedArguments)
                     {
-                        if (namedArg.Key == "DeltaEncode" && namedArg.Value.Value is bool value)
+                        if ((namedArg.Key == "DeltaEncode" || namedArg.Key == "DeltaEncodeHint") && namedArg.Value.Value is bool value)
                         {
                             return value;
                         }

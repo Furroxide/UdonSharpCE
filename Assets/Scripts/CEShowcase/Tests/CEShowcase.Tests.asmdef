@@ -2,16 +2,27 @@
     "name": "CEShowcase.Tests",
     "references": [
         "CEShowcase",
+        "CESyncRuntimeTests",
+        "UdonSharp.CE.Editor",
         "UdonSharp.Runtime",
-        "UdonSharp.CE.Runtime"
+        "UdonSharp.CE.Runtime",
+        "UdonSharp.Editor",
+        "VRC.Udon",
+        "VRC.Udon.Editor"
     ],
     "includePlatforms": [
         "Editor"
     ],
     "excludePlatforms": [],
     "allowUnsafeCode": false,
-    "overrideReferences": false,
-    "precompiledReferences": [],
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "Microsoft.CodeAnalysis.dll",
+        "Microsoft.CodeAnalysis.CSharp.dll",
+        "System.Collections.Immutable.dll",
+        "VRCSDKBase.dll",
+        "VRCSDK3.dll"
+    ],
     "autoReferenced": false,
     "defineConstraints": [],
     "versionDefines": [],

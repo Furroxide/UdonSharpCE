@@ -123,4 +123,12 @@ namespace UdonSharp.CE.Net
             DeserializeMethod = deserializeMethod;
         }
     }
+
+    /// <summary>
+    /// Marks compiler-emitted SyncOnJoin glue so repeat optimizer passes can detect it.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Field | AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
+    public sealed class SyncOnJoinGenerated : Attribute
+    {
+    }
 }

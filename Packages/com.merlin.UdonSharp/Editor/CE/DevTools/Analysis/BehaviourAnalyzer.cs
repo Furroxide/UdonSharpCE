@@ -117,7 +117,7 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
             {
                 result.HasQuantization = syncAttr.Quantize > 0;
                 result.QuantizeValue = syncAttr.Quantize;
-                result.HasDeltaEncoding = syncAttr.DeltaEncode;
+                result.HasDeltaEncoding = syncAttr.DeltaEncodeHint;
 
                 // Adjust effective size for optimizations
                 if (result.HasQuantization || result.HasDeltaEncoding)
@@ -141,49 +141,13 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
 
         private bool IsSyncedField(FieldInfo field)
         {
-            // Check for [UdonSynced] attribute
-            var attrs = field.GetCustomAttributes(true);
-            foreach (var attr in attrs)
-            {
-                string attrName = attr.GetType().Name;
-                if (attrName == "UdonSyncedAttribute" || attrName == "UdonSynced")
-                    return true;
-            }
-            return false;
+            return field.GetCustomAttribute<UdonSyncedAttribute>(true) != null;
         }
 
         private string GetSyncMode(Type behaviourType)
         {
-            var attrs = behaviourType.GetCustomAttributes(true);
-            foreach (var attr in attrs)
-            {
-                string attrName = attr.GetType().Name;
-                if (attrName == "UdonBehaviourSyncModeAttribute" || attrName == "UdonBehaviourSyncMode")
-                {
-                    // Try to get the sync mode value
-                    var modeProperty = attr.GetType().GetProperty("behaviourSyncMode");
-                    if (modeProperty != null)
-                    {
-                        var modeValue = modeProperty.GetValue(attr);
-                        if (modeValue != null)
-                        {
-                            return modeValue.ToString();
-                        }
-                    }
-
-                    // Fallback to field
-                    var modeField = attr.GetType().GetField("behaviourSyncMode");
-                    if (modeField != null)
-                    {
-                        var modeValue = modeField.GetValue(attr);
-                        if (modeValue != null)
-                        {
-                            return modeValue.ToString();
-                        }
-                    }
-                }
-            }
-            return "None";
+            var syncModeAttribute = behaviourType.GetCustomAttribute<UdonBehaviourSyncModeAttribute>(true);
+            return syncModeAttribute?.behaviourSyncMode.ToString() ?? "None";
         }
 
         private void AdjustSizeForOptimizations(FieldAnalysisResult result)
@@ -209,7 +173,7 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
             if (result.HasQuantization)
                 notes += $"Quantized ({result.QuantizeValue}); ";
             if (result.HasDeltaEncoding)
-                notes += "Delta encoded; ";
+                notes += "Delta-encode hint; ";
 
             result.Notes = notes.TrimEnd(' ', ';');
 
@@ -334,8 +298,8 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
                     result.Recommendations.Add(new Recommendation
                     {
                         Field = field.Field,
-                        Message = "Large array without delta encoding",
-                        Suggestion = "Use [Sync(DeltaEncode = true)] to only sync changed elements",
+                        Message = "Large array without a delta-sync strategy",
+                        Suggestion = "Use Manual sync and serialize only changed elements; [Sync(DeltaEncode = true)] is only an advisory hint.",
                         EstimatedSavings = (int)(field.Size.MaxBytes * FieldSizeCalculator.DEFAULT_DELTA_SAVINGS)
                     });
                 }

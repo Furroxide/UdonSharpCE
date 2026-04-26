@@ -80,7 +80,7 @@ namespace UdonSharp.CE.Editor.Analyzers
                 Location location = GetFieldLocation(field);
 
                 // Check: DeltaEncode on non-array types
-                if (syncAttr.DeltaEncode && !field.Type.IsArray)
+                if (syncAttr.DeltaEncodeHint && !field.Type.IsArray)
                 {
                     diagnostics.Add(AnalyzerDiagnostic.Warning(
                         location,

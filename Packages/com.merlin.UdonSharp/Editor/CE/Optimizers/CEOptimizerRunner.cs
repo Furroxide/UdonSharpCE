@@ -46,6 +46,8 @@ namespace UdonSharp.CE.Editor.Optimizers
                 new LambdaInliningOptimizer(), // Priority 2 - Inline supported lambdas before callback transforms
                 new ActionToCallbackTransformer(), // Priority 3 - Transform Action delegates to CECallback before other optimizations
                 new CELoggerTransformOptimizer(),  // Priority 5 - Transform CELogger calls before other optimizations
+                new SyncOnJoinGlueEmitter(), // Priority 10 - Emit late-join glue before later transforms
+                new QuantizePreSerializeEmitter(), // Priority 12 - Inject quantization before UdonSharp sees the final tree
 
                 // Priority 100-199: Standard optimizations
                 // Note: ConstantFoldingOptimizer (CEOPT001) retired - Binder's ConstantExpressionOptimizer handles this
@@ -139,6 +141,7 @@ namespace UdonSharp.CE.Editor.Optimizers
             (SyntaxTree tree, string filePath)[] syntaxTrees)
         {
             var result = new (SyntaxTree tree, string filePath)[syntaxTrees.Length];
+            Context.SetSemanticModelTrees(syntaxTrees.Select(item => item.tree));
 
             for (int i = 0; i < syntaxTrees.Length; i++)
             {

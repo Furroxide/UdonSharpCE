@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Text.RegularExpressions;
+using UdonSharp;
 
 namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
 {
@@ -76,28 +77,8 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
 
         private string GetSyncMode(Type type)
         {
-            var attrs = type.GetCustomAttributes(true);
-            foreach (var attr in attrs)
-            {
-                string attrName = attr.GetType().Name;
-                if (attrName == "UdonBehaviourSyncModeAttribute" || attrName == "UdonBehaviourSyncMode")
-                {
-                    var modeProperty = attr.GetType().GetProperty("behaviourSyncMode");
-                    if (modeProperty != null)
-                    {
-                        var value = modeProperty.GetValue(attr);
-                        return value?.ToString() ?? "None";
-                    }
-
-                    var modeField = attr.GetType().GetField("behaviourSyncMode");
-                    if (modeField != null)
-                    {
-                        var value = modeField.GetValue(attr);
-                        return value?.ToString() ?? "None";
-                    }
-                }
-            }
-            return "None";
+            var syncModeAttribute = type.GetCustomAttribute<UdonBehaviourSyncModeAttribute>(true);
+            return syncModeAttribute?.behaviourSyncMode.ToString() ?? "None";
         }
 
         private List<FieldInfo> GetSyncedFields(Type type)
@@ -107,16 +88,8 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
 
             foreach (var field in allFields)
             {
-                var attrs = field.GetCustomAttributes(true);
-                foreach (var attr in attrs)
-                {
-                    string attrName = attr.GetType().Name;
-                    if (attrName == "UdonSyncedAttribute" || attrName == "UdonSynced")
-                    {
-                        fields.Add(field);
-                        break;
-                    }
-                }
+                if (field.GetCustomAttribute<UdonSyncedAttribute>(true) != null)
+                    fields.Add(field);
             }
 
             return fields;

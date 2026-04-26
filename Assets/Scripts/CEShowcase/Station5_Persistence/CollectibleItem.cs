@@ -38,10 +38,12 @@ namespace CEShowcase.Station5_Persistence
         
         // Synced state
         [UdonSynced] private bool _isCollected;
+        [UdonSynced] private double _collectedServerTime;
         
         // Local state
         private Vector3 _startPosition;
         private bool _localCollected;
+        private bool _pendingLocalCollect;
         private float _respawnTimer;
         
         void Start()
@@ -58,17 +60,7 @@ namespace CEShowcase.Station5_Persistence
                 InteractionText = $"{_interactionText} {_itemName}";
             }
             
-            _localCollected = _isCollected;
-            
-            if (_visualObject != null)
-            {
-                _visualObject.SetActive(!_localCollected);
-            }
-
-            if (_canRespawn && _localCollected)
-            {
-                _respawnTimer = _respawnTime;
-            }
+            ApplySyncedState();
         }
         
         void Update()
@@ -85,10 +77,13 @@ namespace CEShowcase.Station5_Persistence
             }
             
             // Respawn timer
-            if (_localCollected && _canRespawn)
+            if (_localCollected && _canRespawn && Networking.IsOwner(gameObject))
             {
-                _respawnTimer -= Time.deltaTime;
-                if (_respawnTimer <= 0)
+                double elapsed = _collectedServerTime > 0d
+                    ? Networking.GetServerTimeInSeconds() - _collectedServerTime
+                    : 0d;
+                _respawnTimer = Mathf.Max(0f, _respawnTime - (float)elapsed);
+                if (elapsed >= _respawnTime)
                 {
                     Respawn(true);
                 }
@@ -100,28 +95,52 @@ namespace CEShowcase.Station5_Persistence
             if (_localCollected) return;
             if (!Utilities.IsValid(Networking.LocalPlayer)) return;
             
-            // Request ownership if needed for syncing
-            if (!Networking.IsOwner(gameObject))
+            if (Networking.IsOwner(gameObject))
             {
-                Networking.SetOwner(Networking.LocalPlayer, gameObject);
+                CollectAsOwner();
+                return;
             }
-            
-            // Collect the item
-            Collect();
-            
-            // Sync to others
+
+            _pendingLocalCollect = true;
+            Networking.SetOwner(Networking.LocalPlayer, gameObject);
+        }
+
+        public override void OnOwnershipTransferred(VRCPlayerApi newOwner)
+        {
+            if (!_pendingLocalCollect)
+            {
+                return;
+            }
+
+            if (!Utilities.IsValid(newOwner) || !newOwner.isLocal)
+            {
+                _pendingLocalCollect = false;
+                ApplySyncedState();
+                return;
+            }
+
+            CollectAsOwner();
+        }
+
+        private void CollectAsOwner()
+        {
+            if (_localCollected && _isCollected) return;
+
+            _pendingLocalCollect = false;
             _isCollected = true;
+            _collectedServerTime = Networking.GetServerTimeInSeconds();
+            Collect(true);
             RequestSerialization();
         }
         
-        private void Collect()
+        private void Collect(bool reportToInventory)
         {
             if (_localCollected) return;
             
             _localCollected = true;
             
             // Report to inventory system
-            if (_inventorySystem != null)
+            if (reportToInventory && _inventorySystem != null)
             {
                 _inventorySystem.OnItemCollected(_itemId);
             }
@@ -156,6 +175,9 @@ namespace CEShowcase.Station5_Persistence
         {
             _localCollected = false;
             _isCollected = false;
+            _pendingLocalCollect = false;
+            _collectedServerTime = 0d;
+            _respawnTimer = 0f;
             
             if (_visualObject != null)
             {
@@ -174,26 +196,38 @@ namespace CEShowcase.Station5_Persistence
         
         public override void OnDeserialization()
         {
-            // Sync state from network
-            if (_isCollected && !_localCollected)
+            ApplySyncedState();
+        }
+
+        private void ApplySyncedState()
+        {
+            if (_isCollected)
             {
-                // Someone else collected this
-                _localCollected = true;
-                
-                if (_visualObject != null)
+                if (!_localCollected)
                 {
-                    _visualObject.SetActive(false);
+                    Collect(false);
                 }
-                
+
                 if (_canRespawn)
                 {
-                    _respawnTimer = _respawnTime;
+                    double elapsed = _collectedServerTime > 0d
+                        ? Networking.GetServerTimeInSeconds() - _collectedServerTime
+                        : 0d;
+                    _respawnTimer = Mathf.Max(0f, _respawnTime - (float)elapsed);
                 }
+
+                return;
             }
-            else if (!_isCollected && _localCollected)
+
+            if (_localCollected)
             {
-                // Item was respawned
                 Respawn(false);
+                return;
+            }
+
+            if (_visualObject != null)
+            {
+                _visualObject.SetActive(true);
             }
         }
         

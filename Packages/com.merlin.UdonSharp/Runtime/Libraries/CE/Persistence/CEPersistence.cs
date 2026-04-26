@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using JetBrains.Annotations;
 using UnityEngine;
 using VRC.SDK3.Data;
+using VRC.SDK3.Persistence;
 using VRC.SDKBase;
 
 namespace UdonSharp.CE.Persistence
@@ -282,9 +283,13 @@ namespace UdonSharp.CE.Persistence
                     return FinalizeSave<T>(SaveResult.NotAllowed);
                 }
 
-                // Note: VRChat's actual PlayerData API will be used here
-                // For now, this serves as a placeholder that shows the intended flow
-                // The actual implementation depends on VRChat SDK version
+                if (!VRCJson.TrySerializeToJson(data, JsonExportType.Minify, out DataToken jsonToken))
+                {
+                    Debug.LogError($"[CE.Persistence] Save<{GetTypeName<T>()}>: JSON serialization failed");
+                    return FinalizeSave<T>(SaveResult.ValidationFailed);
+                }
+
+                PlayerData.SetString(key, jsonToken.String);
                 Debug.Log($"[CE.Persistence] Saved {GetTypeName<T>()} to key '{key}' ({estimatedSize} bytes)");
                 return FinalizeSave<T>(SaveResult.Success);
             }
@@ -298,9 +303,13 @@ namespace UdonSharp.CE.Persistence
                     return FinalizeSave<T>(SaveResult.NotAllowed);
                 }
 
-                // Note: VRChat's actual PlayerData API will be used here
-                // For now, this serves as a placeholder that shows the intended flow
-                // The actual implementation depends on VRChat SDK version
+                if (!VRCJson.TrySerializeToJson(data, JsonExportType.Minify, out DataToken jsonToken))
+                {
+                    Debug.LogError($"[CE.Persistence] Save<{GetTypeName<T>()}>: JSON serialization failed");
+                    return FinalizeSave<T>(SaveResult.ValidationFailed);
+                }
+
+                PlayerData.SetString(key, jsonToken.String);
                 Debug.Log($"[CE.Persistence] Saved {GetTypeName<T>()} to key '{key}' ({estimatedSize} bytes)");
                 return FinalizeSave<T>(SaveResult.Success);
             }
@@ -429,13 +438,15 @@ namespace UdonSharp.CE.Persistence
                     return FinalizeRestore<T>(RestoreResult.NotReady);
                 }
 
-                // Note: VRChat's actual PlayerData API will be used here
-                // This is a placeholder showing the intended flow
-                // The actual implementation depends on VRChat SDK version
+                string json;
+                if (!PlayerData.TryGetString(localPlayer, key, out json))
+                {
+                    Debug.Log($"[CE.Persistence] Restore<{GetTypeName<T>()}>: no existing data for key '{key}'");
+                    return FinalizeRestore<T>(RestoreResult.NoData);
+                }
 
-                // For demonstration, return NoData
-                Debug.Log($"[CE.Persistence] Restore<{GetTypeName<T>()}>: no existing data for key '{key}'");
-                return FinalizeRestore<T>(RestoreResult.NoData);
+                RestoreResult result = FromJson(json, out model);
+                return FinalizeRestore<T>(result);
             }
 #else
             try
@@ -447,13 +458,15 @@ namespace UdonSharp.CE.Persistence
                     return FinalizeRestore<T>(RestoreResult.NotReady);
                 }
 
-                // Note: VRChat's actual PlayerData API will be used here
-                // This is a placeholder showing the intended flow
-                // The actual implementation depends on VRChat SDK version
+                string json;
+                if (!PlayerData.TryGetString(localPlayer, key, out json))
+                {
+                    Debug.Log($"[CE.Persistence] Restore<{GetTypeName<T>()}>: no existing data for key '{key}'");
+                    return FinalizeRestore<T>(RestoreResult.NoData);
+                }
 
-                // For demonstration, return NoData
-                Debug.Log($"[CE.Persistence] Restore<{GetTypeName<T>()}>: no existing data for key '{key}'");
-                return FinalizeRestore<T>(RestoreResult.NoData);
+                RestoreResult result = FromJson(json, out model);
+                return FinalizeRestore<T>(result);
             }
             catch (Exception e)
             {

@@ -1,7 +1,9 @@
 ﻿
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using UdonSharp.Compiler;
+using UnityEditor;
 using UnityEngine;
 using VRC.Udon;
 using VRC.Udon.Common;
@@ -104,6 +106,7 @@ namespace UdonSharp.Serialization
 
         private UdonBehaviour udonBehaviour;
         private static Dictionary<UdonSharpProgramAsset, Dictionary<string, Type>> _variableTypeLookup = new Dictionary<UdonSharpProgramAsset, Dictionary<string, Type>>();
+        private static readonly object _variableTypeLookupLock = new object();
 
         /// <summary>
         /// Clears the cached variable type lookups. Should be called when scripts are recompiled
@@ -111,28 +114,39 @@ namespace UdonSharp.Serialization
         /// </summary>
         internal static void ClearCache()
         {
-            _variableTypeLookup.Clear();
+            lock (_variableTypeLookupLock)
+            {
+                _variableTypeLookup.Clear();
+            }
         }
 
         private Type GetElementType(string elementKey)
         {
             UdonSharpProgramAsset programAsset = (UdonSharpProgramAsset)udonBehaviour.programSource;
-
-            if (!_variableTypeLookup.TryGetValue(programAsset, out var programTypeLookup))
-            {
-                programTypeLookup = new Dictionary<string, Type>();
-                foreach (FieldDefinition def in programAsset.fieldDefinitions.Values)
-                {
-                    // if (def.fieldSymbol.declarationType.HasFlag(SymbolDeclTypeFlags.Public) || def.fieldSymbol.declarationType.HasFlag(SymbolDeclTypeFlags.Private))
-                        programTypeLookup.Add(def.Name, def.SystemType);
-                }
-                _variableTypeLookup.Add(programAsset, programTypeLookup);
-            }
-
-            if (!programTypeLookup.TryGetValue(elementKey, out var fieldType))
+            if (programAsset == null)
                 return null;
 
-            return fieldType;
+            lock (_variableTypeLookupLock)
+            {
+                if (!_variableTypeLookup.TryGetValue(programAsset, out Dictionary<string, Type> programTypeLookup))
+                {
+                    // Build and publish under the same lock so ClearCache() cannot re-open the
+                    // entry window and allow stale field definitions back into the cache.
+                    FieldDefinition[] fieldDefinitions = programAsset.fieldDefinitions?.Values.ToArray() ?? Array.Empty<FieldDefinition>();
+                    programTypeLookup = new Dictionary<string, Type>(fieldDefinitions.Length);
+                    foreach (FieldDefinition def in fieldDefinitions)
+                    {
+                        programTypeLookup[def.Name] = def.SystemType;
+                    }
+
+                    _variableTypeLookup[programAsset] = programTypeLookup;
+                }
+
+                if (!programTypeLookup.TryGetValue(elementKey, out Type fieldType))
+                    return null;
+
+                return fieldType;
+            }
         }
 
         public UdonVariableStorageInterface(UdonBehaviour udonBehaviour)
@@ -172,6 +186,17 @@ namespace UdonSharp.Serialization
         {
             udonBehaviour.publicVariables.TrySetVariableValue<T>(elementKey, value);
         }
-        
+
+        [InitializeOnLoadMethod]
+        private static void CheckCacheStateAfterDomainReload()
+        {
+            lock (_variableTypeLookupLock)
+            {
+                if (_variableTypeLookup.Count > 0)
+                {
+                    Debug.LogWarning($"[UdonSharp] {nameof(UdonVariableStorageInterface)} cache survived domain reload with {_variableTypeLookup.Count} entries.");
+                }
+            }
+        }
     }
 }

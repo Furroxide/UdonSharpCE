@@ -64,13 +64,13 @@ If you need custom conversion (complex types, nested models, etc.), register a c
 | --- | --- |
 | `Register<T>(toData, fromData, key, version, validate)` | Register a data model and converters (optional; only for custom converters). |
 | `IsRegistered<T>()` | Check if a model is registered. |
-| `Save<T>(T model)` | Save a model (placeholder flow; see limitations). |
-| `Restore<T>(out T model)` | Restore a model (placeholder flow; see limitations). |
+| `Save<T>(T model)` | Save a registered model to the local player's VRChat PlayerData as JSON. |
+| `Restore<T>(out T model)` | Restore a registered model from the local player's VRChat PlayerData JSON. |
 | `ToData<T>(T model)` / `FromData<T>(DataDictionary, out T)` | Convert to and from DataDictionary. |
 | `ToJson<T>(T model, bool beautify)` / `FromJson<T>(string, out T)` | Convert to and from JSON. |
 | `Validate<T>(T model, out List<ValidationError>)` | Validate a model against constraints. |
 | `EstimateSize<T>(T model)` | Estimate serialized size in bytes. |
-| `GetRemainingQuota()` | Placeholder; returns full quota for now. |
+| `GetRemainingQuota()` | Returns the full quota; VRChat does not expose exact remaining PlayerData usage. |
 
 ### PersistenceLifecycle
 
@@ -96,10 +96,12 @@ Callbacks are invoked by name. Implement `_CE_OnDataRestored`, `_CE_OnDataSaved`
 
 ## Current Limitations
 
-- `Save` and `Restore` are placeholders for future PlayerData integration.
+- `Save` writes model JSON with `PlayerData.SetString`; `Restore` reads it with `PlayerData.TryGetString`.
+- `Restore` returns `NotReady` until local PlayerData is available and `NoData` when the key does not exist.
 - Auto-registration runs during Udon compilation and supports primitives, strings, DataList/DataDictionary, and arrays of those types.
 - Unsupported field types require manual converters via `Register<T>`.
 - JSON numbers deserialize as doubles; cast carefully in custom converters.
+- Exact remaining quota cannot be queried, so `GetRemainingQuota()` returns the full configured quota.
 
 ## Common Pitfalls
 

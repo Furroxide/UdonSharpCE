@@ -12,7 +12,6 @@ using UnityEngine;
 [UdonBehaviourSyncMode(BehaviourSyncMode.Manual)]
 public class ScoreBoard : UdonSharpBehaviour
 {
-    [UdonSynced]
     [Sync(InterpolationMode.None, Priority = 0.8f)]
     public int score;
 
@@ -37,8 +36,9 @@ public class ScoreBoard : UdonSharpBehaviour
 
 ## Key Concepts
 
-- `[Sync]` is an analysis helper. Use `[UdonSynced]` for actual sync.
+- `[Sync]` inherits `UdonSyncedAttribute`, so it uses UdonSharp's upstream synced-variable pipeline. Do not put both `[Sync]` and `[UdonSynced]` on one field.
 - `[Rpc]` documents intent and drives analyzer warnings. You still invoke network events normally.
+- `[SyncOnJoin]` emits JSON glue for supported pure data graphs and is transported by `LateJoinerSync`.
 - `RateLimiter` is a runtime helper; call `TryCall()` to enforce limits.
 - `MergeStrategy` and `ConflictResolver` are manual utilities for resolving conflicting sync state.
 
@@ -48,9 +48,9 @@ public class ScoreBoard : UdonSharpBehaviour
 
 | Attribute | Description |
 | --- | --- |
-| `Sync` | Adds interpolation, quantization, and delta hints for analyzers. |
-| `SyncOnJoin` | Marks fields for late-join sync (scaffolding only). |
-| `SyncSerializer` | Specifies custom serialization for `SyncOnJoin` fields. |
+| `Sync` | Marks a Udon synced field and adds interpolation, quantization, priority, and advisory delta metadata. |
+| `SyncOnJoin` | Marks fields for generated late-join state sync. |
+| `SyncSerializer` | Specifies custom serialization for `SyncOnJoin` fields that cannot use generated glue. |
 
 ### RPC Attributes
 
@@ -79,11 +79,12 @@ public class ScoreBoard : UdonSharpBehaviour
 
 ## Current Limitations
 
-- `[Sync]` does not replace `[UdonSynced]`; it only informs analyzers.
-- `Quantize` and `DeltaEncode` are hints used for analysis and estimation only.
+- Applying both `[Sync]` and `[UdonSynced]` to the same field is invalid; use one or the other.
+- `Quantize` rounds float-compatible values before sync. `DeltaEncode` / `DeltaEncodeHint` is advisory only; VRChat does not expose true delta sync for Udon fields.
+- `[SyncOnJoin]` generated glue supports primitives, enums, strings, supported Unity value structs, `DataDictionary`/`DataList`, one-dimensional arrays, `List<T>`, and Unity-serializable pure data models.
+- Scene/object references, delegates, polymorphic fields, dictionaries other than `DataDictionary`, jagged/multidimensional arrays, and recursive graphs need `[SyncSerializer]`. CE0032 warns when a root field is omitted from generated glue.
 - `[Rpc]` does not send network events automatically; it only validates signatures.
 - `MergeStrategyAttribute` does not auto-resolve conflicts; call `ConflictResolver` yourself.
-- `SyncOnJoin` and `LateJoinerSync` are placeholders; serialization and application are not implemented.
 
 ## Common Pitfalls
 
@@ -94,7 +95,8 @@ using UdonSharp.CE.Net;
 
 public class BadSync : UdonSharpBehaviour
 {
-    [Sync] public int value; // Not synced at runtime
+    [UdonSynced]
+    [Sync] public int value; // Invalid: duplicate synced attributes
 }
 ```
 
@@ -106,7 +108,6 @@ using UdonSharp.CE.Net;
 
 public class GoodSync : UdonSharpBehaviour
 {
-    [UdonSynced]
     [Sync(InterpolationMode.None)]
     public int value;
 }

@@ -4,8 +4,9 @@ using JetBrains.Annotations;
 namespace UdonSharp.CE.Net
 {
     /// <summary>
-    /// Enhanced synchronization attribute with interpolation, quantization, and delta encoding options.
-    /// This is a CE wrapper around [UdonSynced] that adds compile-time validation and additional features.
+    /// Enhanced synchronization attribute with interpolation, quantization, and advisory bandwidth hints.
+    /// This inherits from <see cref="UdonSyncedAttribute"/> so the upstream sync pipeline treats
+    /// <c>[Sync]</c> exactly like <c>[UdonSynced]</c>.
     /// </summary>
     /// <example>
     /// <code>
@@ -30,35 +31,51 @@ namespace UdonSharp.CE.Net
     [AttributeUsage(AttributeTargets.Field)]
     public class SyncAttribute : UdonSyncedAttribute
     {
+        private InterpolationMode _interpolation;
+
         /// <summary>
         /// Interpolation mode for this variable.
         /// Determines how values are smoothed between sync updates.
         /// </summary>
-        public InterpolationMode Interpolation { get; set; }
+        public InterpolationMode Interpolation
+        {
+            get => _interpolation;
+            set
+            {
+                _interpolation = value;
+                NetworkSyncType = GetSyncMode(value);
+            }
+        }
 
         /// <summary>
-        /// Enable delta encoding for arrays.
-        /// When true, only changed elements are considered for bandwidth estimation.
-        /// Note: This is a hint for analyzers; actual sync still sends full arrays.
+        /// Advisory hint used by analyzers and bandwidth estimation.
+        /// VRChat does not provide true delta-sync support for Udon synced fields.
         /// </summary>
         /// <remarks>
-        /// Delta encoding is most effective for sparse updates where only a few
-        /// elements change between syncs. For frequently changing arrays,
-        /// consider using Manual sync mode and batching updates.
+        /// For real delta-style behaviour, use manual sync with <c>RequestSerialization()</c>
+        /// and a custom serializer that transmits only the changed payload.
         /// </remarks>
-        public bool DeltaEncode { get; set; } = false;
+        public bool DeltaEncodeHint { get; set; } = false;
 
         /// <summary>
-        /// Quantization precision for float types.
-        /// Values are conceptually rounded to the nearest multiple of this value.
+        /// Backwards-compatible alias for <see cref="DeltaEncodeHint"/>.
+        /// </summary>
+        [Obsolete("DeltaEncode is a bandwidth-estimator hint only; VRChat does not support true delta sync. Use Manual sync + a custom serializer for real delta encoding.", false)]
+        public bool DeltaEncode
+        {
+            get => DeltaEncodeHint;
+            set => DeltaEncodeHint = value;
+        }
+
+        /// <summary>
+        /// Quantization precision for float-compatible types.
+        /// Values are rounded to the nearest multiple of this value during <c>OnPreSerialization</c>.
         /// Set to 0 for no quantization (default).
         /// </summary>
         /// <remarks>
-        /// Quantization hints help analyzers estimate bandwidth savings.
-        /// For example, Quantize = 0.01f on a Vector3 suggests ~50% bandwidth reduction.
-        ///
-        /// Note: VRChat doesn't support true quantization at the network level.
-        /// This is primarily for documentation and analyzer hints.
+        /// Quantization reduces effective precision before sync.
+        /// VRChat still transmits its normal synced field payload, but repeated values
+        /// become more compressible and less noisy.
         /// </remarks>
         public float Quantize { get; set; } = 0f;
 

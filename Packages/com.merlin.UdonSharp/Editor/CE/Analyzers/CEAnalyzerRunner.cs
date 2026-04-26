@@ -37,6 +37,8 @@ namespace UdonSharp.CE.Editor.Analyzers
 
             // Phase 3: CE.Net analyzers
             new SyncFieldAnalyzer(),
+            new DeltaEncodeAdvisoryAnalyzer(),
+            new SyncOnJoinSupportAnalyzer(),
             new RpcMethodAnalyzer(),
             new LocalOnlyAnalyzer(),
 

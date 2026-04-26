@@ -32,7 +32,7 @@ namespace UdonSharp
     [AttributeUsage(AttributeTargets.Field)]
     public class UdonSyncedAttribute : Attribute
     {
-        public UdonSyncMode NetworkSyncType { get; }
+        public UdonSyncMode NetworkSyncType { get; protected set; }
 
         public UdonSyncedAttribute(UdonSyncMode networkSyncTypeIn = UdonSyncMode.None)
         {

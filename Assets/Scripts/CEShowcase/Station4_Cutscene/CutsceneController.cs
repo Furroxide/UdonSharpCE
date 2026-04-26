@@ -65,6 +65,8 @@ namespace CEShowcase.Station4_Cutscene
         
         void Start()
         {
+            AutoWireMissingReferences();
+
             // Store initial positions
             if (_curtainLeft != null) _curtainLeftStart = _curtainLeft.localPosition;
             if (_curtainRight != null) _curtainRightStart = _curtainRight.localPosition;
@@ -322,6 +324,150 @@ namespace CEShowcase.Station4_Cutscene
         private float SmoothStep(float t)
         {
             return t * t * (3f - 2f * t);
+        }
+
+        private void AutoWireMissingReferences()
+        {
+            Transform searchRoot = transform.parent != null ? transform.parent : transform;
+
+            if (_fadeCanvasGroup == null) _fadeCanvasGroup = FindCanvasGroupByName(searchRoot, "Fade");
+            if (_titleText == null) _titleText = FindTextByName(searchRoot, "Title");
+            if (_titleCanvasGroup == null) _titleCanvasGroup = FindCanvasGroupByName(searchRoot, "Title");
+            if (_statusText == null) _statusText = FindTextByName(searchRoot, "Status");
+            if (_playButton == null) _playButton = FindGameObjectByName(searchRoot, "PlayButton");
+            if (_spotlight == null) _spotlight = FindLightByName(searchRoot, "Spotlight");
+            if (_effects == null) _effects = FindTheaterEffects(searchRoot);
+            if (_musicSource == null) _musicSource = FindAudioSourceByName(searchRoot, "Music");
+            if (_sfxSource == null) _sfxSource = FindAudioSourceByName(searchRoot, "SFX");
+            if (_cameraRig == null) _cameraRig = FindTransformByName(searchRoot, "CameraRig");
+            if (_cameraRig == null) _cameraRig = FindTransformByName(searchRoot, "ReferenceCamera");
+
+            if (_stageElements == null || _stageElements.Length == 0)
+            {
+                GameObject stage = FindGameObjectByName(searchRoot, "Stage");
+                if (stage != null && stage != gameObject)
+                {
+                    _stageElements = new GameObject[] { stage };
+                }
+            }
+        }
+
+        private bool NameContains(Transform candidate, string namePart)
+        {
+            if (candidate == null || string.IsNullOrEmpty(namePart) || string.IsNullOrEmpty(candidate.name)) return false;
+            return candidate.name.Contains(namePart);
+        }
+
+        private Transform FindTransformByName(Transform root, string namePart)
+        {
+            if (root == null) return null;
+            if (NameContains(root, namePart)) return root;
+
+            for (int i = 0; i < root.childCount; i++)
+            {
+                Transform found = FindTransformByName(root.GetChild(i), namePart);
+                if (found != null) return found;
+            }
+
+            return null;
+        }
+
+        private GameObject FindGameObjectByName(Transform root, string namePart)
+        {
+            Transform found = FindTransformByName(root, namePart);
+            return found != null ? found.gameObject : null;
+        }
+
+        private CanvasGroup FindCanvasGroupByName(Transform root, string namePart)
+        {
+            if (root == null) return null;
+
+            if (NameContains(root, namePart))
+            {
+                CanvasGroup component = root.GetComponent<CanvasGroup>();
+                if (component != null) return component;
+            }
+
+            for (int i = 0; i < root.childCount; i++)
+            {
+                CanvasGroup found = FindCanvasGroupByName(root.GetChild(i), namePart);
+                if (found != null) return found;
+            }
+
+            return null;
+        }
+
+        private TMPro.TextMeshProUGUI FindTextByName(Transform root, string namePart)
+        {
+            if (root == null) return null;
+
+            if (NameContains(root, namePart))
+            {
+                TMPro.TextMeshProUGUI component = root.GetComponent<TMPro.TextMeshProUGUI>();
+                if (component != null) return component;
+            }
+
+            for (int i = 0; i < root.childCount; i++)
+            {
+                TMPro.TextMeshProUGUI found = FindTextByName(root.GetChild(i), namePart);
+                if (found != null) return found;
+            }
+
+            return null;
+        }
+
+        private Light FindLightByName(Transform root, string namePart)
+        {
+            if (root == null) return null;
+
+            if (NameContains(root, namePart))
+            {
+                Light component = root.GetComponent<Light>();
+                if (component != null) return component;
+            }
+
+            for (int i = 0; i < root.childCount; i++)
+            {
+                Light found = FindLightByName(root.GetChild(i), namePart);
+                if (found != null) return found;
+            }
+
+            return null;
+        }
+
+        private AudioSource FindAudioSourceByName(Transform root, string namePart)
+        {
+            if (root == null) return null;
+
+            if (NameContains(root, namePart))
+            {
+                AudioSource component = root.GetComponent<AudioSource>();
+                if (component != null) return component;
+            }
+
+            for (int i = 0; i < root.childCount; i++)
+            {
+                AudioSource found = FindAudioSourceByName(root.GetChild(i), namePart);
+                if (found != null) return found;
+            }
+
+            return null;
+        }
+
+        private TheaterEffects FindTheaterEffects(Transform root)
+        {
+            if (root == null) return null;
+
+            TheaterEffects component = root.GetComponent<TheaterEffects>();
+            if (component != null) return component;
+
+            for (int i = 0; i < root.childCount; i++)
+            {
+                TheaterEffects found = FindTheaterEffects(root.GetChild(i));
+                if (found != null) return found;
+            }
+
+            return null;
         }
         
         private void SetStageElementsActive(bool active)

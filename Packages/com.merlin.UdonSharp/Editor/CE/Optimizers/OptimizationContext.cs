@@ -1,5 +1,8 @@
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 
 namespace UdonSharp.CE.Editor.Optimizers
 {
@@ -30,6 +33,12 @@ namespace UdonSharp.CE.Editor.Optimizers
         /// </summary>
         internal Dictionary<string, StringLiteralInfo> InternedStrings { get; } = new Dictionary<string, StringLiteralInfo>();
 
+        private readonly Dictionary<SyntaxTree, SemanticModel> _semanticModelLookup = new Dictionary<SyntaxTree, SemanticModel>();
+        private SyntaxTree[] _semanticModelTrees;
+        private CSharpCompilation _semanticModelCompilation;
+        private static readonly Lazy<MetadataReference[]> _optimizerMetadataReferences =
+            new Lazy<MetadataReference[]>(BuildOptimizerMetadataReferences);
+
         /// <summary>
         /// Records an optimization that was applied.
         /// </summary>
@@ -54,6 +63,46 @@ namespace UdonSharp.CE.Editor.Optimizers
                 OriginalCode = originalCode,
                 OptimizedCode = optimizedCode
             });
+        }
+
+        /// <summary>
+        /// Gets or creates a semantic model for an optimizer input tree.
+        /// This is used by syntax rewriters that need alias-resolved type information.
+        /// </summary>
+        public SemanticModel GetSemanticModel(SyntaxTree tree)
+        {
+            if (tree == null)
+                return null;
+
+            if (_semanticModelLookup.TryGetValue(tree, out SemanticModel cachedModel))
+                return cachedModel;
+
+            CSharpCompilation compilation = _semanticModelCompilation ?? CSharpCompilation.Create(
+                $"UdonSharpCEOptimizerSemantic_{_semanticModelLookup.Count}",
+                _semanticModelTrees ?? new[] { tree },
+                _optimizerMetadataReferences.Value,
+                new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+
+            SemanticModel model = compilation.GetSemanticModel(tree, ignoreAccessibility: true);
+            _semanticModelLookup[tree] = model;
+            return model;
+        }
+
+        /// <summary>
+        /// Sets the syntax trees visible to semantic models created during an optimizer pass.
+        /// This lets cross-file user types resolve while individual optimizers still receive one tree at a time.
+        /// </summary>
+        public void SetSemanticModelTrees(IEnumerable<SyntaxTree> trees)
+        {
+            _semanticModelLookup.Clear();
+            _semanticModelTrees = trees?.Where(tree => tree != null).ToArray();
+            _semanticModelCompilation = _semanticModelTrees == null || _semanticModelTrees.Length == 0
+                ? null
+                : CSharpCompilation.Create(
+                    $"UdonSharpCEOptimizerSemantic_{Guid.NewGuid():N}",
+                    _semanticModelTrees,
+                    _optimizerMetadataReferences.Value,
+                    new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
         }
 
         /// <summary>
@@ -101,6 +150,31 @@ namespace UdonSharp.CE.Editor.Optimizers
         {
             _entries.Clear();
             InternedStrings.Clear();
+            _semanticModelLookup.Clear();
+            _semanticModelTrees = null;
+            _semanticModelCompilation = null;
+        }
+
+        private static MetadataReference[] BuildOptimizerMetadataReferences()
+        {
+            var references = new List<MetadataReference>();
+            foreach (string assemblyPath in AppDomain.CurrentDomain.GetAssemblies()
+                         .Where(assembly => !assembly.IsDynamic && !string.IsNullOrEmpty(assembly.Location))
+                         .Select(assembly => assembly.Location)
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    references.Add(MetadataReference.CreateFromFile(assemblyPath));
+                }
+                catch
+                {
+                    // Ignore transient or inaccessible editor assemblies; alias resolution only
+                    // needs the references that can be loaded successfully.
+                }
+            }
+
+            return references.ToArray();
         }
     }
 

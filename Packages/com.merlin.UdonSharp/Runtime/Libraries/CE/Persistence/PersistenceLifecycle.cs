@@ -49,23 +49,43 @@ namespace UdonSharp.CE.Persistence
         /// <summary>
         /// The persistence key of the data model where corruption was detected.
         /// </summary>
-        public string ModelKey { get; }
+        public string ModelKey
+#if COMPILER_UDONSHARP
+        ;
+#else
+        { get; }
+#endif
 
         /// <summary>
         /// The specific field name where corruption was found, if applicable.
         /// May be null if the entire data structure is corrupted.
         /// </summary>
-        public string FieldName { get; }
+        public string FieldName
+#if COMPILER_UDONSHARP
+        ;
+#else
+        { get; }
+#endif
 
         /// <summary>
         /// The type of corruption that was detected.
         /// </summary>
-        public CorruptionType Type { get; }
+        public CorruptionType Type
+#if COMPILER_UDONSHARP
+        ;
+#else
+        { get; }
+#endif
 
         /// <summary>
         /// A human-readable description of the corruption issue.
         /// </summary>
-        public string Details { get; }
+        public string Details
+#if COMPILER_UDONSHARP
+        ;
+#else
+        { get; }
+#endif
 
         /// <summary>
         /// Creates a new CorruptionInfo instance.

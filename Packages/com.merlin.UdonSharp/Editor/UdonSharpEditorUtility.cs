@@ -189,7 +189,7 @@ namespace UdonSharpEditor
         
         private static void InitTypeLookups()
         {
-            if (_programAssetLookup != null) 
+            if (_programAssetLookup != null && _programAssetTypeLookup != null) 
                 return;
             
             _programAssetLookup = new Dictionary<MonoScript, UdonSharpProgramAsset>();
@@ -206,6 +206,18 @@ namespace UdonSharpEditor
                         _programAssetTypeLookup.Add(programAsset.GetClass(), programAsset);
                 }
             }
+        }
+
+        private static void EnsureProgramAssetLookupCaches()
+        {
+            if (_programAssetLookup == null || _programAssetTypeLookup == null)
+                InitTypeLookups();
+
+            if (_programAssetLookup == null)
+                _programAssetLookup = new Dictionary<MonoScript, UdonSharpProgramAsset>();
+
+            if (_programAssetTypeLookup == null)
+                _programAssetTypeLookup = new Dictionary<Type, UdonSharpProgramAsset>();
         }
 
         internal static void ResetCaches()
@@ -257,9 +269,15 @@ namespace UdonSharpEditor
             // Create the program asset path next to the script
             string assetPath = System.IO.Path.ChangeExtension(scriptPath, ".asset");
             
-            // Check if an asset already exists at this path
-            if (UnityEditor.AssetDatabase.LoadAssetAtPath<UdonSharpProgramAsset>(assetPath) != null)
-                return null;
+            // If a sidecar asset already exists, reuse it and refresh the lookup caches.
+            UdonSharpProgramAsset existingProgramAsset = UnityEditor.AssetDatabase.LoadAssetAtPath<UdonSharpProgramAsset>(assetPath);
+            if (existingProgramAsset != null)
+            {
+                EnsureProgramAssetLookupCaches();
+                _programAssetLookup[script] = existingProgramAsset;
+                _programAssetTypeLookup[scriptClass] = existingProgramAsset;
+                return existingProgramAsset;
+            }
             
             UdonSharpUtils.Log($"Auto-creating program asset for {scriptPath}");
             
@@ -268,11 +286,13 @@ namespace UdonSharpEditor
             
             UnityEditor.AssetDatabase.CreateAsset(newProgramAsset, assetPath);
             UnityEditor.AssetDatabase.SaveAssets();
+
+            newProgramAsset = UnityEditor.AssetDatabase.LoadAssetAtPath<UdonSharpProgramAsset>(assetPath);
             
-            // Update the lookup cache
+            // Importing the asset clears the editor-side lookup caches via the asset postprocessor.
+            EnsureProgramAssetLookupCaches();
             _programAssetLookup[script] = newProgramAsset;
-            if (scriptClass != null)
-                _programAssetTypeLookup[scriptClass] = newProgramAsset;
+            _programAssetTypeLookup[scriptClass] = newProgramAsset;
             
             // Clear the global program asset cache to pick up the new asset
             UdonSharpProgramAsset.ClearProgramAssetCache();
