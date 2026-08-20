@@ -1,23 +1,61 @@
-# Welcome to the UdonSharp contributing guide
+# Contributing to UdonSharp CE
 
-UdonSharp is an open source C# compiler for VRChat's Udon scripting system. Contributions are welcome and greatly appreciated.
+Contributions are welcome. **There is no CLA** — the upstream VRChat Contributor License Agreement
+does not apply to this fork.
 
-## Reporting Issues
-Before reporting an issue, make sure you have installed UdonSharp following the [installation instructions](https://github.com/vrchat-community/UdonSharp#installation). If you run into an issue with UdonSharp, report it on the [issues](https://github.com/vrchat-community/UdonSharp/issues/new/choose) page. 
+## Where to report an issue
 
-## Contributing to UdonSharp
-UdonSharp accepts [pull requests](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/about-pull-requests). The first time you contribute to a vrchat-community repository, you will be asked to review and sign VRChat's Contributor License Agreement. This will be requested automatically when you submit your first pull request.
+| Problem | Where |
+| --- | --- |
+| A CE feature (`CE.*` modules, CE analyzers, CE editor tooling) | [this repo's issues](https://github.com/Furroxide/UdonSharpCE/issues) |
+| UdonSharp itself, or the VRChat SDK | [vrchat-community/UdonSharp](https://github.com/vrchat-community/UdonSharp/issues) |
 
-### Testing your PR
-If you are making changes to the compiler, it is recommended that you run U#'s integration tests after running a U# compile with your changes. We are working on improving U#'s testing process, at the moment there is some work involved:
+CE-specific code lives under `Packages/com.merlin.UdonSharp/Runtime/Libraries/CE/` and
+`Packages/com.merlin.UdonSharp/Editor/CE/`. If the file you're reporting against isn't in one of
+those, it's likely an upstream issue.
 
-1. Clone the UdonSharp repository 
-2. Integrate your changes
-3. Remove the trailing `~` from the `Assets/UdonSharp/Samples~` and `Assets/UdonSharp/Tests~` directories
-4. Open the UdonSharp project in Unity 2019.4.31f1
-5. Install the latest [VRChat worlds SDK](https://vrchat.com/home/download) in the project
-6. Open the `IntegrationTestScene` scene in the `Assets/UdonSharp/Tests` directory
-7. Run a manual U# compile from the button on UdonSharpProgramAsset files 
-8. Enter play mode and verify that all tests are passing in the output log
+Please include your **Unity version**, **VRChat SDK version**, and **CE version**
+(`Packages/com.merlin.UdonSharp/package.json`).
 
-If you are contributing compiler fixes or features, it's encouraged to add tests to the test scripts to help prevent regressions.
+## Running the tests
+
+The suite that actually runs is **`CEShowcase.Tests`** (edit mode), in
+`Assets/Scripts/CEShowcase/Tests/Editor/`.
+
+1. Open the project in **Unity 2022.3.22f1** (see `ProjectSettings/ProjectVersion.txt`).
+2. Install the VRChat Worlds SDK.
+3. **Window → General → Test Runner → EditMode**.
+4. Run the `CEShowcase.Tests` assembly. It is currently 107 tests and takes roughly two minutes.
+
+Notes that will save you time:
+
+- **`Packages/com.merlin.UdonSharp/Tests~/` does not run.** Unity excludes `~`-suffixed folders from
+  the asset pipeline, so there is no `UdonSharp.CE.Tests` assembly. Those files are reference
+  material; a test added there executes never. Put runnable tests in `CEShowcase.Tests`.
+- **One C# compile error anywhere** fails a batch of unrelated source-generator tests with
+  *"All Unity C# compiler errors must be resolved before running an UdonSharp compile."* Check the
+  console for `error CS` first rather than debugging the cascade.
+- **There is no ClientSim in this project**, so `Networking.LocalPlayer` is null and `Interact()`
+  early-returns. Test the logic beneath it directly.
+- Analyzer tests bind fixtures from source strings, which requires the fixture to be registered as a
+  real assembly first — see `RegisterFixtureAssembly` in `CESyncAuthorityTests.cs` and the comment
+  above its call site explaining why.
+
+## Compiler and analyzer changes
+
+CE ships compile-time diagnostics (`CE0001`–`CE0063`). If you add or change one:
+
+- Add a regression test pinning both the positive and negative case.
+- **Prefer a false negative to a false positive.** A diagnostic that fires on correct code trains
+  authors to ignore the whole set — CE0063's Manual arm was removed for exactly this reason after it
+  produced four distinct false-positive classes. That history is recorded in the analyzer's type
+  comment; please read it before re-adding anything similar.
+- Diagnostic text is user-facing. It must describe what the code actually does, not what it was
+  intended to do.
+
+## Pull requests
+
+- Branch from `master`.
+- Keep commits focused; explain *why* in the body, not just what.
+- Run the test suite before opening the PR and say whether it passed.
+- Documentation lives in `Tools/Docusaurus/docs/`; update it alongside behaviour changes.

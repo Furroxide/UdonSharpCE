@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: UdonSharp (upstream) issue
+    url: https://github.com/vrchat-community/UdonSharp/issues/new/choose
+    about: >-
+      For bugs in the UdonSharp compiler itself rather than a CE feature. If the file involved is
+      not under Packages/com.merlin.UdonSharp/{Runtime/Libraries,Editor}/CE/, it is probably an
+      upstream issue.
+  - name: VRChat SDK issue
+    url: https://feedback.vrchat.com/sdk-bug-reports
+    about: For bugs in the VRChat Worlds SDK or Udon itself.
+  - name: Documentation
+    url: https://vrc.furroxide.dev
+    about: Module guides, the CE diagnostic reference, and install instructions.
