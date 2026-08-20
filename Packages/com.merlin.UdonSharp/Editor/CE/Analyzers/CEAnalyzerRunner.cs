@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
+using Microsoft.CodeAnalysis;
 using UdonSharp.Compiler;
 using UdonSharp.Compiler.Binder;
 using UdonSharp.Compiler.Symbols;
 using UnityEditor;
 using UnityEngine;
+using DiagnosticSeverity = UdonSharp.Compiler.DiagnosticSeverity;
 
 namespace UdonSharp.CE.Editor.Analyzers
 {
@@ -42,6 +44,17 @@ namespace UdonSharp.CE.Editor.Analyzers
             new RpcMethodAnalyzer(),
             new LocalOnlyAnalyzer(),
 
+            // CE.Net silent-failure analyzers. Every one of these describes a bug that produces no error
+            // at runtime -- a discarded write, a prediction nothing ever corrects, an unserialized Manual
+            // behaviour, an empty payload, a saturated network, a network event that never leaves the
+            // client.
+            new SyncedFieldOwnershipAnalyzer(),
+            new PredictedFieldReconciliationAnalyzer(),
+            new ManualSyncWithoutSerializationAnalyzer(),
+            new ManualSyncWithoutSyncedFieldsAnalyzer(),
+            new RequestSerializationRateAnalyzer(),
+            new NetworkEventSyncModeAnalyzer(),
+
             // Phase 3: CE.Async analyzers
             new AsyncMethodAnalyzer(),
 
@@ -53,6 +66,12 @@ namespace UdonSharp.CE.Editor.Analyzers
         };
 
         /// <summary>
+        /// Diagnostic code used when an analyzer itself fails. It gets a real CE code so a crashing
+        /// analyzer is searchable and filterable like any other finding.
+        /// </summary>
+        internal const string AnalyzerFailureCode = "CE0019";
+
+        /// <summary>
         /// Whether to log analyzer execution for debugging.
         /// </summary>
         private static bool _enableDebugLogging = false;
@@ -62,7 +81,8 @@ namespace UdonSharp.CE.Editor.Analyzers
         ///
         /// This method is thread-safe and can be called from parallel compilation.
         /// Each analyzer is run in isolation and failures in one analyzer do not
-        /// affect other analyzers.
+        /// affect other analyzers, but a failure is reported as a compile diagnostic
+        /// rather than only a console warning -- see <see cref="ReportAnalyzerFailure"/>.
         /// </summary>
         /// <param name="type">The bound TypeSymbol to analyze.</param>
         /// <param name="context">The BindContext for semantic information.</param>
@@ -95,15 +115,59 @@ namespace UdonSharp.CE.Editor.Analyzers
                 }
                 catch (Exception ex)
                 {
-                    // Log but don't fail compilation for analyzer errors
-                    Debug.LogWarning($"[CE.Analyzers] Analyzer {analyzer.AnalyzerId} ({analyzer.AnalyzerName}) failed on type {type.Name}: {ex.Message}");
-
-                    if (_enableDebugLogging)
-                    {
-                        Debug.LogException(ex);
-                    }
+                    ReportAnalyzerFailure(analyzer, type, compilationContext, ex);
                 }
             }
+        }
+
+        /// <summary>
+        /// Surfaces an analyzer crash as a compile diagnostic.
+        ///
+        /// This used to be a bare <c>Debug.LogWarning</c>, which meant a crashing analyzer stopped checking
+        /// and the compile still looked clean: an analyzer that never ran is indistinguishable from an
+        /// analyzer that found nothing. The severity stays at Warning because an analyzer only reports on
+        /// code, it does not generate any -- a bug in one must not brick a build the way a failed generator
+        /// deliberately does.
+        /// </summary>
+        private static void ReportAnalyzerFailure(
+            ICompileTimeAnalyzer analyzer,
+            TypeSymbol type,
+            CompilationContext compilationContext,
+            Exception exception)
+        {
+            string message =
+                $"[{AnalyzerFailureCode}] Analyzer {analyzer.AnalyzerId} ({analyzer.AnalyzerName}) threw " +
+                $"{exception.GetType().Name} while analyzing '{type.Name}' and did not finish: {exception.Message}. " +
+                $"The checks owned by {analyzer.AnalyzerId} did not run for this behaviour, so its absence from this " +
+                "compile's diagnostics does not mean the behaviour is clean.";
+
+            compilationContext.AddDiagnostic(DiagnosticSeverity.Warning, GetTypeLocation(type), message);
+
+            if (_enableDebugLogging)
+            {
+                Debug.LogException(exception);
+            }
+        }
+
+        /// <summary>
+        /// Gets the Roslyn Location for a type symbol so an analyzer failure points at the behaviour it
+        /// gave up on rather than at the whole compile.
+        /// </summary>
+        private static Location GetTypeLocation(TypeSymbol type)
+        {
+            var declaringSyntaxRefs = type?.RoslynSymbol?.DeclaringSyntaxReferences;
+            if (declaringSyntaxRefs != null && declaringSyntaxRefs.Value.Length > 0)
+            {
+                return declaringSyntaxRefs.Value[0].GetSyntax().GetLocation();
+            }
+
+            var locations = type?.RoslynSymbol?.Locations;
+            if (locations != null && locations.Value.Length > 0)
+            {
+                return locations.Value[0];
+            }
+
+            return Location.None;
         }
 
         /// <summary>
