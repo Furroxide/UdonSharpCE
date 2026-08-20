@@ -1,0 +1,15 @@
+{
+  "name": "UdonSharp CE",
+  "id": "dev.furroxide.vpm.udonsharpce",
+  "url": "https://vrc.furroxide.dev/vpm/index.json",
+  "author": "Furroxide",
+  "description": "Community Edition fork of UdonSharp — generics and collections where Udon has none, rollback netcode for networked physics, and compile-time analysis of ownership and sync correctness.",
+  "infoLink": {
+    "url": "https://vrc.furroxide.dev",
+    "text": "UdonSharp CE documentation"
+  },
+  "githubRepo": "Furroxide/UdonSharpCE",
+  "packages": [
+    "com.merlin.udonsharp"
+  ]
+}

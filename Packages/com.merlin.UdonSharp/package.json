@@ -1,13 +1,16 @@
 {
 	"name" : "com.merlin.udonsharp",
-	"displayName" : "UdonSharp",
+	"displayName" : "UdonSharp CE",
 	"version" : "1.2.0",
-	"unity" : "2022.4",
-	"description" : "A compiler for compiling C# to Udon assembly",
+	"unity" : "2022.3",
+	"description" : "Community Edition fork of UdonSharp — generics and collections where Udon has none, rollback netcode for networked physics, and compile-time analysis of ownership and sync correctness.",
 	"author" : {
-		"name" : "Merlin",
-		"url" : "https://github.com/MerlinVR/UdonSharp"
+		"name" : "Furroxide",
+		"url" : "https://github.com/Furroxide/UdonSharpCE"
 	},
+	"documentationUrl" : "https://vrc.furroxide.dev",
+	"changelogUrl" : "https://github.com/Furroxide/UdonSharpCE/blob/master/CHANGELOG.md",
+	"licensesUrl" : "https://github.com/Furroxide/UdonSharpCE/blob/master/LICENSE",
 	"vpmDependencies" : {
 		"com.vrchat.worlds" : "^3.2.x"
 	},
@@ -21,6 +24,16 @@
 			"displayName" : "Tutorials",
 			"description" : "Tutorials Example",
 			"path" : "Samples~/Tutorials"
+		},
+		{
+			"displayName" : "Community Edition",
+			"description" : "CE module examples",
+			"path" : "Samples~/CE"
+		},
+		{
+			"displayName" : "Utilities",
+			"description" : "Utility behaviours",
+			"path" : "Samples~/Utilities"
 		}
 	],
 	"legacyFolders" : {
