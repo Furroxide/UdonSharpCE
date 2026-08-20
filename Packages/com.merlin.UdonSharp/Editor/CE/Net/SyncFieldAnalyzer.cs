@@ -11,27 +11,35 @@ using UdonSharp.Compiler.Symbols;
 namespace UdonSharp.CE.Editor.Analyzers
 {
     /// <summary>
-    /// Validates [Sync] attribute usage and provides warnings for common issues.
+    /// Validates the tuning options on [Sync] and warns when one of them is inert.
     ///
-    /// Checks for:
-    /// - DeltaEncode on non-array types (ineffective)
-    /// - Quantize on non-float types (ineffective)
-    /// - Interpolation in Manual sync mode (has no effect)
+    /// Checks exactly three things:
+    /// - DeltaEncodeHint on a non-array type (ineffective)
+    /// - Quantize on a non-float type (ineffective)
+    /// - Interpolation under Manual sync mode (has no effect)
+    ///
+    /// It does not read <see cref="SyncAttribute.Authority"/> and must not be described as if it did.
+    /// Authority is checked elsewhere: CE0014 requires every write to an Authority.Owner field to sit
+    /// behind an ownership check, and CE0063 reports an Authority.Predicted field on a behaviour whose
+    /// sync mode replicates nothing at all. The published analyzer table once advertised CE0010 as
+    /// validating "authority, quantize, delta, interpolation", which promised a check no code performed --
+    /// the exact silent-gap shape this diagnostic set exists to remove. Keep this list, the Description
+    /// below, and the table in Tools/Docusaurus/docs/ce-editor-tools.md in step with the three cases here.
     /// </summary>
     /// <example>
     /// // Warning - DeltaEncode on non-array
-    /// [Sync(DeltaEncode = true)]
+    /// [Sync(Authority.Owner, DeltaEncodeHint = true)]
     /// public int score;  // CE0010: DeltaEncode only works on arrays
     ///
     /// // Warning - Quantize on non-float
-    /// [Sync(Quantize = 0.01f)]
+    /// [Sync(Authority.Owner, Quantize = 0.01f)]
     /// public int count;  // CE0010: Quantize only works on float types
     ///
     /// // Warning - Interpolation in Manual mode
     /// [UdonBehaviourSyncMode(BehaviourSyncMode.Manual)]
     /// public class MyBehaviour : UdonSharpBehaviour
     /// {
-    ///     [Sync(InterpolationMode.Linear)]
+    ///     [Sync(Authority.Owner, InterpolationMode.Linear)]
     ///     public float value;  // CE0010: Interpolation has no effect in Manual mode
     /// }
     /// </example>
@@ -39,7 +47,12 @@ namespace UdonSharp.CE.Editor.Analyzers
     {
         public string AnalyzerId => "CE0010";
         public string AnalyzerName => "Sync Field Validation";
-        public string Description => "Validates [Sync] attribute usage and warns about ineffective options.";
+        // Names the three checks rather than saying "validates [Sync] usage". This string is what the
+        // Udon CE/Analyzers window shows and what GetAnalyzerInfo() reports, and the vague version is how
+        // the published table came to advertise CE0010 as checking authority -- which it has never done.
+        public string Description =>
+            "Warns when a [Sync] option is inert: DeltaEncodeHint on a non-array, Quantize on a non-float, " +
+            "or interpolation under Manual sync. Does not check Authority -- that is CE0014 and CE0063.";
         public bool IsEnabledByDefault => true;
 
         /// <summary>

@@ -42,8 +42,16 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
                             Severity = ValidationSeverity.Error,
                             ValidatorName = Name,
                             Message = $"Synced array '{field.Name}' is not initialized",
+                            // Both forms are written out in full, and the [Sync] one carries an Authority,
+                            // because the previous text collapsed them into "`[UdonSynced]` or `[Sync] public
+                            // int[] data = ...`" -- and bare [Sync] stopped compiling once Authority became a
+                            // required positional argument. A validator that hands the author CS7036 is worse
+                            // than one that says nothing. Owner is the placeholder: this validator reflects
+                            // over FieldInfo and never sees the writes, so it cannot pick the authority.
                             Details = "Uninitialized synced arrays cause NullReferenceException on player join. " +
-                                     "Initialize in field declaration: `[UdonSynced]` or `[Sync] public int[] data = new int[16];`",
+                                     "Initialize in the field declaration: `[UdonSynced] public int[] data = new int[16];` " +
+                                     "or `[Sync(Authority.Owner)] public int[] data = new int[16];` -- [Sync] takes an " +
+                                     "Authority as its first, required argument.",
                             RelatedType = type,
                             RelatedField = field,
                             FilePath = context.GetSourceFile(type)
@@ -77,7 +85,7 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
                 // Look for field declaration with initializer
                 // Patterns:
                 //   [UdonSynced] public int[] field = new int[N];
-                //   [Sync] private int[] field = new int[] { 1, 2, 3 };
+                //   [Sync(Authority.Owner)] private int[] field = new int[] { 1, 2, 3 };
 
                 // Find field declaration
                 var patterns = new[]
