@@ -80,7 +80,10 @@ namespace UdonSharp.Compiler.Symbols
 
             foreach (AttributeData attributeData in RoslynSymbol.GetAttributes())
             {
-                if (!(TryCreateAttributeInstance(attributeData) is T symbolAttribute))
+                // This lookup has no BindContext to report through. SetupAttributes covers the same symbols
+                // and does raise USCE0006 for a construction failure, so a broken attribute is still visible
+                // -- it is just reported from there rather than from here.
+                if (!(TryCreateAttributeInstance(attributeData, out _) is T symbolAttribute))
                     continue;
 
                 return symbolAttribute;
@@ -169,8 +172,10 @@ namespace UdonSharp.Compiler.Symbols
             return constant.Value;
         }
 
-        private static Attribute TryCreateAttributeInstance(AttributeData attribute)
+        private static Attribute TryCreateAttributeInstance(AttributeData attribute, out Exception failure)
         {
+            failure = null;
+
             if (attribute.AttributeClass == null ||
                 !TypeSymbol.TryGetSystemType(attribute.AttributeClass, out Type attributeType) ||
                 !typeof(Attribute).IsAssignableFrom(attributeType))
@@ -207,8 +212,15 @@ namespace UdonSharp.Compiler.Symbols
 
                 return attributeInstance;
             }
-            catch (Exception)
+            catch (Exception e)
             {
+                // UdonSharp CE: surface the failure instead of swallowing it.
+                //
+                // Every CE feature is driven by an attribute -- [Sync], [SyncOnJoin], [Rpc], [LocalOnly],
+                // [PlayerData]. Returning null here means the symbol simply has no such attribute, so a
+                // construction failure used to present as the feature quietly not existing: no analyzer
+                // fired, no glue was generated, and nothing was logged. The caller now reports it.
+                failure = e;
                 return null;
             }
         }
@@ -222,9 +234,23 @@ namespace UdonSharp.Compiler.Symbols
             {
                 AttributeData attribute = attribData[i];
 
-                Attribute attributeInstance = TryCreateAttributeInstance(attribute);
+                Attribute attributeInstance = TryCreateAttributeInstance(attribute, out Exception failure);
                 if (attributeInstance != null)
+                {
                     attributes.Add(attributeInstance);
+                    continue;
+                }
+
+                // UdonSharp CE: an attribute that failed to construct is reported rather than dropped.
+                // Severity is Warning, not Error, because an unconstructable attribute on an unrelated
+                // type must not block the compile -- but it can never again be an invisible outage.
+                if (failure != null)
+                {
+                    context?.CompileContext?.AddDiagnostic(DiagnosticSeverity.Warning,
+                        RoslynSymbol.Locations.FirstOrDefault(),
+                        $"USCE0006: could not construct attribute '{attribute.AttributeClass?.Name}' on " +
+                        $"'{RoslynSymbol}', so any feature driven by it is inactive here: {failure.Message}");
+                }
             }
 
             SetAttributes(attributes.ToImmutableArray());

@@ -36,8 +36,6 @@ namespace UdonSharp.CE.Editor.Optimizers
         private readonly Dictionary<SyntaxTree, SemanticModel> _semanticModelLookup = new Dictionary<SyntaxTree, SemanticModel>();
         private SyntaxTree[] _semanticModelTrees;
         private CSharpCompilation _semanticModelCompilation;
-        private static readonly Lazy<MetadataReference[]> _optimizerMetadataReferences =
-            new Lazy<MetadataReference[]>(BuildOptimizerMetadataReferences);
 
         /// <summary>
         /// Records an optimization that was applied.
@@ -77,11 +75,12 @@ namespace UdonSharp.CE.Editor.Optimizers
             if (_semanticModelLookup.TryGetValue(tree, out SemanticModel cachedModel))
                 return cachedModel;
 
-            CSharpCompilation compilation = _semanticModelCompilation ?? CSharpCompilation.Create(
-                $"UdonSharpCEOptimizerSemantic_{_semanticModelLookup.Count}",
-                _semanticModelTrees ?? new[] { tree },
-                _optimizerMetadataReferences.Value,
-                new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+            CSharpCompilation compilation = _semanticModelCompilation;
+
+            // A caller that never went through SetSemanticModelTrees, or that asks about a tree the current
+            // pass set does not contain, still gets a working model -- just one that cannot see other files.
+            if (compilation == null || !compilation.ContainsSyntaxTree(tree))
+                compilation = CreateSemanticCompilation(new[] { tree });
 
             SemanticModel model = compilation.GetSemanticModel(tree, ignoreAccessibility: true);
             _semanticModelLookup[tree] = model;
@@ -91,18 +90,58 @@ namespace UdonSharp.CE.Editor.Optimizers
         /// <summary>
         /// Sets the syntax trees visible to semantic models created during an optimizer pass.
         /// This lets cross-file user types resolve while individual optimizers still receive one tree at a time.
+        ///
+        /// Every generator and optimizer pass calls this, and it used to build a fresh whole-project
+        /// CSharpCompilation each time -- around twenty extra project-wide compilations per U# compile, each
+        /// one re-resolving every metadata reference and rebuilding every declaration table. A pass changes
+        /// only the trees it rewrote, so the compilation is now built once and patched with
+        /// ReplaceSyntaxTree.
         /// </summary>
         public void SetSemanticModelTrees(IEnumerable<SyntaxTree> trees)
         {
+            // Cached models are bound to the previous compilation object, so they go stale the moment any
+            // tree in it is replaced.
             _semanticModelLookup.Clear();
-            _semanticModelTrees = trees?.Where(tree => tree != null).ToArray();
-            _semanticModelCompilation = _semanticModelTrees == null || _semanticModelTrees.Length == 0
-                ? null
-                : CSharpCompilation.Create(
-                    $"UdonSharpCEOptimizerSemantic_{Guid.NewGuid():N}",
-                    _semanticModelTrees,
-                    _optimizerMetadataReferences.Value,
-                    new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+
+            SyntaxTree[] newTrees = trees?.Where(tree => tree != null).ToArray();
+
+            if (newTrees == null || newTrees.Length == 0)
+            {
+                _semanticModelTrees = newTrees;
+                _semanticModelCompilation = null;
+                return;
+            }
+
+            if (_semanticModelCompilation == null ||
+                _semanticModelTrees == null ||
+                _semanticModelTrees.Length != newTrees.Length)
+            {
+                _semanticModelTrees = newTrees;
+                _semanticModelCompilation = CreateSemanticCompilation(newTrees);
+                return;
+            }
+
+            CSharpCompilation compilation = _semanticModelCompilation;
+
+            for (int i = 0; i < newTrees.Length; i++)
+            {
+                if (ReferenceEquals(_semanticModelTrees[i], newTrees[i]))
+                    continue;
+
+                // ReplaceSyntaxTree throws when the incoming tree is already in the compilation, which a
+                // pass that reorders or duplicates trees would produce. Rebuilding is correct there, and
+                // rare enough that the per-pass saving still holds.
+                if (compilation.ContainsSyntaxTree(newTrees[i]))
+                {
+                    compilation = CreateSemanticCompilation(newTrees);
+                    break;
+                }
+
+                compilation = compilation.ReplaceSyntaxTree(_semanticModelTrees[i], newTrees[i]);
+            }
+
+            _semanticModelTrees = newTrees;
+            _semanticModelCompilation = compilation;
         }
 
         /// <summary>
@@ -155,26 +194,23 @@ namespace UdonSharp.CE.Editor.Optimizers
             _semanticModelCompilation = null;
         }
 
-        private static MetadataReference[] BuildOptimizerMetadataReferences()
+        /// <summary>
+        /// Builds a compilation over the given trees using the same reference set UdonSharp itself compiles
+        /// these files with.
+        ///
+        /// Referencing every AppDomain assembly, as this used to, pulled in Assembly-CSharp -- which already
+        /// holds a compiled copy of every behaviour in <paramref name="trees"/>. Lookups on those user types
+        /// then came back ambiguous, so a generator resolving a type through the semantic model found
+        /// nothing and emitted nothing, silently. Sharing UdonSharp's reference set removes the duplicates
+        /// and reuses its cached list instead of re-reading several hundred assemblies off disk per pass.
+        /// </summary>
+        private static CSharpCompilation CreateSemanticCompilation(IEnumerable<SyntaxTree> trees)
         {
-            var references = new List<MetadataReference>();
-            foreach (string assemblyPath in AppDomain.CurrentDomain.GetAssemblies()
-                         .Where(assembly => !assembly.IsDynamic && !string.IsNullOrEmpty(assembly.Location))
-                         .Select(assembly => assembly.Location)
-                         .Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                try
-                {
-                    references.Add(MetadataReference.CreateFromFile(assemblyPath));
-                }
-                catch
-                {
-                    // Ignore transient or inaccessible editor assemblies; alias resolution only
-                    // needs the references that can be loaded successfully.
-                }
-            }
-
-            return references.ToArray();
+            return CSharpCompilation.Create(
+                $"UdonSharpCEOptimizerSemantic_{Guid.NewGuid():N}",
+                trees,
+                UdonSharp.Compiler.CompilationContext.GetMetadataReferences(),
+                new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
         }
     }
 

@@ -60,7 +60,7 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
         public event Action<PacketEvent> OnPacketProcessed;
 
         // Internal state
-        private readonly Queue<DelayedPacket> _delayedPackets = new Queue<DelayedPacket>();
+        private readonly List<DelayedPacket> _delayedPackets = new List<DelayedPacket>();
         private readonly List<PacketEvent> _recentEvents = new List<PacketEvent>();
         private const int MAX_RECENT_EVENTS = 100;
 
@@ -139,6 +139,7 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
         public void ResetStats()
         {
             Stats.Reset();
+            _delayedPackets.Clear();
             _recentEvents.Clear();
         }
 
@@ -188,11 +189,6 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
             result.DelayMs = latency;
             Stats.TotalLatencyMs += latency;
 
-            if (latency > 0)
-            {
-                Stats.DelayedPackets++;
-            }
-
             // Check for duplication
             if (Conditions.ShouldDuplicatePacket())
             {
@@ -204,7 +200,35 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
 
             packetEvent.EventType = result.Duplicated ? PacketEventType.Duplicated : PacketEventType.Delivered;
             packetEvent.LatencyMs = latency;
-            RecordEvent(packetEvent);
+
+            if (latency > 0f)
+            {
+                Stats.DelayedPackets++;
+
+                float currentTime = (float)EditorApplication.timeSinceStartup * 1000f;
+                float deliveryTimeMs = currentTime + latency;
+
+                if (Conditions.SimulateOutOfOrder && _delayedPackets.Count > 0 && UnityEngine.Random.Range(0f, 100f) < 25f)
+                {
+                    float maxAdvanceMs = Mathf.Max(1f, Mathf.Min(latency, Conditions.Jitter + latency * 0.5f));
+                    deliveryTimeMs = Mathf.Max(currentTime, deliveryTimeMs - UnityEngine.Random.Range(1f, maxAdvanceMs + 1f));
+                    packetEvent.EventType = PacketEventType.OutOfOrder;
+                    Stats.OutOfOrderPackets++;
+                }
+
+                _delayedPackets.Add(new DelayedPacket
+                {
+                    Name = packetName,
+                    SizeBytes = sizeBytes,
+                    DeliveryTimeMs = deliveryTimeMs,
+                    LatencyMs = latency,
+                    EventType = packetEvent.EventType
+                });
+            }
+            else
+            {
+                RecordEvent(packetEvent);
+            }
 
             return result;
         }
@@ -248,29 +272,28 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
 
         private void ProcessDelayedPackets()
         {
-            float currentTime = (float)EditorApplication.timeSinceStartup * 1000f;
+            if (_delayedPackets.Count == 0)
+                return;
 
-            while (_delayedPackets.Count > 0)
+            float currentTime = (float)EditorApplication.timeSinceStartup * 1000f;
+            _delayedPackets.Sort((a, b) => a.DeliveryTimeMs.CompareTo(b.DeliveryTimeMs));
+
+            for (int i = 0; i < _delayedPackets.Count;)
             {
-                var packet = _delayedPackets.Peek();
-                if (packet.DeliveryTimeMs <= currentTime)
-                {
-                    _delayedPackets.Dequeue();
-                    // Deliver packet
-                    var evt = new PacketEvent
-                    {
-                        Timestamp = DateTime.Now,
-                        PacketName = packet.Name,
-                        SizeBytes = packet.SizeBytes,
-                        EventType = PacketEventType.Delivered,
-                        LatencyMs = packet.LatencyMs
-                    };
-                    RecordEvent(evt);
-                }
-                else
-                {
+                var packet = _delayedPackets[i];
+                if (packet.DeliveryTimeMs > currentTime)
                     break;
-                }
+
+                _delayedPackets.RemoveAt(i);
+                var evt = new PacketEvent
+                {
+                    Timestamp = DateTime.Now,
+                    PacketName = packet.Name,
+                    SizeBytes = packet.SizeBytes,
+                    EventType = packet.EventType,
+                    LatencyMs = packet.LatencyMs
+                };
+                RecordEvent(evt);
             }
         }
 
@@ -356,6 +379,7 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
         public int SizeBytes;
         public float DeliveryTimeMs;
         public float LatencyMs;
+        public PacketEventType EventType;
     }
 
     /// <summary>

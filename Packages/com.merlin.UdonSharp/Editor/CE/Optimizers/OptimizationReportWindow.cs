@@ -15,7 +15,6 @@ namespace UdonSharp.CE.Editor.Optimizers
     {
         private Vector2 _scrollPosition;
         private string _filterFile = "";
-        private string _filterOptimizer = "";
         private bool _showDetails = true;
         private Dictionary<string, bool> _fileFoldouts = new Dictionary<string, bool>();
         private Dictionary<string, bool> _optimizerFoldouts = new Dictionary<string, bool>();
@@ -90,7 +89,6 @@ namespace UdonSharp.CE.Editor.Optimizers
             if (GUILayout.Button("Clear", EditorStyles.toolbarButton, GUILayout.Width(50)))
             {
                 _filterFile = "";
-                _filterOptimizer = "";
             }
 
             EditorGUILayout.EndHorizontal();
@@ -308,7 +306,7 @@ namespace UdonSharp.CE.Editor.Optimizers
             }
         }
 
-        private string GetOptimizerShortName(string id)
+        private static string GetOptimizerShortName(string id)
         {
             switch (id)
             {
@@ -321,11 +319,18 @@ namespace UdonSharp.CE.Editor.Optimizers
                 case "CEOPT009": return "CSE";
                 case "CEOPT010": return "LICM";
                 case "CEOPT011": return "LambdaInline";
+                // Correctness-critical generators (CEGEN*), not optimizations.
+                case "CEGEN001": return "SyncOnJoin";
+                case "CEGEN002": return "Quantize";
+                case "CEGEN004": return "Persistence";
+                case "CEGEN008": return "SyncMode";
+                case "CEGEN009": return "Rpc";
+                case "CEASYNC001": return "Async";
                 default: return id;
             }
         }
 
-        private string GetOptimizerFullName(string id)
+        private static string GetOptimizerFullName(string id)
         {
             switch (id)
             {
@@ -338,6 +343,13 @@ namespace UdonSharp.CE.Editor.Optimizers
                 case "CEOPT009": return "Common Subexpression Elimination";
                 case "CEOPT010": return "Loop Invariant Code Motion";
                 case "CEOPT011": return "Lambda Inlining";
+                // Correctness-critical generators (CEGEN*), not optimizations.
+                case "CEGEN001": return "SyncOnJoin Glue Generation";
+                case "CEGEN002": return "Quantize Pre-Serialization";
+                case "CEGEN004": return "Persistence Auto-Registration";
+                case "CEGEN008": return "Behaviour Sync Mode Inference";
+                case "CEGEN009": return "Rpc Network Event Emitter";
+                case "CEASYNC001": return "Async Method Transform";
                 default: return id;
             }
         }
@@ -367,20 +379,7 @@ namespace UdonSharp.CE.Editor.Optimizers
 
             foreach (var (id, count) in counts.OrderBy(c => c.Key))
             {
-                var name = id switch
-                {
-                    "CEOPT003" => "Small Loop Unrolling",
-                    "CEOPT004" => "Tiny Method Inlining",
-                    "CEOPT005" => "String Interning",
-                    "CEOPT006" => "CELogger Transform",
-                    "CEOPT007" => "Action to CECallback",
-                    "CEOPT008" => "Extern Call Caching",
-                    "CEOPT009" => "Common Subexpression Elimination",
-                    "CEOPT010" => "Loop Invariant Code Motion",
-                    "CEOPT011" => "Lambda Inlining",
-                    _ => id
-                };
-                sb.AppendLine($"  ✓ {name}: {count}");
+                sb.AppendLine($"  ✓ {GetOptimizerFullName(id)}: {count}");
             }
 
             sb.AppendLine();

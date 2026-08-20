@@ -5,6 +5,10 @@ using Microsoft.CodeAnalysis;
 
 [assembly: InternalsVisibleTo("UdonSharp.CE.Editor")]
 
+// Lets the CE test suites assert on compiler internals (source-generator registry, diagnostics,
+// field definitions) directly instead of through reflection helpers that silently rot.
+[assembly: InternalsVisibleTo("CEShowcase.Tests")]
+
 namespace UdonSharp.Compiler
 {
     /// <summary>
@@ -85,7 +89,8 @@ namespace UdonSharp.Compiler
                 }
                 catch (Exception ex)
                 {
-                    UnityEngine.Debug.LogWarning($"[UdonSharp] Optimizer failed: {ex.Message}");
+                    UdonSharpCEUtils.LogError($"Compile-time optimizer failed: {ex.Message}");
+                    throw;
                 }
             }
 

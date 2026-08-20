@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using UdonSharp;
+using UdonSharp.CE.Editor.DevTools.Analysis;
 using UnityEditor;
 using UnityEngine;
 using VRC.Udon;
@@ -177,12 +178,27 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
                 var behaviourType = behaviour.GetType();
                 var fields = behaviourType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
 
+                // A None / NoVariableSync behaviour transmits no variables at all, so its [UdonSynced]
+                // fields belong in their own bucket rather than in the [SyncOnJoin] coverage ratio -- they
+                // are not fields that "still need" late-join handling, they are fields that never replicate.
+                bool syncsVariables =
+                    BehaviourAnalyzer.ModeSyncsVariables(BehaviourAnalyzer.ResolveSyncMode(behaviourType));
+
+                if (!syncsVariables)
+                    analysis.BehavioursWithoutVariableSync++;
+
                 foreach (var field in fields)
                 {
                     // Check for UdonSynced attribute
                     var syncAttr = field.GetCustomAttribute<UdonSyncedAttribute>();
                     if (syncAttr != null)
                     {
+                        if (!syncsVariables)
+                        {
+                            analysis.NonReplicatingSyncedFields++;
+                            continue;
+                        }
+
                         analysis.TotalSyncedFields++;
 
                         // Check for SyncOnJoin (CE attribute)
@@ -231,8 +247,15 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
             {
                 Behaviour = behaviour,
                 BehaviourType = behaviour.GetType(),
-                GameObjectName = behaviour.gameObject.name
+                GameObjectName = behaviour.gameObject.name,
+                BehaviourSyncMode = BehaviourAnalyzer.ResolveSyncMode(behaviour.GetType())
             };
+
+            // Fields on a None / NoVariableSync behaviour never leave the local client, so clearing and
+            // "reconstructing" them measures nothing but local assignment and would report a success rate
+            // that has no bearing on what a real late joiner sees.
+            if (!BehaviourAnalyzer.ModeSyncsVariables(snapshot.BehaviourSyncMode))
+                return null;
 
             var fields = snapshot.BehaviourType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
 
@@ -250,7 +273,7 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
                         FieldName = field.Name,
                         FieldType = field.FieldType,
                         CapturedValue = CloneValue(value),
-                        SyncMode = syncAttr.NetworkSyncType.ToString()
+                        InterpolationMode = syncAttr.NetworkSyncType.ToString()
                     });
                 }
                 catch (Exception ex)
@@ -445,6 +468,12 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
         public Type BehaviourType;
         public string GameObjectName;
         public List<FieldSnapshot> SyncedFields = new List<FieldSnapshot>();
+
+        /// <summary>
+        /// The behaviour's resolved [UdonBehaviourSyncMode] (Continuous when none is declared, because
+        /// BehaviourSyncMode.Any is what the UdonBehaviour resolves to Continuous at runtime).
+        /// </summary>
+        public string BehaviourSyncMode;
     }
 
     /// <summary>
@@ -455,7 +484,13 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
         public string FieldName;
         public Type FieldType;
         public object CapturedValue;
-        public string SyncMode;
+
+        /// <summary>
+        /// The [UdonSynced] interpolation mode (None / Linear / Smooth). This is per-field smoothing, not
+        /// the behaviour's [UdonBehaviourSyncMode]; it was called SyncMode, which invited exactly the
+        /// confusion between the two that made these tools report the wrong thing.
+        /// </summary>
+        public string InterpolationMode;
     }
 
     /// <summary>
@@ -497,6 +532,17 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
         public int SyncOnJoinFields;
         public int OnPlayerJoinedHandlers;
         public int OnDeserializationHandlers;
+
+        /// <summary>
+        /// Behaviours whose resolved [UdonBehaviourSyncMode] is None or NoVariableSync.
+        /// </summary>
+        public int BehavioursWithoutVariableSync;
+
+        /// <summary>
+        /// [UdonSynced] fields declared on those behaviours. They never reach any remote player, late
+        /// joiner or not, so they are excluded from the coverage ratio and reported separately.
+        /// </summary>
+        public int NonReplicatingSyncedFields;
 
         public float SyncOnJoinCoverage => TotalSyncedFields > 0
             ? (float)SyncOnJoinFields / TotalSyncedFields
@@ -645,6 +691,17 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
                 EditorGUILayout.LabelField("OnDeserialization Handlers:", GUILayout.Width(150));
                 EditorGUILayout.LabelField(_lastAnalysis.OnDeserializationHandlers.ToString());
                 EditorGUILayout.EndHorizontal();
+
+                if (_lastAnalysis.NonReplicatingSyncedFields > 0)
+                {
+                    EditorGUILayout.Space(5);
+                    EditorGUILayout.HelpBox(
+                        $"{_lastAnalysis.NonReplicatingSyncedFields} [UdonSynced] field(s) sit on " +
+                        $"{_lastAnalysis.BehavioursWithoutVariableSync} behaviour(s) whose sync mode is None or " +
+                        "NoVariableSync. Those fields never replicate to anyone, so no amount of late-join " +
+                        "handling will populate them.",
+                        MessageType.Warning);
+                }
 
                 if (_lastAnalysis.SyncOnJoinCoverage < 1f && _lastAnalysis.TotalSyncedFields > 0)
                 {

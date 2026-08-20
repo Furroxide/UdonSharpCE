@@ -1,14 +1,18 @@
-# Ignore all VPM-managed packages (will be downloaded by VPM)
-com.vrchat.base/
-com.vrchat.worlds/
-com.vrchat.core.vpm-resolver/
-
-# Keep Unity package files
-!manifest.json
-!packages-lock.json
-!vpm-manifest.json
-
-# Keep our custom UdonSharp package
-!com.merlin.UdonSharp/
+# Ignore every package directory by default -- VPM re-downloads the ones it manages.
+#
+# This catch-all MUST stay ABOVE the un-ignore rules below. Git applies the LAST matching
+# pattern, and it cannot re-include a file whose parent directory is excluded. When `/*/` sat
+# after `!com.merlin.UdonSharp/`, the catch-all won: every *new* file added under our own
+# package was silently ignored, while previously-tracked files kept showing up as modified
+# (gitignore does not affect tracked files). That made an entire feature look committed when
+# none of its new source files were in the index.
 /*/
-!com.vrchat.core.*/
+
+# ...except the packages this repository actually owns or has to pin.
+!/com.merlin.UdonSharp/
+!/com.vrchat.core.vpm-resolver/
+
+# Unity/VPM manifests live directly under Packages/ and are always kept.
+!/manifest.json
+!/packages-lock.json
+!/vpm-manifest.json

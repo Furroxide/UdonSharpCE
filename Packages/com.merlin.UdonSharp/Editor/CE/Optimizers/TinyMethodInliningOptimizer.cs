@@ -29,7 +29,13 @@ namespace UdonSharp.CE.Editor.Optimizers
         public string OptimizerId => "CEOPT004";
         public string OptimizerName => "Tiny Method Inlining";
         public string Description => "Inlines very small methods to eliminate call overhead.";
-        public bool IsEnabledByDefault => true;
+
+        // Disabled: MethodInliner inlines only the return expression of a 2-statement body, so
+        // `{ _counter++; return x * 2; }` would inline to `(x * 2)` and drop the side effect, and
+        // MethodCollector keys methods by name only so overloads collapse. (The rewrite is currently
+        // always discarded because `ref anyChanges` is captured by value into a field -- see Optimize --
+        // which is the only reason this has not corrupted anything yet.)
+        public bool IsEnabledByDefault => false;
         public int Priority => 120; // After loop unrolling
 
         private const int MaxStatements = 2;

@@ -25,6 +25,74 @@ namespace UdonSharp.CE.Editor.Inspector
         // Last compilation time for cache invalidation
         private static DateTime _lastCacheTime = DateTime.MinValue;
 
+        /// <summary>
+        /// Maps a recorded optimizer id to the report counter it feeds.
+        ///
+        /// The ids are sourced from the runner instead of being spelled out here. The table this replaces
+        /// matched names like "SmallLoopUnrolling" while the optimizers record "CEOPT003", so no arm could
+        /// ever match and every report -- including the derived InstructionReduction -- was a permanent
+        /// zero. Arms for constant folding and dead-code elimination are gone with those retired
+        /// optimizers, and the sync-packing/delta-sync arms named passes that never existed.
+        ///
+        /// Correcting the ids alone was not enough to make the table populate: all three optimizer arms
+        /// below are <c>IsEnabledByDefault =&gt; false</c> and <c>CEOptimizerRunner.RunOptimizers</c> skips
+        /// disabled passes, so they record nothing today and the report stayed at zero for a second reason.
+        /// The lambda-inlining arm is what makes it live -- that pass runs from CEGeneratorRunner on every
+        /// compile regardless of the enable flag. The three dormant arms stay because they are keyed off the
+        /// registered instance, so re-enabling a pass re-arms its counter in the same change rather than
+        /// leaving a silently zero row behind.
+        /// </summary>
+        private static readonly Dictionary<string, Action<CEOptimizationReport>> _reportCounters =
+            BuildReportCounters();
+
+        private static Dictionary<string, Action<CEOptimizationReport>> BuildReportCounters()
+        {
+            var counters = new Dictionary<string, Action<CEOptimizationReport>>(StringComparer.Ordinal);
+
+            // Dormant while these passes are disabled -- see the class comment.
+            AddOptimizerCounter<SmallLoopUnrollingOptimizer>(counters, report => report.LoopsUnrolled++);
+            AddOptimizerCounter<TinyMethodInliningOptimizer>(counters, report => report.MethodsInlined++);
+            AddOptimizerCounter<StringInterningOptimizer>(counters, report => report.StringsInterned++);
+
+            // Runs on every compile, so this is the arm that actually populates the inspector panel.
+            // It reports under MethodsInlined because that is literally what it does -- the lambda body is
+            // spliced into its call site -- and the report's field set is fixed by CEInspectorDataTypes,
+            // which the renderer switches on field by field.
+            AddGeneratorCounter<LambdaInliningOptimizer>(counters, report => report.MethodsInlined++);
+
+            return counters;
+        }
+
+        private static void AddOptimizerCounter<T>(
+            Dictionary<string, Action<CEOptimizationReport>> counters,
+            Action<CEOptimizationReport> counter)
+            where T : ICompileTimeOptimizer
+        {
+            string optimizerId = CEOptimizerRunner.GetOptimizerId<T>();
+
+            // Null once an optimizer is retired from the runner. The arm then disappears rather than
+            // resurrecting an id nothing records under any more.
+            if (!string.IsNullOrEmpty(optimizerId))
+                counters[optimizerId] = counter;
+        }
+
+        /// <summary>
+        /// Same single-sourcing for a transform that lives in <c>CEGeneratorRunner</c> rather than
+        /// <c>CEOptimizerRunner</c>. Its id is read off a throwaway instance instead of being spelled out,
+        /// because a hand-written "CEOPT011" here is exactly the drift that left this whole table dead:
+        /// the ids in the report table and the ids the transforms record under have to move together.
+        /// </summary>
+        private static void AddGeneratorCounter<T>(
+            Dictionary<string, Action<CEOptimizationReport>> counters,
+            Action<CEOptimizationReport> counter)
+            where T : ICompileTimeOptimizer, new()
+        {
+            string optimizerId = new T().OptimizerId;
+
+            if (!string.IsNullOrEmpty(optimizerId))
+                counters[optimizerId] = counter;
+        }
+
         static CEOptimizationRegistry()
         {
             Initialize();
@@ -182,40 +250,20 @@ namespace UdonSharp.CE.Editor.Inspector
                 SourceFilePath = filePath
             };
 
-            // Aggregate optimization counts by type
+            // Aggregate optimization counts by type. Entries recorded by a transform with no counter are
+            // counted by GetSummaryStats but do not feed this per-behaviour report -- that is every
+            // correctness-critical generator (sync glue, RPC, quantize, persistence, async), which the
+            // report has no honest field for and which is not an optimization to begin with.
             foreach (var entry in entries)
             {
-                switch (entry.OptimizerId)
-                {
-                    case "ConstantFolding":
-                        report.ConstantsFolded++;
-                        break;
-                    case "SmallLoopUnrolling":
-                        report.LoopsUnrolled++;
-                        break;
-                    case "TinyMethodInlining":
-                        report.MethodsInlined++;
-                        break;
-                    case "StringInterning":
-                        report.StringsInterned++;
-                        break;
-                    case "DeadCodeElimination":
-                        report.DeadCodeEliminated++;
-                        break;
-                    // Sync optimizations are stubbed for now
-                    case "SyncPacking":
-                        report.SyncPackingApplied = true;
-                        break;
-                    case "DeltaSync":
-                        report.DeltaSyncApplied = true;
-                        report.DeltaSyncFields++;
-                        break;
-                }
+                if (_reportCounters.TryGetValue(entry.OptimizerId, out Action<CEOptimizationReport> counter))
+                    counter(report);
             }
 
             // Calculate instruction reduction estimate
-            // This is a rough estimate based on optimization types
-            int totalOpts = report.ConstantsFolded + report.LoopsUnrolled * 5 + 
+            // This is a rough estimate based on optimization types. The constant-folding and dead-code
+            // terms stay at zero: both passes were retired to the binary level and record nothing here.
+            int totalOpts = report.ConstantsFolded + report.LoopsUnrolled * 5 +
                             report.MethodsInlined * 3 + report.DeadCodeEliminated * 2;
             
             if (totalOpts > 0)

@@ -277,8 +277,13 @@ namespace UdonSharp.CE.Editor.DevTools
             {
                 EditorGUI.indentLevel++;
 
-                // Basic info
-                EditorGUILayout.LabelField($"Sync Mode: {behaviour.SyncMode}");
+                // Basic info. The source note matters: a behaviour with no [UdonBehaviourSyncMode] is
+                // Continuous, not "None" as this window used to claim, but the author never wrote that down
+                // and so has no idea this behaviour is on the 200-byte continuous budget at all.
+                string syncModeSource = BehaviourAnalyzer.DescribeSyncModeSource(behaviour.BehaviourType);
+                EditorGUILayout.LabelField(syncModeSource == null
+                    ? $"Sync Mode: {behaviour.SyncMode}"
+                    : $"Sync Mode: {behaviour.SyncMode} ({syncModeSource})");
                 EditorGUILayout.LabelField($"Payload Size: {behaviour.MinTotalBytes}–{behaviour.MaxTotalBytes} bytes");
 
                 if (behaviour.ExceedsContinuousLimit)

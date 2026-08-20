@@ -27,7 +27,12 @@ namespace UdonSharp.CE.Editor.Optimizers
         public string OptimizerId => "CEOPT003";
         public string OptimizerName => "Small Loop Unrolling";
         public string Description => "Unrolls small fixed-iteration loops to eliminate loop overhead.";
-        public bool IsEnabledByDefault => true;
+
+        // Disabled: VariableReplacer substitutes the loop literal into every matching IdentifierName,
+        // including the Name of a member access, so `for (int x...) { sum += v.x; }` becomes `v.0` and
+        // hard-fails the compile with an unexplainable syntax error. ContainsControlFlow also returns
+        // false on the first nested loop/switch, missing a later continue/break -> CS0139.
+        public bool IsEnabledByDefault => false;
         public int Priority => 110; // After dead code elimination
 
         private const int MaxUnrollIterations = 4;

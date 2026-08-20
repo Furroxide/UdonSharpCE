@@ -25,7 +25,10 @@ namespace UdonSharp.CE.Editor.Optimizers
         public string OptimizerId => "CEOPT005";
         public string OptimizerName => "String Interning";
         public string Description => "Identifies duplicate string literals for potential interning to reduce memory.";
-        public bool IsEnabledByDefault => true;
+
+        // Disabled: Optimize() is a declared no-op (`return tree;`) that still populates
+        // context.InternedStrings, which nothing consumes. Running it only costs a semantic-model pass.
+        public bool IsEnabledByDefault => false;
         public int Priority => 200; // Late optimization - runs after others
 
         private const int MinOccurrencesForInterning = 2;
@@ -47,7 +50,6 @@ namespace UdonSharp.CE.Editor.Optimizers
         private class StringLiteralCollector : CSharpSyntaxWalker
         {
             private readonly OptimizationContext _context;
-            private int _internableCount = 0;
 
             public StringLiteralCollector(OptimizationContext context)
             {

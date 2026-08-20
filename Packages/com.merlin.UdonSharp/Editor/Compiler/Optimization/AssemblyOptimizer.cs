@@ -85,7 +85,7 @@ namespace UdonSharp.Compiler.Optimization
                     }
                     catch (Exception ex)
                     {
-                        Debug.LogWarning($"[UdonSharp] Optimization pass '{pass.Name}' failed: {ex.Message}");
+                        UdonSharpCEUtils.LogWarning($"Optimization pass '{pass.Name}' failed: {ex.Message}");
                     }
                 }
 
@@ -101,7 +101,7 @@ namespace UdonSharp.Compiler.Optimization
 
         private static void LogMetrics(OptimizationMetrics metrics)
         {
-            Debug.Log($"[UdonSharp] Optimization removed {metrics.InstructionsRemoved} instructions, " +
+            UdonSharpCEUtils.Log($"Optimization removed {metrics.InstructionsRemoved} instructions, " +
                       $"replaced {metrics.InstructionsReplaced}, " +
                       $"coalesced {metrics.ValuesCoalesced}, " +
                       $"threaded {metrics.JumpsThreaded} jumps, " +

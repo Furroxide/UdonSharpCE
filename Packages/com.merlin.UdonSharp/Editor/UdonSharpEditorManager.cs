@@ -44,6 +44,13 @@ namespace UdonSharpEditor
 
         private static bool _skipSceneOpen;
 
+        /// <summary>
+        /// UdonSharp CE: exposed so CE's own editor automation can stand down for the same reasons this does.
+        /// It is raised around the VRChat asset bundle build, which opens scenes programmatically; a handler that
+        /// mutates or dirties a scene while that is running either fails the upload or ships edits nobody reviewed.
+        /// </summary>
+        internal static bool SkipSceneOpen => _skipSceneOpen;
+
         private static void OnSceneOpened(Scene scene, OpenSceneMode mode)
         {
             if (_skipSceneOpen) 
@@ -114,6 +121,10 @@ namespace UdonSharpEditor
                 return;
 
             RunAllUpdates();
+
+            // UdonSharp CE: RunAllUpdates only reaches loaded scenes, and this post-compile path is the one place
+            // where a script's [UdonBehaviourSyncMode] can have just changed, so prefab assets are corrected here.
+            UpdateSyncModesOnPrefabAssets(true);
 
             UdonEditorManager.Instance.RefreshQueuedProgramSources();
         }
@@ -1495,6 +1506,292 @@ namespace UdonSharpEditor
             if (modificationCount > 0)
                 EditorSceneManager.MarkAllScenesDirty();
         }
+
+        #region UdonSharp CE prefab sync mode correction
+
+        private static bool _updatingPrefabSyncModes;
+
+        /// <summary>
+        /// UdonSharp CE: <see cref="UpdateSyncModes"/> only corrects behaviours that live in a loaded scene, so a
+        /// prefab asset whose serialized sync method disagrees with its script's [UdonBehaviourSyncMode] keeps
+        /// handing every fresh instance the wrong mode. Nothing warns about it because the mismatch is asset data
+        /// rather than source, and a behaviour stuck on Continuous cannot sync arrays at all.
+        /// Returns the number of behaviours that were corrected.
+        /// </summary>
+        internal static int UpdateSyncModesOnPrefabAssets(bool logResults)
+        {
+            // Saving a prefab reimports it, which can come back around through the post-compile fixup. Without this
+            // guard that bounce would rescan every prefab in the project once per prefab we save.
+            if (_updatingPrefabSyncModes)
+                return 0;
+
+            HashSet<string> programAssetPaths = new HashSet<string>();
+
+            foreach (UdonSharpProgramAsset programAsset in UdonSharpProgramAsset.GetAllUdonSharpPrograms())
+            {
+                string programAssetPath = AssetDatabase.GetAssetPath(programAsset);
+
+                if (!string.IsNullOrEmpty(programAssetPath))
+                    programAssetPaths.Add(programAssetPath);
+            }
+
+            if (programAssetPaths.Count == 0)
+                return 0;
+
+            int behaviourFixCount = 0;
+            List<string> fixedPrefabNames = new List<string>();
+            List<UdonBehaviour> prefabBehaviours = new List<UdonBehaviour>();
+
+            _updatingPrefabSyncModes = true;
+
+            try
+            {
+                foreach (string prefabGuid in AssetDatabase.FindAssets("t:Prefab", new[] { "Assets" }))
+                {
+                    string prefabPath = AssetDatabase.GUIDToAssetPath(prefabGuid);
+
+                    // Filtering on the dependency table first keeps prefabs that have nothing to do with U# from
+                    // ever being loaded, which is what makes running this on every compile affordable. The walk has
+                    // to be recursive: a prefab that only contains a *nested* U# prefab, or that is a variant of one,
+                    // lists the nested/base prefab as its direct dependency and never the program asset, so a
+                    // direct-only query would filter out exactly the prefabs whose sync mode nothing else corrects.
+                    if (!AssetDatabase.GetDependencies(prefabPath, true).Any(programAssetPaths.Contains))
+                        continue;
+
+                    GameObject prefabAsset = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
+
+                    if (prefabAsset == null)
+                        continue;
+
+                    prefabAsset.GetComponentsInChildren<UdonBehaviour>(true, prefabBehaviours);
+
+                    // The loaded asset only answers "does anything disagree", so prefabs that are already correct
+                    // never pay for LoadPrefabContents, which spins up a temporary scene per prefab.
+                    bool needsFix = false;
+
+                    foreach (UdonBehaviour behaviour in prefabBehaviours)
+                    {
+                        if (TryGetEnforcedSyncMethod(behaviour, out Networking.SyncType expectedSyncMethod) &&
+                            behaviour.SyncMethod != expectedSyncMethod)
+                        {
+                            needsFix = true;
+                            break;
+                        }
+                    }
+
+                    if (!needsFix)
+                        continue;
+
+                    GameObject prefabRoot = PrefabUtility.LoadPrefabContents(prefabPath);
+
+                    if (PrefabUtility.IsPartOfImmutablePrefab(prefabRoot))
+                    {
+                        PrefabUtility.UnloadPrefabContents(prefabRoot);
+                        continue;
+                    }
+
+                    int prefabFixCount = 0;
+
+                    try
+                    {
+                        prefabRoot.GetComponentsInChildren<UdonBehaviour>(true, prefabBehaviours);
+
+                        foreach (UdonBehaviour behaviour in prefabBehaviours)
+                        {
+                            if (!TryGetEnforcedSyncMethod(behaviour, out Networking.SyncType expectedSyncMethod) ||
+                                behaviour.SyncMethod == expectedSyncMethod)
+                                continue;
+
+                            ApplySyncMethodToPrefabBehaviour(behaviour, expectedSyncMethod);
+
+                            prefabFixCount++;
+                        }
+
+                        // The writes above cannot be taken at face value: assigning SyncMethod also rewrites every
+                        // synced sibling on the same GameObject, so two behaviours declaring different modes undo
+                        // each other and traversal order alone would decide which one got saved. Re-checking is the
+                        // only way to tell a fix that stuck from a conflict that silently picked a winner.
+                        if (prefabFixCount > 0 &&
+                            ReportUnresolvedSyncModeConflicts(prefabBehaviours, prefabPath, prefabAsset))
+                        {
+                            prefabFixCount = 0;
+                        }
+
+                        if (prefabFixCount > 0)
+                            PrefabUtility.SaveAsPrefabAsset(prefabRoot, prefabPath);
+                    }
+                    finally
+                    {
+                        PrefabUtility.UnloadPrefabContents(prefabRoot);
+                    }
+
+                    if (prefabFixCount > 0)
+                    {
+                        behaviourFixCount += prefabFixCount;
+                        fixedPrefabNames.Add(Path.GetFileNameWithoutExtension(prefabPath));
+                    }
+                }
+            }
+            finally
+            {
+                _updatingPrefabSyncModes = false;
+            }
+
+            // The failure being prevented is "nothing happens at runtime", so name what was touched.
+            if (logResults && behaviourFixCount > 0)
+            {
+                string prefabNameList = fixedPrefabNames.Count > 10
+                    ? $"{string.Join(", ", fixedPrefabNames.Take(10))}, +{fixedPrefabNames.Count - 10} more"
+                    : string.Join(", ", fixedPrefabNames);
+
+                UdonSharpCEUtils.Log($"Corrected the sync mode of {behaviourFixCount} UdonBehaviour(s) in {fixedPrefabNames.Count} prefab asset(s) to match their [UdonBehaviourSyncMode]: {prefabNameList}");
+            }
+
+            return behaviourFixCount;
+        }
+
+        /// <summary>
+        /// UdonSharp CE: gets the sync method a behaviour's program asset enforces, if it enforces one at all.
+        /// Any and NoVariableSync are excluded because they are resolved against the other behaviours on the same
+        /// GameObject, which is bookkeeping the scene pass in <see cref="UpdateSyncModes"/> owns.
+        /// </summary>
+        private static bool TryGetEnforcedSyncMethod(UdonBehaviour behaviour, out Networking.SyncType syncMethod)
+        {
+            syncMethod = Networking.SyncType.None;
+
+            if (!(behaviour.programSource is UdonSharpProgramAsset programAsset))
+                return false;
+
+            switch (programAsset.behaviourSyncMode)
+            {
+                case BehaviourSyncMode.Continuous:
+                    syncMethod = Networking.SyncType.Continuous;
+                    return true;
+                case BehaviourSyncMode.Manual:
+                    syncMethod = Networking.SyncType.Manual;
+                    return true;
+                case BehaviourSyncMode.None:
+                    syncMethod = Networking.SyncType.None;
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// UdonSharp CE: assigns a sync method inside a prefab and registers the prefab override on every behaviour
+        /// the assignment actually touched.
+        ///
+        /// UdonBehaviour.SyncMethod's setter writes the new value straight into the backing field of every sibling
+        /// UdonBehaviour on the same GameObject whose method is not None, because VRChat requires all synced
+        /// behaviours on one GameObject to share a method. Those sibling writes bypass the siblings' own setters, so
+        /// when a sibling comes from a nested prefab or from a variant's base and its change is never recorded as an
+        /// override, SaveAsPrefabAsset drops it and the sibling silently reverts to whatever its source holds.
+        /// </summary>
+        private static void ApplySyncMethodToPrefabBehaviour(UdonBehaviour behaviour, Networking.SyncType syncMethod)
+        {
+            UdonBehaviour[] siblings = behaviour.gameObject.GetComponents<UdonBehaviour>();
+            Networking.SyncType[] previousSyncMethods = new Networking.SyncType[siblings.Length];
+
+            for (int i = 0; i < siblings.Length; ++i)
+                previousSyncMethods[i] = siblings[i].SyncMethod;
+
+            behaviour.SyncMethod = syncMethod;
+
+            for (int i = 0; i < siblings.Length; ++i)
+            {
+                UdonBehaviour sibling = siblings[i];
+
+                if (sibling != behaviour && sibling.SyncMethod == previousSyncMethods[i])
+                    continue;
+
+                // Behaviours that come from a nested prefab or from a variant's base are corrected as an override
+                // here too. Those sources get their own pass, but an override is the only fix available when the
+                // source is immutable, and a redundant override costs nothing next to a behaviour that cannot sync.
+                if (PrefabUtility.IsPartOfPrefabInstance(sibling))
+                    PrefabUtility.RecordPrefabInstancePropertyModifications(sibling);
+            }
+        }
+
+        /// <summary>
+        /// UdonSharp CE: reports every behaviour in a prefab that still disagrees with the sync method its script
+        /// declares after the correction pass ran, and returns true when there was at least one.
+        ///
+        /// Because assigning SyncMethod forces every synced behaviour on the GameObject to the same value, two U#
+        /// behaviours on one object declaring different modes can never both be satisfied - each correction undoes
+        /// the previous one. Saving that would bake in whichever behaviour the traversal happened to reach last,
+        /// which is a wrong answer written to disk with no warning, so the prefab is left untouched instead and the
+        /// user is told what to change.
+        /// </summary>
+        private static bool ReportUnresolvedSyncModeConflicts(List<UdonBehaviour> behaviours, string prefabPath, Object prefabContext)
+        {
+            bool conflictFound = false;
+
+            foreach (UdonBehaviour behaviour in behaviours)
+            {
+                if (!TryGetEnforcedSyncMethod(behaviour, out Networking.SyncType expectedSyncMethod) ||
+                    behaviour.SyncMethod == expectedSyncMethod)
+                    continue;
+
+                conflictFound = true;
+
+                // Name the behaviour that is holding the GameObject at the other method so the warning points at
+                // something the user can actually change.
+                UdonBehaviour winningBehaviour = null;
+
+                foreach (UdonBehaviour sibling in behaviour.gameObject.GetComponents<UdonBehaviour>())
+                {
+                    if (sibling == behaviour)
+                        continue;
+
+                    if (TryGetEnforcedSyncMethod(sibling, out Networking.SyncType siblingSyncMethod) &&
+                        siblingSyncMethod == behaviour.SyncMethod)
+                    {
+                        winningBehaviour = sibling;
+                        break;
+                    }
+                }
+
+                string conflictDescription = winningBehaviour != null
+                    ? $"'{GetBehaviourScriptName(winningBehaviour)}' requires {behaviour.SyncMethod} sync"
+                    : $"another UdonBehaviour on it holds the GameObject at {behaviour.SyncMethod} sync";
+
+                UdonSharpCEUtils.LogWarning($"UdonBehaviours on GameObject '{behaviour.gameObject.name}' in prefab '{prefabPath}' have conflicting synchronization methods: '{GetBehaviourScriptName(behaviour)}' requires {expectedSyncMethod} sync while {conflictDescription}. All synced UdonBehaviours on one GameObject must use the same method, so the prefab was left unchanged. Move one of them onto its own GameObject or change its [UdonBehaviourSyncMode].", prefabContext);
+            }
+
+            return conflictFound;
+        }
+
+        /// <summary>
+        /// UdonSharp CE: the name to show a user for a behaviour. The GameObject name is not enough on its own when
+        /// the point of the message is which of several components on that object to change.
+        /// </summary>
+        private static string GetBehaviourScriptName(UdonBehaviour behaviour)
+        {
+            if (behaviour.programSource is UdonSharpProgramAsset programAsset)
+            {
+                Type behaviourType = programAsset.GetClass();
+
+                if (behaviourType != null)
+                    return behaviourType.Name;
+            }
+
+            return behaviour.programSource != null ? behaviour.programSource.name : "UdonBehaviour";
+        }
+
+        [MenuItem("CE Tools/Fix Prefab Sync Modes")]
+        private static void UpdateSyncModesOnPrefabAssetsMenu()
+        {
+            int behaviourFixCount = UpdateSyncModesOnPrefabAssets(true);
+
+            EditorUtility.DisplayDialog("UdonSharp CE",
+                behaviourFixCount > 0
+                    ? $"Corrected the sync mode of {behaviourFixCount} UdonBehaviour(s) in prefab assets, see the console for the prefab list."
+                    : "All prefab assets already match the sync mode their scripts declare.",
+                "OK");
+        }
+
+        #endregion
 
         /// <summary>
         /// If a user deletes a U# script+program asset without clearing components in the scene referencing it beforehand, they can be stuck with an invisible UdonBehaviour that's orphaned from its proxy.

@@ -26,7 +26,13 @@ namespace UdonSharp.CE.Editor.Optimizers
         public string OptimizerId => "CEOPT009";
         public string OptimizerName => "Common Subexpression Elimination";
         public string Description => "Caches repeated pure expressions to avoid redundant computation.";
-        public bool IsEnabledByDefault => true;
+
+        // Disabled: same first-occurrence-wins rewrite as CEOPT008, so assignment targets are replaced
+        // by a cache local and the write is lost. Declarations are hoisted past null guards. The purity
+        // matcher also declares anything pure whose receiver text merely *contains* a known type name
+        // and whose method name *ends with* a known pure method, and fields mutated inside a loop are
+        // not tracked at all. Re-enable only after a semantic-model rewrite.
+        public bool IsEnabledByDefault => false;
         public int Priority => 115; // After dead code elimination, before loop unrolling
 
         /// <summary>

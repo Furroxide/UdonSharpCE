@@ -194,7 +194,7 @@ namespace UdonSharp.Serialization
             {
                 if (_variableTypeLookup.Count > 0)
                 {
-                    Debug.LogWarning($"[UdonSharp] {nameof(UdonVariableStorageInterface)} cache survived domain reload with {_variableTypeLookup.Count} entries.");
+                    UdonSharpCEUtils.LogWarning($"{nameof(UdonVariableStorageInterface)} cache survived domain reload with {_variableTypeLookup.Count} entries.");
                 }
             }
         }

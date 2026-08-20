@@ -24,7 +24,13 @@ namespace UdonSharp.CE.Editor.Optimizers
         public string OptimizerId => "CEOPT008";
         public string OptimizerName => "Extern Call Caching";
         public string Description => "Caches repeated extern property accesses to reduce expensive VM calls.";
-        public bool IsEnabledByDefault => true;
+
+        // Disabled: AccessReplacer rewrites every occurrence after the first, including assignment
+        // targets, so `transform.position = v;` silently becomes `__cache_0 = v;` and the write is lost.
+        // Cache declarations are also hoisted to the method block while accesses are collected from
+        // nested `if` bodies, so a guarded `target.transform.position` is evaluated unconditionally.
+        // Re-enable only after a rewrite that consults the semantic model for write/reachability analysis.
+        public bool IsEnabledByDefault => false;
         public int Priority => 120; // After CSE to catch remaining patterns
 
         /// <summary>

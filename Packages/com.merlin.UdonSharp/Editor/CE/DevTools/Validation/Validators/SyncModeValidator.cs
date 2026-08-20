@@ -1,9 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Text.RegularExpressions;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using UdonSharp;
+using UdonSharp.CE.Editor.DevTools.Analysis;
 
 namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
 {
@@ -21,6 +25,7 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
         public IEnumerable<ValidationIssue> Validate(ValidationContext context)
         {
             var issues = new List<ValidationIssue>();
+            var candidates = new List<KeyValuePair<Type, List<FieldInfo>>>();
 
             foreach (var type in context.BehaviourTypes)
             {
@@ -33,10 +38,32 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
                 if (syncedFields.Count == 0)
                     continue;
 
+                candidates.Add(new KeyValuePair<Type, List<FieldInfo>>(type, syncedFields));
+            }
+
+            if (candidates.Count == 0)
+                return issues;
+
+            // One parse and one compilation for the whole run rather than one per type; the analyzer is
+            // built from the candidate set up front for that reason.
+            var writeAnalyzer = new FieldWriteAnalyzer(candidates.Select(candidate => candidate.Key));
+
+            foreach (var candidate in candidates)
+            {
+                Type type = candidate.Key;
+                List<FieldInfo> syncedFields = candidate.Value;
+
+                string modeSource = BehaviourAnalyzer.DescribeSyncModeSource(type);
+                string modeNote = modeSource == null
+                    ? ""
+                    : $" This behaviour is Continuous by default ({modeSource}), so the cost is easy to miss.";
+
+                Dictionary<string, List<string>> writesByField = writeAnalyzer.AnalyzeWrites(type, syncedFields);
+
                 // Analyze each field for write patterns
                 foreach (var field in syncedFields)
                 {
-                    var writeLocations = AnalyzeFieldWrites(type, field);
+                    var writeLocations = writesByField[field.Name];
 
                     // If field is only written in Start/Awake/constructor
                     if (writeLocations.Count > 0 && writeLocations.All(w => IsInitializationMethod(w)))
@@ -46,9 +73,9 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
                             Severity = ValidationSeverity.Warning,
                             ValidatorName = Name,
                             Message = $"Field '{field.Name}' only set during initialization but uses Continuous sync",
-                            Details = "This field appears to be set once during Start/Awake but the behaviour uses Continuous sync mode. " +
+                            Details = $"This field is only written in {string.Join(", ", writeLocations)} but the behaviour uses Continuous sync mode. " +
                                      "Consider using Manual sync mode ([UdonBehaviourSyncMode(BehaviourSyncMode.Manual)]) " +
-                                     "and call RequestSerialization() when data changes.",
+                                     "and call RequestSerialization() when data changes." + modeNote,
                             RelatedType = type,
                             RelatedField = field,
                             FilePath = context.GetSourceFile(type)
@@ -65,7 +92,7 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
                         ValidatorName = Name,
                         Message = $"Behaviour has {syncedFields.Count} synced fields with Continuous sync",
                         Details = "Many fields in Continuous sync can waste bandwidth. " +
-                                 "Consider grouping related data or using Manual sync with delta updates.",
+                                 "Consider grouping related data or using Manual sync with delta updates." + modeNote,
                         RelatedType = type,
                         FilePath = context.GetSourceFile(type)
                     });
@@ -77,8 +104,10 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
 
         private string GetSyncMode(Type type)
         {
-            var syncModeAttribute = type.GetCustomAttribute<UdonBehaviourSyncModeAttribute>(true);
-            return syncModeAttribute?.behaviourSyncMode.ToString() ?? "None";
+            // Shared with the bandwidth analyzer so the two tools cannot disagree about what an absent
+            // [UdonBehaviourSyncMode] means. It means Any, which resolves to Continuous -- reading it as
+            // "None" made this validator skip precisely the behaviours it exists to catch.
+            return BehaviourAnalyzer.ResolveSyncMode(type);
         }
 
         private List<FieldInfo> GetSyncedFields(Type type)
@@ -95,128 +124,289 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
             return fields;
         }
 
-        private List<string> AnalyzeFieldWrites(Type type, FieldInfo field)
-        {
-            var writeLocations = new List<string>();
-
-            string sourceFile = FindSourceFile(type);
-            if (string.IsNullOrEmpty(sourceFile) || !System.IO.File.Exists(sourceFile))
-                return writeLocations;
-
-            try
-            {
-                string sourceCode = System.IO.File.ReadAllText(sourceFile);
-
-                // Find methods that write to this field
-                var methods = new[] { "Start", "Awake", "OnEnable", "Update", "FixedUpdate", "LateUpdate", 
-                                      "OnPlayerJoined", "OnPlayerLeft", "Interact", "OnPickup", "OnDrop" };
-
-                foreach (var methodName in methods)
-                {
-                    // Find method body
-                    var methodPattern = $@"(void|public|private|protected)\s+{methodName}\s*\([^)]*\)\s*\{{";
-                    var methodMatch = Regex.Match(sourceCode, methodPattern);
-
-                    if (!methodMatch.Success)
-                        continue;
-
-                    // Extract method body
-                    int bodyStart = methodMatch.Index + methodMatch.Length - 1;
-                    string methodBody = ExtractMethodBody(sourceCode, bodyStart);
-
-                    if (string.IsNullOrEmpty(methodBody))
-                        continue;
-
-                    // Check for field assignment
-                    var assignPattern = $@"\b{field.Name}\s*=(?!=)";
-                    if (Regex.IsMatch(methodBody, assignPattern))
-                    {
-                        writeLocations.Add(methodName);
-                    }
-
-                    // Also check for compound assignments (+=, -=, etc.)
-                    var compoundPattern = $@"\b{field.Name}\s*[\+\-\*\/\%\&\|\^]=";
-                    if (Regex.IsMatch(methodBody, compoundPattern))
-                    {
-                        writeLocations.Add(methodName);
-                    }
-
-                    // Check for increment/decrement
-                    var incDecPattern = $@"(\+\+|\-\-)\s*{field.Name}|{field.Name}\s*(\+\+|\-\-)";
-                    if (Regex.IsMatch(methodBody, incDecPattern))
-                    {
-                        writeLocations.Add(methodName);
-                    }
-                }
-
-                // Check for field initializer
-                var initPattern = $@"\b{field.Name}\s*=\s*[^;]+;";
-                var initMatch = Regex.Match(sourceCode, initPattern);
-                if (initMatch.Success)
-                {
-                    // Check if this is in class body (field initialization)
-                    int classBodyStart = sourceCode.IndexOf("class ");
-                    int firstMethodStart = FindFirstMethodStart(sourceCode);
-
-                    if (initMatch.Index > classBodyStart && initMatch.Index < firstMethodStart)
-                    {
-                        writeLocations.Add(".ctor"); // Field initializer
-                    }
-                }
-            }
-            catch
-            {
-                // Ignore parsing errors
-            }
-
-            return writeLocations.Distinct().ToList();
-        }
-
-        private string ExtractMethodBody(string sourceCode, int bodyStart)
-        {
-            if (bodyStart >= sourceCode.Length || sourceCode[bodyStart] != '{')
-                return null;
-
-            int braceCount = 1;
-            int pos = bodyStart + 1;
-
-            while (pos < sourceCode.Length && braceCount > 0)
-            {
-                if (sourceCode[pos] == '{') braceCount++;
-                else if (sourceCode[pos] == '}') braceCount--;
-                pos++;
-            }
-
-            return sourceCode.Substring(bodyStart, pos - bodyStart);
-        }
-
-        private int FindFirstMethodStart(string sourceCode)
-        {
-            var methodPattern = @"(void|public|private|protected|internal)\s+\w+\s*\([^)]*\)\s*\{";
-            var match = Regex.Match(sourceCode, methodPattern);
-            return match.Success ? match.Index : sourceCode.Length;
-        }
-
         private bool IsInitializationMethod(string methodName)
         {
             return methodName == "Start" || methodName == "Awake" || methodName == ".ctor" || methodName == "OnEnable";
         }
 
-        private string FindSourceFile(Type type)
+        /// <summary>
+        /// Finds every member that writes a behaviour's synced fields.
+        ///
+        /// This used to regex the raw .cs text for a hardcoded list of method names, which meant it reported
+        /// nothing at all for expression-bodied members, property accessors, local functions, or any handler
+        /// outside that list -- and "no writes found" reads exactly like "this field is fine", so the
+        /// validator was quietly silent on most real behaviours. A Roslyn walk sees every member, and the
+        /// semantic model stops a local variable that happens to share a field's name from being reported as
+        /// a write to that field.
+        /// </summary>
+        private class FieldWriteAnalyzer
         {
-#if UNITY_EDITOR
-            var scripts = UnityEditor.MonoImporter.GetAllRuntimeMonoScripts();
-            foreach (var script in scripts)
+#if UNITY_2022_3_OR_NEWER
+            private const LanguageVersion SourceLanguageVersion = LanguageVersion.CSharp9;
+#else
+            private const LanguageVersion SourceLanguageVersion = LanguageVersion.CSharp7_3;
+#endif
+
+            private readonly Dictionary<Type, SyntaxTree> _treesByType = new Dictionary<Type, SyntaxTree>();
+            private CSharpCompilation _compilation;
+
+            public FieldWriteAnalyzer(IEnumerable<Type> types)
             {
-                if (script.GetClass() == type)
+                Dictionary<string, string[]> definesByAssembly = GetDefinesByAssembly();
+
+                foreach (Type type in types)
                 {
-                    string assetPath = UnityEditor.AssetDatabase.GetAssetPath(script);
-                    return System.IO.Path.GetFullPath(assetPath);
+                    if (_treesByType.ContainsKey(type))
+                        continue;
+
+                    string sourceFile = FindSourceFile(type);
+                    if (string.IsNullOrEmpty(sourceFile) || !File.Exists(sourceFile))
+                        continue;
+
+                    definesByAssembly.TryGetValue(type.Assembly.GetName().Name, out string[] defines);
+
+                    // Parse with the defines Unity actually compiled this assembly with, and with the
+                    // language version UdonSharp itself parses these files at. Without the defines every
+                    // #if UNITY_EDITOR region is disabled text, and the writes inside it are invisible --
+                    // which is how a field written in a gated block looked like a field never written.
+                    CSharpParseOptions parseOptions = CSharpParseOptions.Default
+                        .WithDocumentationMode(DocumentationMode.None)
+                        .WithLanguageVersion(SourceLanguageVersion);
+
+                    if (defines != null)
+                        parseOptions = parseOptions.WithPreprocessorSymbols(defines);
+
+                    _treesByType[type] = CSharpSyntaxTree.ParseText(
+                        File.ReadAllText(sourceFile),
+                        parseOptions,
+                        sourceFile);
                 }
             }
-#endif
-            return null;
+
+            public Dictionary<string, List<string>> AnalyzeWrites(Type type, List<FieldInfo> fields)
+            {
+                var writes = new Dictionary<string, List<string>>();
+                foreach (FieldInfo field in fields)
+                    writes[field.Name] = new List<string>();
+
+                if (!_treesByType.TryGetValue(type, out SyntaxTree tree))
+                    return writes;
+
+                ClassDeclarationSyntax classDeclaration = tree.GetRoot()
+                    .DescendantNodes()
+                    .OfType<ClassDeclarationSyntax>()
+                    .FirstOrDefault(declaration => declaration.Identifier.ValueText == type.Name);
+
+                if (classDeclaration == null)
+                    return writes;
+
+                SemanticModel model = GetSemanticModel(tree);
+
+                foreach (SyntaxNode node in classDeclaration.DescendantNodes())
+                {
+                    ExpressionSyntax target = GetWriteTarget(node);
+                    if (target == null)
+                        continue;
+
+                    string fieldName = ResolveFieldName(target, model, type, writes);
+                    if (fieldName == null)
+                        continue;
+
+                    Record(writes, fieldName, GetContainingMemberName(node));
+                }
+
+                // Field initializers are not assignment expressions, so they need their own pass. They count
+                // as ".ctor" writes because they run before Start, which is what makes a field "only set
+                // during initialization".
+                foreach (VariableDeclaratorSyntax declarator in classDeclaration
+                             .DescendantNodes()
+                             .OfType<VariableDeclaratorSyntax>())
+                {
+                    if (declarator.Initializer == null)
+                        continue;
+
+                    if (!(declarator.Parent?.Parent is FieldDeclarationSyntax))
+                        continue;
+
+                    Record(writes, declarator.Identifier.ValueText, ".ctor");
+                }
+
+                return writes;
+            }
+
+            private static void Record(Dictionary<string, List<string>> writes, string fieldName, string member)
+            {
+                if (member == null)
+                    return;
+
+                if (writes.TryGetValue(fieldName, out List<string> locations) && !locations.Contains(member))
+                    locations.Add(member);
+            }
+
+            /// <summary>
+            /// The expression a node writes to, or null if the node is not a write.
+            /// </summary>
+            private static ExpressionSyntax GetWriteTarget(SyntaxNode node)
+            {
+                if (node is AssignmentExpressionSyntax assignment)
+                    return assignment.Left;
+
+                if (node is PrefixUnaryExpressionSyntax prefix &&
+                    (prefix.IsKind(SyntaxKind.PreIncrementExpression) || prefix.IsKind(SyntaxKind.PreDecrementExpression)))
+                {
+                    return prefix.Operand;
+                }
+
+                if (node is PostfixUnaryExpressionSyntax postfix &&
+                    (postfix.IsKind(SyntaxKind.PostIncrementExpression) || postfix.IsKind(SyntaxKind.PostDecrementExpression)))
+                {
+                    return postfix.Operand;
+                }
+
+                return null;
+            }
+
+            private static string ResolveFieldName(
+                ExpressionSyntax target,
+                SemanticModel model,
+                Type declaringType,
+                Dictionary<string, List<string>> tracked)
+            {
+                while (target is ParenthesizedExpressionSyntax parenthesized)
+                    target = parenthesized.Expression;
+
+                if (model != null && model.GetSymbolInfo(target).Symbol is IFieldSymbol fieldSymbol)
+                {
+                    if (fieldSymbol.ContainingType?.Name != declaringType.Name)
+                        return null;
+
+                    return tracked.ContainsKey(fieldSymbol.Name) ? fieldSymbol.Name : null;
+                }
+
+                // No semantic model, or an unresolvable expression. Fall back to matching the written name
+                // syntactically; over-reporting a shadowed local is better than the previous behaviour of
+                // reporting nothing at all.
+                string name = null;
+
+                if (target is IdentifierNameSyntax identifier)
+                    name = identifier.Identifier.ValueText;
+                else if (target is MemberAccessExpressionSyntax member && member.Expression is ThisExpressionSyntax)
+                    name = member.Name.Identifier.ValueText;
+
+                return name != null && tracked.ContainsKey(name) ? name : null;
+            }
+
+            /// <summary>
+            /// The name a write is reported under. A write inside a lambda gets its enclosing member's name
+            /// with a suffix, never the bare name: "assigned by a callback created in Start" must not be
+            /// mistaken for "assigned during initialization", which is the whole judgement this validator
+            /// makes.
+            /// </summary>
+            private static string GetContainingMemberName(SyntaxNode node)
+            {
+                bool insideCallback = false;
+
+                for (SyntaxNode current = node; current != null; current = current.Parent)
+                {
+                    if (current is AnonymousFunctionExpressionSyntax)
+                    {
+                        insideCallback = true;
+                        continue;
+                    }
+
+                    string member = GetMemberName(current);
+                    if (member == null)
+                        continue;
+
+                    return insideCallback ? $"{member} (callback)" : member;
+                }
+
+                return null;
+            }
+
+            private static string GetMemberName(SyntaxNode node)
+            {
+                switch (node)
+                {
+                    case MethodDeclarationSyntax method:
+                        return method.Identifier.ValueText;
+                    case LocalFunctionStatementSyntax localFunction:
+                        return localFunction.Identifier.ValueText;
+                    case ConstructorDeclarationSyntax _:
+                        return ".ctor";
+                    case AccessorDeclarationSyntax accessor:
+                        return $"{GetPropertyName(accessor)}.{accessor.Keyword.ValueText}";
+                    case PropertyDeclarationSyntax property:
+                        return property.Identifier.ValueText;
+                    case IndexerDeclarationSyntax _:
+                        return "this[]";
+                    case FieldDeclarationSyntax _:
+                        return ".ctor";
+                    default:
+                        return null;
+                }
+            }
+
+            private static string GetPropertyName(SyntaxNode accessor)
+            {
+                for (SyntaxNode current = accessor; current != null; current = current.Parent)
+                {
+                    if (current is PropertyDeclarationSyntax property)
+                        return property.Identifier.ValueText;
+
+                    if (current is IndexerDeclarationSyntax)
+                        return "this[]";
+                }
+
+                return "property";
+            }
+
+            private SemanticModel GetSemanticModel(SyntaxTree tree)
+            {
+                if (_compilation == null)
+                {
+                    _compilation = CSharpCompilation.Create(
+                        "UdonSharpCESyncModeValidator",
+                        _treesByType.Values.Distinct(),
+                        UdonSharp.Compiler.CompilationContext.GetMetadataReferences(),
+                        new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+                }
+
+                if (!_compilation.ContainsSyntaxTree(tree))
+                    return null;
+
+                return _compilation.GetSemanticModel(tree, ignoreAccessibility: true);
+            }
+
+            private static Dictionary<string, string[]> GetDefinesByAssembly()
+            {
+                var defines = new Dictionary<string, string[]>();
+
+                foreach (UnityEditor.Compilation.Assembly assembly in
+                         UnityEditor.Compilation.CompilationPipeline.GetAssemblies(
+                             UnityEditor.Compilation.AssembliesType.Editor))
+                    defines[assembly.name] = assembly.defines;
+
+                return defines;
+            }
+
+            private static string FindSourceFile(Type type)
+            {
+                var scripts = UnityEditor.MonoImporter.GetAllRuntimeMonoScripts();
+                foreach (var script in scripts)
+                {
+                    if (script.GetClass() == type)
+                    {
+                        string assetPath = UnityEditor.AssetDatabase.GetAssetPath(script);
+                        if (string.IsNullOrEmpty(assetPath))
+                            return null;
+
+                        return Path.GetFullPath(assetPath);
+                    }
+                }
+
+                return null;
+            }
         }
     }
 }
-

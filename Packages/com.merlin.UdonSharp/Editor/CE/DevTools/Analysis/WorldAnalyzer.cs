@@ -57,8 +57,11 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
                     var typeAnalysis = _behaviourAnalyzer.Analyze(group.Key);
                     typeAnalysis.InstanceCount = group.Count();
 
-                    // Only include behaviours with synced fields
-                    if (typeAnalysis.Fields.Count > 0 || typeAnalysis.SyncMode != "None")
+                    // Only include behaviours that actually cost variable-sync bandwidth. This used to
+                    // also admit anything whose SyncMode was not "None", which now that an absent
+                    // [UdonBehaviourSyncMode] correctly resolves to Continuous would list every behaviour
+                    // in the scene and bury the ones that really sync.
+                    if (typeAnalysis.Fields.Count > 0)
                     {
                         result.BehaviourResults.Add(typeAnalysis);
                     }
@@ -100,7 +103,7 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
                     var typeAnalysis = _behaviourAnalyzer.Analyze(group.Key);
                     typeAnalysis.InstanceCount = group.Count();
 
-                    if (typeAnalysis.Fields.Count > 0 || typeAnalysis.SyncMode != "None")
+                    if (typeAnalysis.Fields.Count > 0)
                     {
                         result.BehaviourResults.Add(typeAnalysis);
                     }

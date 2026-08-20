@@ -32,7 +32,13 @@ namespace UdonSharp.CE.Editor.Optimizers
         public string OptimizerId => "CEOPT010";
         public string OptimizerName => "Loop Invariant Code Motion";
         public string Description => "Hoists invariant computations out of loops to reduce per-iteration work.";
-        public bool IsEnabledByDefault => true;
+
+        // Disabled: purity is decided by bare method name on any receiver and the list includes Log,
+        // Normalize and Scale, so `Debug.Log("x")` in a loop is hoisted and InferType falls through to
+        // `var`, emitting `var __licm_0 = Debug.Log("x");` -> CS0815 from a synthesized node the author
+        // cannot see. `for` incrementors are never inspected, so a field loop variable hoists an
+        // expression that depends on it. Short-circuit, switch and nested-loop contexts are not guarded.
+        public bool IsEnabledByDefault => false;
         public int Priority => 105; // After constant folding, before CSE
 
         /// <summary>

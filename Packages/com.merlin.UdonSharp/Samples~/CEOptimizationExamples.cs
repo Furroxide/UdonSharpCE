@@ -4,6 +4,7 @@ using VRC.SDKBase;
 
 namespace UdonSharp.CE.Examples
 {
+#pragma warning disable CS0162, CS0219 // This sample intentionally demonstrates unreachable-code and constant-folding optimizations.
     /// <summary>
     /// This example script demonstrates all automatic CE compiler optimizations.
     /// 
@@ -12,7 +13,10 @@ namespace UdonSharp.CE.Examples
     /// 
     /// View the optimization report: Tools > UdonSharpCE > Show Optimization Report
     /// </summary>
-    [UdonBehaviourSyncMode(BehaviourSyncMode.None)]
+    // NoVariableSync, not None: this behaviour syncs no variables, but it does send network events
+    // (see the string-interning examples below). BehaviourSyncMode.None disables SendCustomNetworkEvent
+    // on the behaviour entirely, so those calls would silently never reach any client.
+    [UdonBehaviourSyncMode(BehaviourSyncMode.NoVariableSync)]
     public class CEOptimizationExamples : UdonSharpBehaviour
     {
         // ════════════════════════════════════════════════════════════════════
@@ -434,5 +438,6 @@ namespace UdonSharp.CE.Examples
         //
         // ════════════════════════════════════════════════════════════════════
     }
+#pragma warning restore CS0162, CS0219
 }
 

@@ -126,16 +126,29 @@ namespace UdonSharp.Compiler
 
                     string logStr = $"{fileStr}: {diagnostic.Message}";
 
+                    // CE-owned diagnostics carry a CE diagnostic code, so tag them [UdonSharpCE] to keep
+                    // fork-specific findings distinguishable from upstream UdonSharp ones in the console.
+                    bool isCEDiagnostic = UdonSharpCEUtils.IsCEDiagnostic(diagnostic.Message);
+
                     switch (diagnostic.Severity)
                     {
                         case DiagnosticSeverity.Error:
-                            UdonSharpUtils.LogBuildError(diagnostic.Message, filePath, line, character);
+                            if (isCEDiagnostic)
+                                UdonSharpCEUtils.LogBuildError(diagnostic.Message, filePath, line, character);
+                            else
+                                UdonSharpUtils.LogBuildError(diagnostic.Message, filePath, line, character);
                             break;
                         case DiagnosticSeverity.Warning:
-                            UdonSharpUtils.LogWarning(logStr);
+                            if (isCEDiagnostic)
+                                UdonSharpCEUtils.LogWarning(logStr);
+                            else
+                                UdonSharpUtils.LogWarning(logStr);
                             break;
                         case DiagnosticSeverity.Log:
-                            UdonSharpUtils.Log(logStr);
+                            if (isCEDiagnostic)
+                                UdonSharpCEUtils.Log(logStr);
+                            else
+                                UdonSharpUtils.Log(logStr);
                             break;
                     }
                 }
@@ -463,10 +476,24 @@ namespace UdonSharp.Compiler
             compilationContext.CurrentPhase = CompilationContext.CompilePhase.Setup;
             ModuleBinding[] syntaxTrees = compilationContext.LoadSyntaxTreesAndCreateModules(allScriptAssemblies);
 
-            // Run CE compile-time optimizers on syntax trees
+            // Phase A: correctness-critical source generation. Any failure here is a compile Error, which
+            // aborts before ApplyProgram so the previously-serialized program is left intact rather than
+            // being overwritten by one that is missing its generated glue.
+            Stopwatch generatorTimer = Stopwatch.StartNew();
+            syntaxTrees = RunSourceGenerators(compilationContext, syntaxTrees);
+            PrintStageTime("CE Source Generators", generatorTimer);
+
+            if (compilationContext.ErrorCount > 0)
+                return;
+
+            // Phase B: optional optimizations. Failure is a Warning; the generated glue is already safely
+            // in the tree at this point, so continuing with an untransformed tree is correct.
             Stopwatch optimizerTimer = Stopwatch.StartNew();
             syntaxTrees = RunCompileTimeOptimizers(compilationContext, syntaxTrees);
             PrintStageTime("CE Optimizers", optimizerTimer);
+
+            if (compilationContext.ErrorCount > 0)
+                return;
 
             foreach (ModuleBinding binding in syntaxTrees)
             {
@@ -965,6 +992,28 @@ namespace UdonSharp.Compiler
                     
                     goto default;
                 case BehaviourSyncMode.Any:
+                    // UdonSharp CE.
+                    //
+                    // Reaching here now means the author wrote [UdonBehaviourSyncMode(BehaviourSyncMode.Any)]
+                    // *explicitly*: a behaviour that declares nothing gets a concrete mode injected before
+                    // Roslyn runs (BehaviourSyncModeEmitter, CEGEN008), so it arrives as Manual or Continuous.
+                    //
+                    // Any is deliberately not validated as Continuous. It means "nothing is enforced; the
+                    // mode is chosen per UdonBehaviour in the inspector" -- UdonSharpEditorManager.UpdateSyncModes
+                    // explicitly SKIPS Any rather than reconciling it, so Manual is a legitimate choice for
+                    // this behaviour and erroring on a synced array here would reject a working world.
+                    //
+                    // A synced array is still worth flagging, because if the component is left on Continuous
+                    // that array can never sync and nothing else would say so.
+                    if (fieldType.IsArray)
+                    {
+                        context.AddDiagnostic(DiagnosticSeverity.Warning, field.RoslynSymbol.Locations.First(),
+                            $"'{field.Name}' is a synced array on a behaviour declared BehaviourSyncMode.Any, so its " +
+                            "sync mode is whatever each UdonBehaviour is set to in the inspector. Continuous sync " +
+                            "cannot carry arrays at all -- the field would silently never sync. Declare " +
+                            "[UdonBehaviourSyncMode(BehaviourSyncMode.Manual)] to make the requirement explicit.");
+                    }
+
                     goto default;
                 default:
                     
@@ -1158,8 +1207,233 @@ namespace UdonSharp.Compiler
         }
 
         /// <summary>
-        /// Runs compile-time optimizers on all syntax trees.
-        /// Optimizers transform syntax trees before Roslyn compilation to generate more efficient Udon code.
+        /// Phase A of the CE transform stage: correctness-critical source generation.
+        ///
+        /// Unlike <see cref="RunCompileTimeOptimizers"/>, every failure here becomes a compile
+        /// <see cref="DiagnosticSeverity.Error"/>. That matters because the alternative -- warn and continue
+        /// with the untransformed trees -- produces a program that compiles cleanly while missing its
+        /// generated sync glue, async state machines and quantization, and then marks itself up to date.
+        /// </summary>
+        private static ModuleBinding[] RunSourceGenerators(CompilationContext compilationContext, ModuleBinding[] syntaxTrees)
+        {
+            if (syntaxTrees == null || syntaxTrees.Length == 0)
+                return syntaxTrees;
+
+            SourceGenerationResult result;
+
+            try
+            {
+                SourceGeneratorRegistry.EnsureProvidersRegistered(compilationContext);
+
+                if (compilationContext.ErrorCount > 0)
+                    return syntaxTrees;
+
+                result = SourceGeneratorRegistry.RunGenerators(ToTreeTuples(syntaxTrees));
+            }
+            catch (CodeGenerationException e)
+            {
+                // Generator-authored failure: re-anchored onto the matching input tree, so the diagnostic is
+                // clickable even when the generator was several rewrites deep in the chain.
+                compilationContext.AddDiagnostic(DiagnosticSeverity.Error,
+                    ResolveGeneratorLocation(syntaxTrees, e.Location, e.FilePath),
+                    $"{e.GeneratorId}: {e.Message}");
+                return syntaxTrees;
+            }
+            catch (Exception e)
+            {
+                compilationContext.AddDiagnostic(DiagnosticSeverity.Error, (Location)null,
+                    $"USCE0004: UdonSharp CE source generation failed and the compile cannot continue: {e}");
+                return syntaxTrees;
+            }
+
+            foreach (SourceGenerationDiagnostic diagnostic in result.Diagnostics)
+            {
+                compilationContext.AddDiagnostic(diagnostic.Severity,
+                    ResolveGeneratorLocation(syntaxTrees, diagnostic.Location, diagnostic.FilePath),
+                    $"{diagnostic.Id}: {diagnostic.Message}");
+            }
+
+            EvaluateGeneratorTripwires(compilationContext, syntaxTrees, result);
+
+            if (result.Failed || compilationContext.ErrorCount > 0)
+                return syntaxTrees;
+
+            return ApplyTransformedTrees(compilationContext, syntaxTrees, result.Trees);
+        }
+
+        /// <summary>
+        /// Re-anchors a generator's location onto the matching *input* tree.
+        ///
+        /// <see cref="CompilationContext.TranslateLocationToFileName"/> resolves a file by reference-comparing
+        /// <c>binding.tree == location.SourceTree</c>. That only holds for the first generator in the chain:
+        /// every later generator sees trees its predecessors rewrote, so its location points at a tree that is
+        /// not in <c>ModuleBindings</c> and the error prints "Unknown File(1,1)". The generator does know the
+        /// file it was working on, so we rebuild the location against that file's input tree.
+        ///
+        /// The offset is clamped because the rewritten tree is longer or shorter than the input; the line may
+        /// be approximate, but an approximate line in the right file beats an unknown file.
+        /// </summary>
+        private static Location ResolveGeneratorLocation(ModuleBinding[] syntaxTrees, Location location, string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath))
+                return location;
+
+            // Already anchored to an input tree -- leave the exact span alone.
+            if (location?.SourceTree != null && syntaxTrees.Any(binding => binding.tree == location.SourceTree))
+                return location;
+
+            ModuleBinding target = syntaxTrees.FirstOrDefault(
+                binding => string.Equals(binding.filePath, filePath, StringComparison.Ordinal));
+
+            if (target?.tree == null)
+                return location;
+
+            TextSpan span = location?.SourceSpan ?? default(TextSpan);
+
+            // Clamp against the tree the location is built on, not against ModuleBinding.sourceText.
+            // Location.Create validates the span against its own tree, so a span past the tree's end throws
+            // out of the diagnostic path and loses the generator error entirely. The two lengths match today
+            // only because the tree was parsed from that exact string; nothing enforces it.
+            int limit = target.tree.GetRoot().FullSpan.End;
+
+            return Location.Create(target.tree, TextSpan.FromBounds(Math.Min(span.Start, limit), Math.Min(span.End, limit)));
+        }
+
+        /// <summary>
+        /// Catches the failure shape a presence check cannot see: a generator that was registered, ran, and
+        /// silently produced nothing.
+        ///
+        /// Two conditions trip the diagnostic, and the second is the one that matters in production:
+        /// the generator has no <see cref="SourceGeneratorRunStatus.Ran"/> record at all (its provider never
+        /// registered, or it faulted), OR it ran and reported <c>FilesTransformed == 0</c>. Checking only
+        /// the first made every tripwire self-satisfying -- the same loop in <c>CEGeneratorRunner</c> that
+        /// declares a tripwire also writes the Ran record that clears it -- so the diagnostic was reachable
+        /// only through the <c>OverrideForTests</c> seam, and the regression it exists to catch (a rewriter
+        /// that stops emitting, leaving a program that compiles but never syncs) shipped silently.
+        ///
+        /// The zero-transform arm is only sound because of two things, and both must stay true:
+        ///
+        /// 1. Only a token that is a HARD OBLIGATION carries a tripwire. A generator with a legitimate
+        ///    no-op path -- an opt-out attribute, an already-explicit declaration -- declares no tripwire
+        ///    and says why at its entry in <c>CEGeneratorRunner</c>.
+        /// 2. The scan looks at code only. <c>DemoManager</c> prints "[Sync], [Rpc], RateLimiter" in a UI
+        ///    string and <c>CEPersistence</c> spells "[PlayerData(\"key\")]" inside its runtime error text;
+        ///    a raw substring scan fails the compile of projects that declare neither attribute and where
+        ///    every generator behaved correctly.
+        ///
+        /// FilesTransformed is a whole-compile count, so this catches a generator that stopped emitting
+        /// entirely, not one that skipped a single file. That is the deliberate trade: per-file granularity
+        /// would need each generator to report which files it considered, and guessing at it from the
+        /// outside is exactly how a tripwire starts failing correct code.
+        /// </summary>
+        private static void EvaluateGeneratorTripwires(CompilationContext compilationContext, ModuleBinding[] syntaxTrees, SourceGenerationResult result)
+        {
+            if (result.Tripwires.Count == 0)
+                return;
+
+            Dictionary<string, SourceGeneratorRunRecord> runRecords =
+                new Dictionary<string, SourceGeneratorRunRecord>(StringComparer.Ordinal);
+
+            foreach (SourceGeneratorRunRecord record in result.RunRecords)
+                runRecords[record.GeneratorId] = record;
+
+            foreach (SourceGeneratorTripwire tripwire in result.Tripwires)
+            {
+                runRecords.TryGetValue(tripwire.GeneratorId, out SourceGeneratorRunRecord runRecord);
+
+                bool ran = runRecord != null && runRecord.Status == SourceGeneratorRunStatus.Ran;
+
+                if (ran && runRecord.FilesTransformed > 0)
+                    continue;
+
+                string failure = ran
+                    ? "ran but emitted nothing for"
+                    : "did not run on";
+
+                foreach (ModuleBinding binding in syntaxTrees)
+                {
+                    foreach (string token in tripwire.TriggerTokens)
+                    {
+                        if (!SourceDeclaresTrigger(binding, token))
+                            continue;
+
+                        compilationContext.AddDiagnostic(DiagnosticSeverity.Error, binding.tree.GetRoot().GetLocation(),
+                            $"{tripwire.DiagnosticId}: source generator '{tripwire.GeneratorId}' {failure} " +
+                            $"'{binding.filePath}', which uses '{token}'. Correctness-critical code generation was " +
+                            "skipped, so the resulting program would compile but not behave correctly.");
+
+                        goto nextTripwire;
+                    }
+                }
+
+                nextTripwire: ;
+            }
+        }
+
+        /// <summary>
+        /// True when <paramref name="token"/> appears in this module's real code -- not in a comment, not
+        /// inside a string or character literal, and not in a <c>#if</c> region the parser dropped.
+        ///
+        /// Offsets into <see cref="ModuleBinding.sourceText"/> are valid against
+        /// <see cref="ModuleBinding.tree"/> because the tree was parsed from that exact string
+        /// (<c>CompilationContext.LoadSyntaxTreesAndCreateModules</c>), so a substring hit can be classified
+        /// by asking the tree what lives at that offset.
+        /// </summary>
+        private static bool SourceDeclaresTrigger(ModuleBinding binding, string token)
+        {
+            if (string.IsNullOrEmpty(token) || string.IsNullOrEmpty(binding.sourceText) || binding.tree == null)
+                return false;
+
+            SyntaxNode root = binding.tree.GetRoot();
+            int treeEnd = root.FullSpan.End;
+
+            for (int index = binding.sourceText.IndexOf(token, StringComparison.Ordinal);
+                 index >= 0;
+                 index = binding.sourceText.IndexOf(token, index + 1, StringComparison.Ordinal))
+            {
+                // Guards FindToken's range check in the event sourceText and the tree ever drift apart.
+                if (index >= treeEnd)
+                    break;
+
+                if (IsCodePosition(root, index))
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Classifies one source offset as code or as prose the generator was right to ignore.
+        /// </summary>
+        private static bool IsCodePosition(SyntaxNode root, int position)
+        {
+            SyntaxToken token = root.FindToken(position);
+
+            // FindToken maps a trivia offset onto the token that owns the trivia, so an offset the token's
+            // own span does not cover is a comment, a disabled preprocessor region or whitespace.
+            if (!token.Span.Contains(position))
+                return false;
+
+            switch (token.Kind())
+            {
+                case SyntaxKind.StringLiteralToken:
+                case SyntaxKind.CharacterLiteralToken:
+                case SyntaxKind.InterpolatedStringTextToken:
+                case SyntaxKind.XmlTextLiteralToken:
+                    return false;
+
+                default:
+                    return true;
+            }
+        }
+
+        /// <summary>
+        /// Phase B of the CE transform stage: optional optimizations.
+        ///
+        /// A failure here is a <see cref="DiagnosticSeverity.Warning"/> rather than a bare console line, so
+        /// it lands in <c>UdonSharpEditorCache.LastCompileDiagnostics</c> and is assertable by tests. The
+        /// compile continues with the untransformed trees, which is safe because Phase A already put the
+        /// correctness-critical glue in place.
         /// </summary>
         private static ModuleBinding[] RunCompileTimeOptimizers(CompilationContext compilationContext, ModuleBinding[] syntaxTrees)
         {
@@ -1168,57 +1442,75 @@ namespace UdonSharp.Compiler
 
             try
             {
-                // Convert to the format expected by the optimizer registry
-                var treeTuples = new (SyntaxTree tree, string filePath)[syntaxTrees.Length];
-                for (int i = 0; i < syntaxTrees.Length; i++)
-                {
-                    treeTuples[i] = (syntaxTrees[i].tree, syntaxTrees[i].filePath);
-                }
-
-                // Run all registered optimizers
-                var optimizedTuples = CompileTimeOptimizerRegistry.RunOptimizers(treeTuples);
+                var optimizedTuples = CompileTimeOptimizerRegistry.RunOptimizers(ToTreeTuples(syntaxTrees));
 
                 if (optimizedTuples == null || optimizedTuples.Length == 0)
                     return syntaxTrees;
 
-                var bindingByPath = new Dictionary<string, ModuleBinding>(StringComparer.Ordinal);
-                foreach (var binding in syntaxTrees)
-                {
-                    if (!string.IsNullOrEmpty(binding.filePath))
-                        bindingByPath[binding.filePath] = binding;
-                }
-
-                var updatedBindings = new ModuleBinding[optimizedTuples.Length];
-                for (int i = 0; i < optimizedTuples.Length; i++)
-                {
-                    var (tree, filePath) = optimizedTuples[i];
-                    if (bindingByPath.TryGetValue(filePath, out var binding))
-                    {
-                        binding.tree = tree;
-                        binding.filePath = filePath;
-                        binding.sourceText = tree.GetText().ToString();
-                        updatedBindings[i] = binding;
-                    }
-                    else
-                    {
-                        updatedBindings[i] = new ModuleBinding
-                        {
-                            tree = tree,
-                            filePath = filePath,
-                            sourceText = tree.GetText().ToString()
-                        };
-                    }
-                }
-
-                compilationContext.ReplaceModuleBindings(updatedBindings);
-                return updatedBindings;
+                return ApplyTransformedTrees(compilationContext, syntaxTrees, optimizedTuples);
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[UdonSharp] Compile-time optimization failed: {ex.Message}");
+                compilationContext.AddDiagnostic(DiagnosticSeverity.Warning, (Location)null,
+                    $"USCE0005: a CE optimizer failed and was skipped; the program is correct but unoptimized: {ex}");
             }
 
             return syntaxTrees;
+        }
+
+        private static (SyntaxTree tree, string filePath)[] ToTreeTuples(ModuleBinding[] syntaxTrees)
+        {
+            var treeTuples = new (SyntaxTree tree, string filePath)[syntaxTrees.Length];
+            for (int i = 0; i < syntaxTrees.Length; i++)
+                treeTuples[i] = (syntaxTrees[i].tree, syntaxTrees[i].filePath);
+
+            return treeTuples;
+        }
+
+        /// <summary>
+        /// Writes transformed trees back into the module bindings and republishes them on the context, so
+        /// binding, emit and diagnostic file resolution all see the transformed source.
+        /// </summary>
+        private static ModuleBinding[] ApplyTransformedTrees(CompilationContext compilationContext, ModuleBinding[] syntaxTrees, (SyntaxTree tree, string filePath)[] transformedTuples)
+        {
+            var bindingByPath = new Dictionary<string, ModuleBinding>(StringComparer.Ordinal);
+            foreach (var binding in syntaxTrees)
+            {
+                if (!string.IsNullOrEmpty(binding.filePath))
+                    bindingByPath[binding.filePath] = binding;
+            }
+
+            var updatedBindings = new ModuleBinding[transformedTuples.Length];
+            for (int i = 0; i < transformedTuples.Length; i++)
+            {
+                var (tree, filePath) = transformedTuples[i];
+                if (bindingByPath.TryGetValue(filePath, out var binding))
+                {
+                    // A tree no generator touched comes back as the same instance. Re-serializing it anyway
+                    // cost a full GetText().ToString() per file per compile for the overwhelming majority of
+                    // files, which is pure compile-time overhead on projects that use no CE features at all.
+                    if (!ReferenceEquals(binding.tree, tree))
+                    {
+                        binding.tree = tree;
+                        binding.sourceText = tree.GetText().ToString();
+                    }
+
+                    binding.filePath = filePath;
+                    updatedBindings[i] = binding;
+                }
+                else
+                {
+                    updatedBindings[i] = new ModuleBinding
+                    {
+                        tree = tree,
+                        filePath = filePath,
+                        sourceText = tree.GetText().ToString()
+                    };
+                }
+            }
+
+            compilationContext.ReplaceModuleBindings(updatedBindings);
+            return updatedBindings;
         }
     }
 }

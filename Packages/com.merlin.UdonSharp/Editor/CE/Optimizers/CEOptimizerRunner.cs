@@ -38,28 +38,28 @@ namespace UdonSharp.CE.Editor.Optimizers
         /// </summary>
         static CEOptimizerRunner()
         {
-            // Initialize optimizers in priority order
+            // This list holds OPTIMIZATIONS ONLY: passes the program is merely slower without.
+            //
+            // The correctness-critical code generators -- async transform, lambda inlining,
+            // Action-to-CECallback, CELogger rewrite, SyncOnJoin glue, quantization and persistence
+            // auto-registration -- live in CEGeneratorRunner and run in an earlier compiler phase where a
+            // failure is a hard compile error. They are not optimizations and must never be skippable.
             var optimizerList = new List<ICompileTimeOptimizer>
             {
-                // Priority 0-99: Early optimizations
-                new AsyncMethodTransformOptimizer(), // Priority 1 - Transform async/await FIRST before anything else
-                new LambdaInliningOptimizer(), // Priority 2 - Inline supported lambdas before callback transforms
-                new ActionToCallbackTransformer(), // Priority 3 - Transform Action delegates to CECallback before other optimizations
-                new CELoggerTransformOptimizer(),  // Priority 5 - Transform CELogger calls before other optimizations
-                new SyncOnJoinGlueEmitter(), // Priority 10 - Emit late-join glue before later transforms
-                new QuantizePreSerializeEmitter(), // Priority 12 - Inject quantization before UdonSharp sees the final tree
-
-                // Priority 100-199: Standard optimizations
                 // Note: ConstantFoldingOptimizer (CEOPT001) retired - Binder's ConstantExpressionOptimizer handles this
                 // Note: DeadCodeEliminationOptimizer (CEOPT002) retired - binary-level passes handle this
-                new LoopInvariantCodeMotionOptimizer(),       // Priority 105 - Hoist invariants before other loop opts
-                new SmallLoopUnrollingOptimizer(),            // Priority 110
-                new CommonSubexpressionEliminationOptimizer(), // Priority 115 - CSE after loop opts
-                new TinyMethodInliningOptimizer(),            // Priority 118
-                new ExternCallCachingOptimizer(),             // Priority 120 - Cache extern calls
-
-                // Priority 200+: Late optimizations
-                new StringInterningOptimizer(),
+                //
+                // Every pass below is currently IsEnabledByDefault => false. Each one is a syntactic
+                // rewriter that can drop writes, hoist past null guards, or emit uncompilable code; see the
+                // comment on each type. They stay registered so the report window and the ID-uniqueness
+                // guardrail can still see them, and so re-enabling one is a single-line change once it has
+                // been rewritten against the semantic model.
+                new LoopInvariantCodeMotionOptimizer(),        // CEOPT010
+                new SmallLoopUnrollingOptimizer(),             // CEOPT003
+                new CommonSubexpressionEliminationOptimizer(),  // CEOPT009
+                new TinyMethodInliningOptimizer(),             // CEOPT004
+                new ExternCallCachingOptimizer(),              // CEOPT008
+                new StringInterningOptimizer(),                // CEOPT005
             };
 
             // Sort by priority
@@ -67,6 +67,46 @@ namespace UdonSharp.CE.Editor.Optimizers
 
             // Register with the compiler
             CompileTimeOptimizerRegistry.RegisterOptimizer(RunOptimizers);
+        }
+
+        /// <summary>
+        /// The registered optimizers' ids, for the combined uniqueness assertion that
+        /// <c>CEGeneratorRunner</c> runs at registration.
+        ///
+        /// The collision that assertion exists to prevent is not hypothetical: CEOPT009 was claimed by both
+        /// the SyncOnJoin glue emitter and common subexpression elimination, and CEOPT010 by both the
+        /// quantize emitter and loop-invariant code motion. Because the "contract-critical" escalation set
+        /// was keyed by id, an exception in either perf pass was escalated as though a sync generator had
+        /// failed, and the report window attributed sync glue emission to "Common Subexpression
+        /// Elimination". That collision spans both registries, so only a check that sees the generator set
+        /// too can catch it -- and only the generator registry can fail the compile over it.
+        /// </summary>
+        internal static (string Id, string Name)[] GetRegisteredTransformIds()
+        {
+            var ids = new (string, string)[Optimizers.Length];
+
+            for (int i = 0; i < Optimizers.Length; i++)
+                ids[i] = (Optimizers[i].OptimizerId, Optimizers[i].OptimizerName);
+
+            return ids;
+        }
+
+        /// <summary>
+        /// The id a registered optimizer records its entries under, looked up by type.
+        ///
+        /// The inspector's report table used to spell these out by hand ("SmallLoopUnrolling") while the
+        /// optimizers record "CEOPT003", so every arm of that table was dead and the report read all zeros.
+        /// Sourcing the id from the registered instance makes that class of drift impossible.
+        /// </summary>
+        internal static string GetOptimizerId<T>() where T : ICompileTimeOptimizer
+        {
+            foreach (ICompileTimeOptimizer optimizer in Optimizers)
+            {
+                if (optimizer is T)
+                    return optimizer.OptimizerId;
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -84,8 +124,9 @@ namespace UdonSharp.CE.Editor.Optimizers
             if (syntaxTrees == null || syntaxTrees.Length == 0)
                 return syntaxTrees;
 
-            // Clear previous optimization records
-            Context.Clear();
+            // Deliberately no Context.Clear() here. CEGeneratorRunner runs earlier in the compile and owns
+            // the single Clear() per compile, so the optimization report retains both the generator records
+            // and the optimizer records instead of only the latter.
 
             if (!Context.OptimizationsEnabled)
             {
@@ -108,12 +149,12 @@ namespace UdonSharp.CE.Editor.Optimizers
                 }
                 catch (Exception ex)
                 {
-                    // Log but don't fail compilation for optimizer errors
+                    // Optimizer failures are genuinely non-fatal: the program is already correct, just
+                    // unoptimized. Every correctness-critical transform now lives in CEGeneratorRunner,
+                    // where a failure aborts the compile instead.
                     Debug.LogWarning(
-                        $"[CE.Optimizers] Optimizer {optimizer.OptimizerId} ({optimizer.OptimizerName}) failed: {ex.Message}");
-
-                    if (_enableDebugLogging)
-                        Debug.LogException(ex);
+                        $"[CE.Optimizers] Optimizer {optimizer.OptimizerId} ({optimizer.OptimizerName}) failed " +
+                        $"and was skipped; the program is correct but unoptimized: {ex}");
                 }
             }
 
@@ -156,7 +197,9 @@ namespace UdonSharp.CE.Editor.Optimizers
                 catch (Exception ex)
                 {
                     Debug.LogWarning(
-                        $"[CE.Optimizers] {optimizer.OptimizerId} failed on {filePath}: {ex.Message}");
+                        $"[CE.Optimizers] {optimizer.OptimizerId} failed on {filePath} and that file was left " +
+                        $"unoptimized: {ex}");
+
                     result[i] = (tree, filePath);
                 }
             }

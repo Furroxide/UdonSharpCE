@@ -13,19 +13,18 @@ namespace UdonSharp.CE.Editor.Persistence
 {
     /// <summary>
     /// Auto-registers CEPersistence models by generating converters from attributes.
-    /// Runs as a compile-time optimizer (Setup phase) during UdonSharp compilation.
+    ///
+    /// This is a correctness-critical source generator, not an optimization: without the generated
+    /// converters and non-generic overloads, <c>CEPersistence.Save</c>/<c>Restore</c> compile but do
+    /// nothing at runtime. It is invoked by <c>CEGeneratorRunner</c> rather than registering itself, so
+    /// its position in the transform order is declared rather than decided by which
+    /// <c>[InitializeOnLoad]</c> static constructor Unity happened to run first.
     /// </summary>
-    [InitializeOnLoad]
     internal static class CEPersistenceAutoRegistrationOptimizer
     {
         private const string GeneratedFileName = "CEPersistence.AutoRegister.g.cs";
 
-        static CEPersistenceAutoRegistrationOptimizer()
-        {
-            CompileTimeOptimizerRegistry.RegisterOptimizer(Apply);
-        }
-
-        private static (SyntaxTree tree, string filePath)[] Apply((SyntaxTree tree, string filePath)[] syntaxTrees)
+        internal static (SyntaxTree tree, string filePath)[] Generate((SyntaxTree tree, string filePath)[] syntaxTrees)
         {
             if (syntaxTrees == null || syntaxTrees.Length == 0)
                 return syntaxTrees;
@@ -79,14 +78,15 @@ namespace UdonSharp.CE.Editor.Persistence
             };
 
             private readonly bool _hasStaticUsingCEPersistence;
+            private readonly HashSet<string> _typeAliases;
             private readonly Dictionary<string, PersistenceModelInfo> _modelsByFullName;
-            private readonly Dictionary<string, PersistenceModelInfo> _modelsByShortName;
+            private readonly Dictionary<string, List<PersistenceModelInfo>> _modelsByShortName;
 
             public bool DidModify { get; private set; }
 
             public CEPersistenceUsageRewriter(CompilationUnitSyntax root, IReadOnlyList<PersistenceModelInfo> models)
             {
-                _hasStaticUsingCEPersistence = HasStaticUsingCEPersistence(root);
+                CollectUsingContext(root, out _hasStaticUsingCEPersistence, out _typeAliases);
                 BuildModelLookups(models, out _modelsByFullName, out _modelsByShortName);
             }
 
@@ -103,7 +103,7 @@ namespace UdonSharp.CE.Editor.Persistence
                 if (genericName.TypeArgumentList.Arguments.Count != 1)
                     return visited;
 
-                if (!TryResolveModel(genericName.TypeArgumentList.Arguments[0].ToString(), out var model))
+                if (!TryResolveModel(genericName.TypeArgumentList.Arguments[0].ToString(), node, out var model))
                     return visited;
 
                 if (MethodsWithAutoOverloads.Contains(methodName))
@@ -137,8 +137,7 @@ namespace UdonSharp.CE.Editor.Persistence
 
                 if (invocation.Expression is MemberAccessExpressionSyntax memberAccess)
                 {
-                    string target = memberAccess.Expression.ToString();
-                    if (!target.EndsWith("CEPersistence", StringComparison.Ordinal))
+                    if (!IsCEPersistenceTarget(memberAccess.Expression.ToString()))
                         return false;
 
                     if (memberAccess.Name is GenericNameSyntax memberGeneric)
@@ -196,7 +195,21 @@ namespace UdonSharp.CE.Editor.Persistence
                 }
             }
 
-            private bool TryResolveModel(string typeName, out PersistenceModelInfo model)
+            private bool IsCEPersistenceTarget(string target)
+            {
+                if (string.IsNullOrEmpty(target))
+                    return false;
+
+                if (IsCEPersistenceName(target))
+                    return true;
+
+                // 'using CEP = UdonSharp.CE.Persistence.CEPersistence;' hides the type name from a textual
+                // match, so without this the call keeps its type argument and binds to the generic overload -
+                // which is a compile error under Udon - instead of the generated one.
+                return _typeAliases.Contains(target);
+            }
+
+            private bool TryResolveModel(string typeName, SyntaxNode context, out PersistenceModelInfo model)
             {
                 model = null;
                 if (string.IsNullOrWhiteSpace(typeName))
@@ -206,10 +219,133 @@ namespace UdonSharp.CE.Editor.Persistence
                 if (_modelsByFullName.TryGetValue(normalized, out model))
                     return true;
 
-                if (_modelsByShortName.TryGetValue(normalized, out model))
+                if (TryResolveByQualifiedSuffix(normalized, out model))
                     return true;
 
+                if (!_modelsByShortName.TryGetValue(normalized, out var candidates) || candidates.Count == 0)
+                    return false;
+
+                if (candidates.Count == 1)
+                {
+                    model = candidates[0];
+                    return true;
+                }
+
+                // Two [PlayerData] models share a short name. Guessing would persist under the wrong key, so
+                // only accept the candidate whose namespace this call site actually has in scope; if that is
+                // still ambiguous, leave the call alone and let the obsolete generic overload report it.
+                var scope = GetNamespaceScope(context);
+                PersistenceModelInfo match = null;
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    if (!scope.Contains(candidates[i].Namespace))
+                        continue;
+
+                    if (match != null)
+                    {
+                        match = null;
+                        break;
+                    }
+
+                    match = candidates[i];
+                }
+
+                if (match != null)
+                {
+                    model = match;
+                    return true;
+                }
+
+                Debug.LogWarning($"[CE.Persistence] '{normalized}' matches {candidates.Count} [PlayerData] models ({DescribeCandidates(candidates)}). Qualify the type argument with its namespace.");
+                model = null;
                 return false;
+            }
+
+            private bool TryResolveByQualifiedSuffix(string normalized, out PersistenceModelInfo model)
+            {
+                model = null;
+                if (normalized.IndexOf('.') < 0)
+                    return false;
+
+                string suffix = "." + normalized;
+                foreach (var pair in _modelsByFullName)
+                {
+                    if (!pair.Key.EndsWith(suffix, StringComparison.Ordinal))
+                        continue;
+
+                    if (model != null)
+                    {
+                        model = null;
+                        return false;
+                    }
+
+                    model = pair.Value;
+                }
+
+                return model != null;
+            }
+
+            private static string DescribeCandidates(List<PersistenceModelInfo> candidates)
+            {
+                var names = new List<string>(candidates.Count);
+                foreach (var candidate in candidates)
+                    names.Add(candidate.QualifiedName);
+                return string.Join(", ", names);
+            }
+
+            private static HashSet<string> GetNamespaceScope(SyntaxNode node)
+            {
+                var scope = new HashSet<string>(StringComparer.Ordinal) { string.Empty };
+
+                SyntaxNode current = node;
+                while (current != null)
+                {
+                    if (current is NamespaceDeclarationSyntax namespaceDeclaration)
+                    {
+                        AddNamespaceWithPrefixes(scope, namespaceDeclaration.Name?.ToString());
+                        AddUsingNamespaces(scope, namespaceDeclaration.Usings);
+                    }
+                    else if (current is CompilationUnitSyntax compilationUnit)
+                    {
+                        AddUsingNamespaces(scope, compilationUnit.Usings);
+                    }
+
+                    current = current.Parent;
+                }
+
+                return scope;
+            }
+
+            private static void AddNamespaceWithPrefixes(HashSet<string> scope, string namespaceName)
+            {
+                if (string.IsNullOrEmpty(namespaceName))
+                    return;
+
+                string remaining = namespaceName;
+                while (!string.IsNullOrEmpty(remaining))
+                {
+                    scope.Add(remaining);
+                    int lastDot = remaining.LastIndexOf('.');
+                    if (lastDot < 0)
+                        break;
+                    remaining = remaining.Substring(0, lastDot);
+                }
+            }
+
+            private static void AddUsingNamespaces(HashSet<string> scope, SyntaxList<UsingDirectiveSyntax> usings)
+            {
+                foreach (var usingDirective in usings)
+                {
+                    if (usingDirective.Alias != null)
+                        continue;
+
+                    if (usingDirective.StaticKeyword.IsKind(SyntaxKind.StaticKeyword))
+                        continue;
+
+                    string name = usingDirective.Name?.ToString();
+                    if (!string.IsNullOrEmpty(name))
+                        scope.Add(NormalizeTypeName(name));
+                }
             }
 
             private static string NormalizeTypeName(string typeName)
@@ -223,11 +359,10 @@ namespace UdonSharp.CE.Editor.Persistence
             private static void BuildModelLookups(
                 IReadOnlyList<PersistenceModelInfo> models,
                 out Dictionary<string, PersistenceModelInfo> byFullName,
-                out Dictionary<string, PersistenceModelInfo> byShortName)
+                out Dictionary<string, List<PersistenceModelInfo>> byShortName)
             {
                 byFullName = new Dictionary<string, PersistenceModelInfo>(StringComparer.Ordinal);
-                byShortName = new Dictionary<string, PersistenceModelInfo>(StringComparer.Ordinal);
-                var ambiguous = new HashSet<string>(StringComparer.Ordinal);
+                byShortName = new Dictionary<string, List<PersistenceModelInfo>>(StringComparer.Ordinal);
 
                 foreach (var model in models)
                 {
@@ -239,34 +374,63 @@ namespace UdonSharp.CE.Editor.Persistence
                     if (string.IsNullOrEmpty(shortName))
                         continue;
 
-                    if (byShortName.ContainsKey(shortName))
-                        ambiguous.Add(shortName);
-                    else
-                        byShortName[shortName] = model;
-                }
+                    // Keep every colliding candidate instead of dropping the name: a call site that only has
+                    // one of them in scope is still resolvable, and one that is genuinely ambiguous deserves a
+                    // warning naming both rather than silence.
+                    if (!byShortName.TryGetValue(shortName, out var candidates))
+                    {
+                        candidates = new List<PersistenceModelInfo>();
+                        byShortName[shortName] = candidates;
+                    }
 
-                foreach (var name in ambiguous)
-                {
-                    byShortName.Remove(name);
+                    candidates.Add(model);
                 }
             }
 
-            private static bool HasStaticUsingCEPersistence(CompilationUnitSyntax root)
+            private static bool IsCEPersistenceName(string name)
             {
-                foreach (var usingDirective in root.Usings)
+                return string.Equals(name, "CEPersistence", StringComparison.Ordinal) ||
+                       name.EndsWith(".CEPersistence", StringComparison.Ordinal);
+            }
+
+            private static void CollectUsingContext(
+                CompilationUnitSyntax root,
+                out bool hasStaticUsing,
+                out HashSet<string> typeAliases)
+            {
+                hasStaticUsing = false;
+                typeAliases = new HashSet<string>(StringComparer.Ordinal);
+
+                // Usings can also sit inside a namespace declaration; reading only the compilation unit's list
+                // silently skipped those files.
+                CollectUsingContext(root.Usings, ref hasStaticUsing, typeAliases);
+
+                foreach (var namespaceDeclaration in root.DescendantNodes().OfType<NamespaceDeclarationSyntax>())
                 {
-                    if (!usingDirective.StaticKeyword.IsKind(SyntaxKind.StaticKeyword))
-                        continue;
-
-                    string name = usingDirective.Name?.ToString();
-                    if (string.IsNullOrEmpty(name))
-                        continue;
-
-                    if (name.EndsWith("CEPersistence", StringComparison.Ordinal))
-                        return true;
+                    CollectUsingContext(namespaceDeclaration.Usings, ref hasStaticUsing, typeAliases);
                 }
+            }
 
-                return false;
+            private static void CollectUsingContext(
+                SyntaxList<UsingDirectiveSyntax> usings,
+                ref bool hasStaticUsing,
+                HashSet<string> typeAliases)
+            {
+                foreach (var usingDirective in usings)
+                {
+                    string name = NormalizeTypeName(usingDirective.Name?.ToString() ?? string.Empty);
+                    if (string.IsNullOrEmpty(name) || !IsCEPersistenceName(name))
+                        continue;
+
+                    if (usingDirective.Alias != null)
+                    {
+                        typeAliases.Add(usingDirective.Alias.Name.Identifier.ValueText);
+                        continue;
+                    }
+
+                    if (usingDirective.StaticKeyword.IsKind(SyntaxKind.StaticKeyword))
+                        hasStaticUsing = true;
+                }
             }
         }
 
@@ -294,6 +458,7 @@ namespace UdonSharp.CE.Editor.Persistence
                             {
                                 QualifiedName = modelName,
                                 DisplayName = classDeclaration.Identifier.ValueText,
+                                Namespace = GetNamespaceName(classDeclaration) ?? string.Empty,
                                 DeclaredFile = filePath
                             };
                             models[modelName] = modelInfo;
@@ -326,8 +491,6 @@ namespace UdonSharp.CE.Editor.Persistence
                     }
                 }
 
-                CollectManualRegistrations(models, syntaxTrees);
-
                 var result = new List<PersistenceModelInfo>();
                 foreach (var model in models.Values)
                 {
@@ -346,14 +509,11 @@ namespace UdonSharp.CE.Editor.Persistence
                         continue;
                     }
 
-                    if (model.ManuallyRegistered)
-                    {
-                        continue;
-                    }
-
+                    // Manual Register<T>() is a compile error under Udon, so a Register call site must never
+                    // suppress generation here - doing that used to leave the model with no overloads at all.
                     if (model.HasUnsupportedFields)
                     {
-                        Debug.LogWarning($"[CE.Persistence] Auto-registration skipped for '{model.DisplayName}': unsupported field types detected. Use manual registration for custom converters.");
+                        Debug.LogWarning($"[CE.Persistence] Auto-registration skipped for '{model.DisplayName}': unsupported field types detected. Change the field to a supported type, or hold the payload in a single DataDictionary field and build it yourself.");
                         continue;
                     }
 
@@ -361,96 +521,6 @@ namespace UdonSharp.CE.Editor.Persistence
                 }
 
                 return result;
-            }
-
-            private static void CollectManualRegistrations(
-                Dictionary<string, PersistenceModelInfo> models,
-                (SyntaxTree tree, string filePath)[] syntaxTrees)
-            {
-                if (models.Count == 0)
-                    return;
-
-                foreach (var (tree, _) in syntaxTrees)
-                {
-                    var root = tree.GetRoot() as CompilationUnitSyntax;
-                    if (root == null)
-                        continue;
-
-                    bool hasStaticUsing = root.Usings.Any(u =>
-                        u.StaticKeyword.IsKind(SyntaxKind.StaticKeyword) &&
-                        u.Name?.ToString()?.EndsWith("CEPersistence", StringComparison.Ordinal) == true);
-
-                    foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
-                    {
-                        if (!TryGetRegisterTypeName(invocation, hasStaticUsing, out string typeName))
-                            continue;
-
-                        foreach (var model in models.Values)
-                        {
-                            if (MatchesModelType(typeName, model))
-                            {
-                                model.ManuallyRegistered = true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            private static bool TryGetRegisterTypeName(InvocationExpressionSyntax invocation, bool hasStaticUsing, out string typeName)
-            {
-                typeName = null;
-
-                if (invocation.Expression is MemberAccessExpressionSyntax memberAccess)
-                {
-                    if (!memberAccess.Expression.ToString().EndsWith("CEPersistence", StringComparison.Ordinal))
-                        return false;
-
-                    if (memberAccess.Name is GenericNameSyntax genericName &&
-                        string.Equals(genericName.Identifier.ValueText, "Register", StringComparison.Ordinal) &&
-                        genericName.TypeArgumentList.Arguments.Count > 0)
-                    {
-                        typeName = genericName.TypeArgumentList.Arguments[0].ToString();
-                        return true;
-                    }
-                }
-
-                if (hasStaticUsing && invocation.Expression is GenericNameSyntax staticGeneric &&
-                    string.Equals(staticGeneric.Identifier.ValueText, "Register", StringComparison.Ordinal) &&
-                    staticGeneric.TypeArgumentList.Arguments.Count > 0)
-                {
-                    typeName = staticGeneric.TypeArgumentList.Arguments[0].ToString();
-                    return true;
-                }
-
-                return false;
-            }
-
-            private static bool MatchesModelType(string typeName, PersistenceModelInfo model)
-            {
-                if (string.IsNullOrEmpty(typeName))
-                    return false;
-
-                string normalizedType = StripGlobal(typeName);
-
-                if (string.Equals(normalizedType, model.DisplayName, StringComparison.Ordinal))
-                    return true;
-
-                string qualified = model.QualifiedName;
-
-                if (string.Equals(normalizedType, qualified, StringComparison.Ordinal))
-                    return true;
-
-                return qualified.EndsWith(normalizedType, StringComparison.Ordinal);
-            }
-
-            private static string StripGlobal(string typeName)
-            {
-                if (string.IsNullOrEmpty(typeName))
-                    return typeName;
-
-                return typeName.StartsWith("global::", StringComparison.Ordinal)
-                    ? typeName.Substring("global::".Length)
-                    : typeName;
             }
 
             private static void CollectFields(PersistenceModelInfo model, ClassDeclarationSyntax classDeclaration)
@@ -899,7 +969,7 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("            if (model == null)");
                 sb.AppendLine("            {");
                 sb.AppendLine($"                Debug.LogError(\"[CE.Persistence] Save<{displayName}>: model cannot be null\");");
-                sb.AppendLine("                PersistenceLifecycle.NotifyDataSaved(SaveResult.ValidationFailed, key);");
+                sb.AppendLine("                PersistenceLifecycle.RecordSaveResult(SaveResult.ValidationFailed, key);");
                 sb.AppendLine("                return SaveResult.ValidationFailed;");
                 sb.AppendLine("            }");
                 sb.AppendLine($"            List<ValidationError> validationErrors = Validate__{safeName}(model);");
@@ -909,7 +979,7 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("                {");
                 sb.AppendLine("                    Debug.LogError(\"[CE.Persistence] Validation error: \" + error);");
                 sb.AppendLine("                }");
-                sb.AppendLine("                PersistenceLifecycle.NotifyDataSaved(SaveResult.ValidationFailed, key);");
+                sb.AppendLine("                PersistenceLifecycle.RecordSaveResult(SaveResult.ValidationFailed, key);");
                 sb.AppendLine("                return SaveResult.ValidationFailed;");
                 sb.AppendLine("            }");
                 sb.AppendLine();
@@ -922,37 +992,42 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("            data[VERSION_KEY] = version;");
                 sb.AppendLine("            data[MODEL_KEY] = key;");
                 sb.AppendLine();
+                // PlayerData is one account-wide budget shared by every model, so the enforced comparison is
+                // against what is LEFT of the quota. Comparing one model against the whole limit passed several
+                // models that each "fit" while together they overran the account. GetWritableQuota credits back
+                // the bytes this key already holds, because the save replaces them.
+                sb.AppendLine("            int quotaBudget = GetWritableQuota(key);");
                 sb.AppendLine("            int estimatedSize = SizeEstimator.EstimateDataDictionarySize(data);");
-                sb.AppendLine("            if (estimatedSize > PLAYER_DATA_QUOTA)");
+                sb.AppendLine("            if (estimatedSize > quotaBudget)");
                 sb.AppendLine("            {");
-                sb.AppendLine($"                Debug.LogError(\"[CE.Persistence] Save<{displayName}>: estimated size (\" + estimatedSize + \" bytes) exceeds quota (\" + PLAYER_DATA_QUOTA + \" bytes)\");");
-                sb.AppendLine("                PersistenceLifecycle.NotifyDataSaved(SaveResult.QuotaExceeded, key);");
+                sb.AppendLine($"                Debug.LogError(\"[CE.Persistence] Save<{displayName}>: estimated size (\" + estimatedSize + \" bytes) exceeds remaining quota (\" + quotaBudget + \" of \" + GetQuotaLimit() + \" bytes)\");");
+                sb.AppendLine("                PersistenceLifecycle.RecordSaveResult(SaveResult.QuotaExceeded, key);");
                 sb.AppendLine("                return SaveResult.QuotaExceeded;");
                 sb.AppendLine("            }");
                 sb.AppendLine();
-                sb.AppendLine("            if (estimatedSize > PLAYER_DATA_QUOTA * 0.8f)");
+                sb.AppendLine("            if (estimatedSize > quotaBudget * 0.8f)");
                 sb.AppendLine("            {");
-                sb.AppendLine($"                Debug.LogWarning(\"[CE.Persistence] Save<{displayName}>: estimated size (\" + estimatedSize + \" bytes) is approaching quota limit (\" + PLAYER_DATA_QUOTA + \" bytes)\");");
+                sb.AppendLine($"                Debug.LogWarning(\"[CE.Persistence] Save<{displayName}>: estimated size (\" + estimatedSize + \" bytes) is approaching the remaining quota (\" + quotaBudget + \" bytes)\");");
                 sb.AppendLine("            }");
                 sb.AppendLine();
                 sb.AppendLine("            VRCPlayerApi localPlayer = Networking.LocalPlayer;");
                 sb.AppendLine("            if (localPlayer == null || !localPlayer.IsValid())");
                 sb.AppendLine("            {");
                 sb.AppendLine($"                Debug.LogError(\"[CE.Persistence] Save<{displayName}>: local player not available\");");
-                sb.AppendLine("                PersistenceLifecycle.NotifyDataSaved(SaveResult.NotAllowed, key);");
+                sb.AppendLine("                PersistenceLifecycle.RecordSaveResult(SaveResult.NotAllowed, key);");
                 sb.AppendLine("                return SaveResult.NotAllowed;");
                 sb.AppendLine("            }");
                 sb.AppendLine();
                 sb.AppendLine("            if (!VRCJson.TrySerializeToJson(data, JsonExportType.Minify, out DataToken jsonToken))");
                 sb.AppendLine("            {");
                 sb.AppendLine($"                Debug.LogError(\"[CE.Persistence] Save<{displayName}>: JSON serialization failed\");");
-                sb.AppendLine("                PersistenceLifecycle.NotifyDataSaved(SaveResult.ValidationFailed, key);");
+                sb.AppendLine("                PersistenceLifecycle.RecordSaveResult(SaveResult.ValidationFailed, key);");
                 sb.AppendLine("                return SaveResult.ValidationFailed;");
                 sb.AppendLine("            }");
                 sb.AppendLine();
                 sb.AppendLine("            PlayerData.SetString(key, jsonToken.String);");
                 sb.AppendLine($"            Debug.Log(\"[CE.Persistence] Saved {displayName} to key '\" + key + \"' (\" + estimatedSize + \" bytes)\");");
-                sb.AppendLine("            PersistenceLifecycle.NotifyDataSaved(SaveResult.Success, key);");
+                sb.AppendLine("            PersistenceLifecycle.RecordSaveResult(SaveResult.Success, key);");
                 sb.AppendLine("            return SaveResult.Success;");
                 sb.AppendLine("        }");
                 sb.AppendLine();
@@ -1001,7 +1076,7 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("            if (localPlayer == null || !localPlayer.IsValid())");
                 sb.AppendLine("            {");
                 sb.AppendLine($"                Debug.LogWarning(\"[CE.Persistence] Restore<{displayName}>: local player not available\");");
-                sb.AppendLine("                PersistenceLifecycle.NotifyDataRestored(RestoreResult.NotReady, key);");
+                sb.AppendLine("                PersistenceLifecycle.RecordRestoreResult(RestoreResult.NotReady, key);");
                 sb.AppendLine("                return RestoreResult.NotReady;");
                 sb.AppendLine("            }");
                 sb.AppendLine();
@@ -1009,12 +1084,12 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("            if (!PlayerData.TryGetString(localPlayer, key, out json))");
                 sb.AppendLine("            {");
                 sb.AppendLine($"                Debug.Log(\"[CE.Persistence] Restore<{displayName}>: no existing data for key '\" + key + \"'\");");
-                sb.AppendLine("                PersistenceLifecycle.NotifyDataRestored(RestoreResult.NoData, key);");
+                sb.AppendLine("                PersistenceLifecycle.RecordRestoreResult(RestoreResult.NoData, key);");
                 sb.AppendLine("                return RestoreResult.NoData;");
                 sb.AppendLine("            }");
                 sb.AppendLine();
                 sb.AppendLine("            RestoreResult result = FromJson(json, out model);");
-                sb.AppendLine("            PersistenceLifecycle.NotifyDataRestored(result, key);");
+                sb.AppendLine("            PersistenceLifecycle.RecordRestoreResult(result, key);");
                 sb.AppendLine("            return result;");
                 sb.AppendLine("        }");
                 sb.AppendLine();
@@ -1036,7 +1111,7 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("                {");
                 sb.AppendLine("                    string details = \"Model key token type \" + modelToken.TokenType + \" is invalid\";");
                 sb.AppendLine($"                    Debug.LogError(\"[CE.Persistence] FromData<{displayName}>: \" + details);");
-                sb.AppendLine("                    PersistenceLifecycle.NotifyDataCorrupted(new CorruptionInfo(key, MODEL_KEY, CorruptionType.InvalidType, details));");
+                sb.AppendLine("                    PersistenceLifecycle.RecordCorruption(new CorruptionInfo(key, MODEL_KEY, CorruptionType.InvalidType, details));");
                 sb.AppendLine("                    return RestoreResult.ParseError;");
                 sb.AppendLine("                }");
                 sb.AppendLine();
@@ -1045,7 +1120,7 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("                {");
                 sb.AppendLine("                    string details = \"Stored key '\" + storedKey + \"' does not match expected '\" + key + \"'\";");
                 sb.AppendLine($"                    Debug.LogError(\"[CE.Persistence] FromData<{displayName}>: \" + details);");
-                sb.AppendLine("                    PersistenceLifecycle.NotifyDataCorrupted(new CorruptionInfo(key, MODEL_KEY, CorruptionType.SchemaViolation, details));");
+                sb.AppendLine("                    PersistenceLifecycle.RecordCorruption(new CorruptionInfo(key, MODEL_KEY, CorruptionType.SchemaViolation, details));");
                 sb.AppendLine("                    return RestoreResult.ParseError;");
                 sb.AppendLine("                }");
                 sb.AppendLine("            }");
@@ -1056,7 +1131,7 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("                {");
                 sb.AppendLine("                    string details = \"Version token type \" + versionToken.TokenType + \" is invalid\";");
                 sb.AppendLine($"                    Debug.LogError(\"[CE.Persistence] FromData<{displayName}>: \" + details);");
-                sb.AppendLine("                    PersistenceLifecycle.NotifyDataCorrupted(new CorruptionInfo(key, VERSION_KEY, CorruptionType.InvalidType, details));");
+                sb.AppendLine("                    PersistenceLifecycle.RecordCorruption(new CorruptionInfo(key, VERSION_KEY, CorruptionType.InvalidType, details));");
                 sb.AppendLine("                    return RestoreResult.ParseError;");
                 sb.AppendLine("                }");
                 sb.AppendLine();
@@ -1086,14 +1161,14 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("            if (!VRCJson.TryDeserializeFromJson(json, out DataToken token))");
                 sb.AppendLine("            {");
                 sb.AppendLine($"                Debug.LogError(\"[CE.Persistence] FromJson<{displayName}>: JSON parse failed\");");
-                sb.AppendLine("                PersistenceLifecycle.NotifyDataCorrupted(new CorruptionInfo(key, null, CorruptionType.MalformedJson, \"JSON parse failed\"));");
+                sb.AppendLine("                PersistenceLifecycle.RecordCorruption(new CorruptionInfo(key, null, CorruptionType.MalformedJson, \"JSON parse failed\"));");
                 sb.AppendLine("                return RestoreResult.ParseError;");
                 sb.AppendLine("            }");
                 sb.AppendLine();
                 sb.AppendLine("            if (token.TokenType != TokenType.DataDictionary)");
                 sb.AppendLine("            {");
                 sb.AppendLine($"                Debug.LogError(\"[CE.Persistence] FromJson<{displayName}>: expected object, got \" + token.TokenType);");
-                sb.AppendLine("                PersistenceLifecycle.NotifyDataCorrupted(new CorruptionInfo(key, null, CorruptionType.SchemaViolation, \"Expected object, got \" + token.TokenType));");
+                sb.AppendLine("                PersistenceLifecycle.RecordCorruption(new CorruptionInfo(key, null, CorruptionType.SchemaViolation, \"Expected object, got \" + token.TokenType));");
                 sb.AppendLine("                return RestoreResult.ParseError;");
                 sb.AppendLine("            }");
                 sb.AppendLine();
@@ -1366,6 +1441,7 @@ namespace UdonSharp.CE.Editor.Persistence
         {
             public string QualifiedName { get; set; }
             public string DisplayName { get; set; }
+            public string Namespace { get; set; } = string.Empty;
             public string DeclaredFile { get; set; }
             public string Key { get; set; }
             public int Version { get; set; } = 1;
@@ -1373,7 +1449,6 @@ namespace UdonSharp.CE.Editor.Persistence
             public string RawDataFieldName { get; set; }
             public bool HasPersistFields => Fields.Count > 0;
             public bool HasUnsupportedFields { get; set; }
-            public bool ManuallyRegistered { get; set; }
             public List<PersistenceFieldInfo> Fields { get; } = new List<PersistenceFieldInfo>();
             public string SafeName => SanitizeTypeName(string.IsNullOrEmpty(QualifiedName) ? DisplayName : QualifiedName);
 

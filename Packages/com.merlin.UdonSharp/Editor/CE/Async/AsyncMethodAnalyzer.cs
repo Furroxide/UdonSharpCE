@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
@@ -13,19 +14,23 @@ namespace UdonSharp.CE.Editor.Analyzers
     /// <summary>
     /// Validates async method patterns and warns about unsupported scenarios.
     ///
-    /// Phase 3 provides runtime types (UdonTask, CancellationToken) and validates usage.
-    /// Full compiler transformation will be added in a future update.
+    /// CE lowers supported UdonTask async methods into event-driven state machines.
     /// </summary>
     /// <remarks>
+    /// The codes reported here are the same ones the async transform aborts the compile with, so an author
+    /// who runs analysis first sees the problem before the generator turns it into a build failure.
     /// Currently checks for:
-    /// - Methods returning UdonTask that need async transformation
-    /// - Unsupported patterns (nested async lambdas, try-finally in async)
+    /// - async UdonTask&lt;T&gt;, which has no point at which to hand a result back (CE0022)
+    /// - async UdonTask with no await, which the C# compiler would turn into a real state machine (CE0023)
+    /// - Unsupported patterns (nested async lambdas, await inside try, yield return)
     /// - Informational messages about async state machine generation
-    ///
-    /// Future updates will implement the actual state machine transformation.
     /// </remarks>
     internal class AsyncMethodAnalyzer : ICompileTimeAnalyzer
     {
+        private const string UdonTaskOfTCode = "CE0022";
+        private const string AsyncWithoutAwaitCode = "CE0023";
+        private const string UnsupportedPatternCode = "CE0025";
+
         public string AnalyzerId => "CE0020";
         public string AnalyzerName => "Async Method Validation";
         public string Description => "Validates async/await patterns and warns about unsupported scenarios.";
@@ -42,8 +47,7 @@ namespace UdonSharp.CE.Editor.Analyzers
 
             foreach (MethodSymbol method in methods)
             {
-                // Check if method returns UdonTask or UdonTask<T>
-                if (!IsAsyncMethod(method, context))
+                if (!ReturnsUdonTask(method, out bool isGeneric))
                     continue;
 
                 var syntaxRefs = method.RoslynSymbol?.DeclaringSyntaxReferences;
@@ -54,19 +58,51 @@ namespace UdonSharp.CE.Editor.Analyzers
                 if (methodSyntax == null)
                     continue;
 
-                Location methodLocation = methodSyntax.GetLocation();
+                // A UdonTask-returning method that is not declared async is ordinary code -- typically a
+                // helper that returns UdonTask.CompletedTask. Announcing a state machine for it described a
+                // transform that never happens.
+                if (!methodSyntax.Modifiers.Any(SyntaxKind.AsyncKeyword))
+                    continue;
 
-                // Info: This method will be transformed
+                if (isGeneric)
+                {
+                    diagnostics.Add(AnalyzerDiagnostic.Error(
+                        methodSyntax.ReturnType.GetLocation(),
+                        $"'{method.Name}' is declared 'async UdonTask<T>', which CE cannot lower. The state " +
+                        "machine returns to its caller at the first await, so there is no point at which a " +
+                        "result can be handed back.",
+                        AnalyzerId,
+                        UdonTaskOfTCode,
+                        "Return plain 'UdonTask' and store the result in a field the caller reads once the " +
+                        "continuation runs."
+                    ));
+                    continue;
+                }
+
+                int awaitCount = methodSyntax.DescendantNodes().OfType<AwaitExpressionSyntax>().Count();
+                if (awaitCount == 0)
+                {
+                    diagnostics.Add(AnalyzerDiagnostic.Error(
+                        methodSyntax.Identifier.GetLocation(),
+                        $"'{method.Name}' is declared async but contains no 'await', so CE has nothing to " +
+                        "lower and the C# compiler would build a state machine Udon cannot run.",
+                        AnalyzerId,
+                        AsyncWithoutAwaitCode,
+                        "Drop the 'async' keyword and 'return UdonTask.CompletedTask;'."
+                    ));
+                    continue;
+                }
+
                 diagnostics.Add(AnalyzerDiagnostic.Info(
-                    methodLocation,
-                    $"Method '{method.Name}' returns UdonTask and will be transformed to a state machine. " +
-                    "Note: Full async transformation is in development.",
+                    methodSyntax.GetLocation(),
+                    $"Method '{method.Name}' contains {awaitCount} await expression(s) and will be lowered " +
+                    "to a CE state machine.",
                     AnalyzerId,
                     AnalyzerId
                 ));
 
                 // Check for unsupported patterns
-                CheckForUnsupportedPatterns(methodSyntax, method, diagnostics);
+                CheckForUnsupportedPatterns(methodSyntax, diagnostics);
             }
 
             return diagnostics;
@@ -75,15 +111,25 @@ namespace UdonSharp.CE.Editor.Analyzers
         /// <summary>
         /// Checks if a method returns UdonTask or UdonTask&lt;T&gt;.
         /// </summary>
-        private bool IsAsyncMethod(MethodSymbol method, BindContext context)
+        private static bool ReturnsUdonTask(MethodSymbol method, out bool isGeneric)
         {
+            isGeneric = false;
+
             if (method.ReturnType == null)
                 return false;
 
             string returnTypeName = method.ReturnType.RoslynSymbol?.ToString() ?? "";
 
-            return returnTypeName == "UdonSharp.CE.Async.UdonTask" ||
-                   returnTypeName.StartsWith("UdonSharp.CE.Async.UdonTask<");
+            if (string.Equals(returnTypeName, "UdonSharp.CE.Async.UdonTask", StringComparison.Ordinal))
+                return true;
+
+            if (returnTypeName.StartsWith("UdonSharp.CE.Async.UdonTask<", StringComparison.Ordinal))
+            {
+                isGeneric = true;
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -91,38 +137,8 @@ namespace UdonSharp.CE.Editor.Analyzers
         /// </summary>
         private void CheckForUnsupportedPatterns(
             MethodDeclarationSyntax methodSyntax,
-            MethodSymbol method,
             List<AnalyzerDiagnostic> diagnostics)
         {
-            // Check for async modifier (shouldn't be used with UdonTask)
-            if (methodSyntax.Modifiers.Any(m => m.IsKind(SyntaxKind.AsyncKeyword)))
-            {
-                diagnostics.Add(AnalyzerDiagnostic.Warning(
-                    methodSyntax.GetLocation(),
-                    $"Method '{method.Name}' has 'async' modifier but returns UdonTask. " +
-                    "Remove the 'async' modifier - UdonTask methods are transformed differently from C# async.",
-                    AnalyzerId,
-                    AnalyzerId,
-                    "Remove the 'async' keyword from the method signature."
-                ));
-            }
-
-            // Check for await expressions (currently informational)
-            var awaitExpressions = methodSyntax.DescendantNodes()
-                .OfType<AwaitExpressionSyntax>();
-
-            int awaitCount = awaitExpressions.Count();
-            if (awaitCount > 0)
-            {
-                diagnostics.Add(AnalyzerDiagnostic.Info(
-                    methodSyntax.GetLocation(),
-                    $"Method '{method.Name}' contains {awaitCount} await expression(s). " +
-                    "These will be transformed to state machine yield points.",
-                    AnalyzerId,
-                    AnalyzerId
-                ));
-            }
-
             // Check for nested async lambdas (not supported)
             var asyncLambdas = methodSyntax.DescendantNodes()
                 .Where(n => n is ParenthesizedLambdaExpressionSyntax ||
@@ -147,28 +163,22 @@ namespace UdonSharp.CE.Editor.Analyzers
                 ));
             }
 
-            // Check for try-finally around await (complex state machine)
+            // Check for await inside try. The transform splits the method at each await, which would tear
+            // the try apart across state machine cases, so it refuses outright rather than emitting a try
+            // whose handler no longer covers the code that follows the await.
             var tryStatements = methodSyntax.DescendantNodes()
                 .OfType<TryStatementSyntax>()
-                .Where(t => t.Finally != null);
+                .Where(tryStmt => tryStmt.DescendantNodes().OfType<AwaitExpressionSyntax>().Any());
 
             foreach (var tryStmt in tryStatements)
             {
-                // Check if there's an await inside the try block
-                bool hasAwaitInTry = tryStmt.Block.DescendantNodes()
-                    .OfType<AwaitExpressionSyntax>().Any();
-
-                if (hasAwaitInTry)
-                {
-                    diagnostics.Add(AnalyzerDiagnostic.Warning(
-                        tryStmt.GetLocation(),
-                        "try-finally with await inside the try block may not behave as expected. " +
-                        "The finally block runs immediately when exiting the try, not after await completes.",
-                        AnalyzerId,
-                        AnalyzerId,
-                        "Move the await outside the try block or restructure the code."
-                    ));
-                }
+                diagnostics.Add(AnalyzerDiagnostic.Error(
+                    tryStmt.GetLocation(),
+                    "An await inside a try block is not supported in UdonTask methods.",
+                    AnalyzerId,
+                    UnsupportedPatternCode,
+                    "Move the await outside the try block. Udon has no exception handling at runtime either."
+                ));
             }
 
             // Check for yield return (not supported with async)

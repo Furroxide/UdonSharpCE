@@ -279,7 +279,7 @@ namespace UdonSharpEditor
                 return existingProgramAsset;
             }
             
-            UdonSharpUtils.Log($"Auto-creating program asset for {scriptPath}");
+            UdonSharpCEUtils.Log($"Auto-creating program asset for {scriptPath}");
             
             UdonSharpProgramAsset newProgramAsset = UnityEngine.ScriptableObject.CreateInstance<UdonSharpProgramAsset>();
             newProgramAsset.sourceCsScript = script;
