@@ -111,7 +111,6 @@ Assets/XR.meta
 /UserSettings/
 
 # IDE stuff
-.claude/
 .vscode/
 
 # Local documentation
@@ -134,4 +133,3 @@ Tools/Personaplex/.pulse_modules
 .venv-personaplex-bridge/
 
 .commands.txt
-.cursor/plans/

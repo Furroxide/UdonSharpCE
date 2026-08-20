@@ -1058,10 +1058,9 @@ public class PredictedWithoutOwnerGateFixture : UdonSharpBehaviour
         /// The same shape with the driver id declared Owner instead: CE0014 is still silent, and that is
         /// the finding rather than a reassurance.
         ///
-        /// _ownerPlayerId being Predicted is load bearing in two documents -- Authority.cs uses it as the
-        /// worked example of "Predicted records who may write, not where the value came from", and
-        /// agents/ce-runtime.md tells agents not to change it -- and this test is what establishes that no
-        /// analyzer backs either of them up. LatchDriverId writes the field with no guard of its own, but
+        /// _ownerPlayerId being Predicted is load bearing in Authority.cs, which uses it as the worked
+        /// example of "Predicted records who may write, not where the value came from" -- and this test is
+        /// what establishes that no analyzer backs that up. LatchDriverId writes the field with no guard of its own, but
         /// each of its callers reaches PublishDriverId's ownership check, so EveryCallerGuards is satisfied
         /// and the strict tier produces nothing to report. Flipping the declaration is therefore invisible
         /// to CE0014 in both directions: it neither warns that the flip was wrong nor confirms that it was
@@ -1500,10 +1499,9 @@ public class PredictedUndeclaredModeFixture : UdonSharpBehaviour
         /// exactly; _airStateFlags is required only to declare *some* authority, because nothing outside
         /// NetVehicle's own comments depends on which one it carries.
         ///
-        /// _ownerPlayerId is pinned because two documents now cite it by name -- Authority.cs's Predicted
-        /// remarks use it as the canonical shipped example of "Predicted records who may write, not where
-        /// the value came from", and agents/ce-runtime.md tells agents not to "fix" it back to Owner -- and
-        /// nothing enforced either claim. It is also the one field where no analyzer can cover for the
+        /// _ownerPlayerId is pinned because Authority.cs cites it by name: its Predicted remarks use the
+        /// field as the canonical shipped example of "Predicted records who may write, not where the value
+        /// came from", and nothing enforced that claim. It is also the one field where no analyzer can cover for the
         /// prose: flipping it to Owner produces no CE0014 at all, because LatchDriverId's callers every one
         /// reach PublishDriverId's ownership check and EveryCallerGuards is satisfied. So the declaration
         /// is the whole of the protection, and this assertion is the whole of the enforcement. See
