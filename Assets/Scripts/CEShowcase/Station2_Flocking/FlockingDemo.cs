@@ -13,6 +13,35 @@ namespace CEShowcase.Station2_Flocking
     [UdonBehaviourSyncMode(BehaviourSyncMode.None)]
     public class FlockingDemo : UdonSharpBehaviour
     {
+        /// <summary>This station's index in <see cref="CEShowcase.Core.DemoManager"/>'s shared state.</summary>
+        private const int StationIndex = 2;
+
+        [Header("Station Gating")]
+        [Tooltip("Shared station state. When this station is off, the flocking loop is skipped entirely. " +
+                 "Leave unassigned to always run.")]
+        [SerializeField] private CEShowcase.Core.DemoManager _demoManager;
+
+        private bool _wasRunning = true;
+
+        /// <summary>
+        /// True when this station is switched on for everyone, or when no DemoManager is wired.
+        /// Logs the transition so a paused station is observable rather than merely quiet.
+        /// </summary>
+        private bool IsStationRunning()
+        {
+            bool running = _demoManager == null || _demoManager.IsStationActive(StationIndex);
+
+            if (running != _wasRunning)
+            {
+                _wasRunning = running;
+                CELogger.Debug("Flocking", running
+                    ? "Station on - resuming flocking simulation"
+                    : "Station off - flocking simulation paused");
+            }
+
+            return running;
+        }
+
         [Header("Agent Settings")]
         [SerializeField] private GameObject _agentPrefab;
         [SerializeField] private Transform _agentParent;
@@ -44,9 +73,9 @@ namespace CEShowcase.Station2_Flocking
         [SerializeField] private TMPro.TextMeshProUGUI _statsText;
         
         [Header("Agent Colors")]
-        [SerializeField] private Color _idleColor = Color.blue;
-        [SerializeField] private Color _flockingColor = Color.green;
-        [SerializeField] private Color _fleeingColor = Color.red;
+        [SerializeField] private Color _idleColor = new Color(0.25f, 0.55f, 0.85f);
+        [SerializeField] private Color _flockingColor = new Color(0.20f, 0.80f, 0.45f);
+        [SerializeField] private Color _fleeingColor = new Color(1f, 0.40f, 0.20f);
         
         [Header("Wandering Behavior")]
         [SerializeField] private float _wanderStrength = 0.5f;
@@ -70,6 +99,7 @@ namespace CEShowcase.Station2_Flocking
         // Visual pool
         private Transform[] _agentTransforms;
         private Renderer[] _agentRenderers;
+        private Color[] _agentColors; // current per-agent color, lerped toward the state color
         private int[] _entityToAgent;
         
         // Query buffers
@@ -142,6 +172,11 @@ namespace CEShowcase.Station2_Flocking
         {
             _agentTransforms = new Transform[_maxAgents];
             _agentRenderers = new Renderer[_maxAgents];
+            _agentColors = new Color[_maxAgents];
+            for (int i = 0; i < _maxAgents; i++)
+            {
+                _agentColors[i] = _idleColor;
+            }
             _materialPropertyBlock = new MaterialPropertyBlock();
             
             if (_agentPrefab == null)
@@ -222,8 +257,15 @@ namespace CEShowcase.Station2_Flocking
         
         void Update()
         {
+            // Station toggling deliberately no longer deactivates this GameObject: a disabled
+            // UdonBehaviour receives no Udon events at all, which would switch sync off for every
+            // behaviour hosted under the station root. Visibility is toggled instead -- so this loop
+            // must gate itself, or 500 agents keep flocking invisibly at full CPU cost.
+            if (!IsStationRunning())
+                return;
+
             float dt = Time.deltaTime;
-            
+
             _neighborQueriesThisFrame = 0;
             float queryStartTime = Time.realtimeSinceStartup;
             
@@ -488,7 +530,8 @@ namespace CEShowcase.Station2_Flocking
                     t.rotation = Quaternion.LookRotation(vel.normalized, Vector3.up);
                 }
                 
-                // Update color based on state
+                // Update color based on state, easing toward the target so state changes
+                // wash through the flock instead of snapping
                 Renderer r = _agentRenderers[agentIndex];
                 if (r != null)
                 {
@@ -499,10 +542,13 @@ namespace CEShowcase.Station2_Flocking
                         case STATE_FLOCKING: c = _flockingColor; break;
                         default: c = _idleColor; break;
                     }
-                    
+
+                    Color blended = Color.Lerp(_agentColors[agentIndex], c, Time.deltaTime * 6f);
+                    _agentColors[agentIndex] = blended;
+
                     // Reuse cached MaterialPropertyBlock to avoid GC allocations
                     r.GetPropertyBlock(_materialPropertyBlock);
-                    _materialPropertyBlock.SetColor("_Color", c);
+                    _materialPropertyBlock.SetColor("_Color", blended);
                     r.SetPropertyBlock(_materialPropertyBlock);
                 }
             }

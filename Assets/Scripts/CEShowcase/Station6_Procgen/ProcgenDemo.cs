@@ -1,7 +1,9 @@
 using UdonSharp;
 using UdonSharp.CE.DevTools;
+using UdonSharp.CE.Net;
 using UdonSharp.CE.Procgen;
 using UnityEngine;
+using VRC.SDKBase;
 
 namespace CEShowcase.Station6_Procgen
 {
@@ -16,10 +18,15 @@ namespace CEShowcase.Station6_Procgen
     /// - Weighted random loot tables
     /// - Deterministic dungeon/pattern generation
     /// </summary>
-    [UdonBehaviourSyncMode(BehaviourSyncMode.None)]
+    // CE infers Manual sync from the [SyncOnJoin] seed below -- no [UdonBehaviourSyncMode] needed.
     public class ProcgenDemo : UdonSharpBehaviour
     {
         [Header("Seed Settings")]
+        // The seed is the whole point: identical seed => identical world on every client, including
+        // players who join later. It was previously an unsynced field reseeded from UnityEngine.Random,
+        // which is per-client, so every player generated different terrain while the docstring above
+        // claimed "synchronized procedural content across all clients".
+        [SyncOnJoin]
         [SerializeField] private int _worldSeed = 12345;
         
         [Header("Terrain Visualization")]
@@ -30,9 +37,6 @@ namespace CEShowcase.Station6_Procgen
         [SerializeField] private float _terrainScale = 0.5f;
         [SerializeField] private float _heightScale = 5f;
         [SerializeField] private float _noiseScale = 0.1f;
-        
-        [Header("Visual Fallback (when no prefab assigned)")]
-        [SerializeField] private Material _fallbackMaterial;
         
         [Header("Noise Visualization")]
         [SerializeField] private Renderer _noiseDisplayRenderer;
@@ -52,6 +56,7 @@ namespace CEShowcase.Station6_Procgen
         private Transform[] _terrainBlocks;
         private Texture2D _noiseTexture;
         private Color[] _noisePixels;
+        private MaterialPropertyBlock _blockProps;
         
         // Demo state
         private int _noiseMode = 0; // 0=Perlin, 1=Simplex, 2=Worley, 3=Fractal, 4=Ridged
@@ -81,6 +86,7 @@ namespace CEShowcase.Station6_Procgen
             // Initialize terrain blocks array
             int blockCount = _terrainWidth * _terrainDepth;
             _terrainBlocks = new Transform[blockCount];
+            _blockProps = new MaterialPropertyBlock();
             
             // Initialize noise texture
             _noiseTexture = new Texture2D(_noiseTextureSize, _noiseTextureSize, TextureFormat.RGB24, false);
@@ -145,10 +151,7 @@ namespace CEShowcase.Station6_Procgen
         private void GenerateTerrain()
         {
             if (_terrainParent == null) return;
-            
-            // Get or create the terrain material
-            Material terrainMaterial = GetOrCreateTerrainMaterial();
-            
+
             // Clean up existing blocks
             for (int i = 0; i < _terrainBlocks.Length; i++)
             {
@@ -175,35 +178,40 @@ namespace CEShowcase.Station6_Procgen
                     
                     // Normalize to 0-1 range
                     height = (height + 1f) * 0.5f;
-                    
-                    // Create block
+
+                    // Solid columns rising from the ground plane; the water band clamps to a
+                    // shared sea level so low terrain reads as a flat pool instead of pillars.
+                    float columnHeight = Mathf.Max(height, 0.3f) * _heightScale;
+                    if (columnHeight < 0.25f) columnHeight = 0.25f;
+
                     Vector3 position = new Vector3(
                         (x - _terrainWidth * 0.5f) * _terrainScale,
-                        height * _heightScale,
+                        columnHeight * 0.5f,
                         (z - _terrainDepth * 0.5f) * _terrainScale
                     );
-                    
+
                     if (_terrainBlockPrefab == null)
                     {
                         CELogger.Error("Procgen", "Terrain block prefab is required! GameObject.CreatePrimitive is not exposed to Udon.");
                         return;
                     }
-                    
+
                     GameObject block = Instantiate(_terrainBlockPrefab, _terrainParent);
+                    // The serialized template may be an inactive scene object; clones inherit
+                    // that state, so activate explicitly or the terrain never renders.
+                    block.SetActive(true);
                     block.name = "TerrainBlock_" + x + "_" + z;
                     block.transform.localPosition = position;
-                    block.transform.localScale = Vector3.one * _terrainScale;
-                    
+                    block.transform.localScale = new Vector3(_terrainScale, columnHeight, _terrainScale);
+
                     // Color based on height
                     Renderer blockRenderer = block.GetComponent<Renderer>();
                     if (blockRenderer != null)
                     {
-                        Color color = GetTerrainColor(height);
-                        MaterialPropertyBlock props = new MaterialPropertyBlock();
-                        props.SetColor("_Color", color);
-                        blockRenderer.SetPropertyBlock(props);
+                        _blockProps.SetColor("_Color", GetTerrainColor(height));
+                        blockRenderer.SetPropertyBlock(_blockProps);
                     }
-                    
+
                     _terrainBlocks[index] = block.transform;
                     index++;
                 }
@@ -216,35 +224,20 @@ namespace CEShowcase.Station6_Procgen
         }
         
         /// <summary>
-        /// Gets the fallback material for terrain blocks.
-        /// Note: Runtime material creation is not supported in Udon - assign the material in the inspector.
-        /// </summary>
-        private Material GetOrCreateTerrainMaterial()
-        {
-            if (_fallbackMaterial == null)
-            {
-                CELogger.Error("Procgen", "Fallback material is not assigned. Please assign a material in the inspector.");
-                return null;
-            }
-
-            return _fallbackMaterial;
-        }
-        
-        /// <summary>
         /// Maps height to terrain color (water -> grass -> rock -> snow).
         /// </summary>
         private Color GetTerrainColor(float height)
         {
             if (height < 0.3f)
-                return new Color(0.2f, 0.3f, 0.8f); // Water blue
+                return new Color(0.13f, 0.44f, 0.78f); // Water blue
             else if (height < 0.45f)
-                return new Color(0.8f, 0.7f, 0.5f); // Sand
+                return new Color(0.87f, 0.78f, 0.51f); // Sand
             else if (height < 0.65f)
-                return new Color(0.3f, 0.6f, 0.2f); // Grass green
+                return new Color(0.30f, 0.66f, 0.28f); // Grass green
             else if (height < 0.85f)
-                return new Color(0.5f, 0.4f, 0.3f); // Rock brown
+                return new Color(0.47f, 0.45f, 0.44f); // Rock grey
             else
-                return new Color(0.95f, 0.95f, 1f); // Snow white
+                return new Color(0.96f, 0.97f, 1f); // Snow white
         }
         
         // ========================================
@@ -367,18 +360,51 @@ namespace CEShowcase.Station6_Procgen
         
         public void OnChangeSeed()
         {
-            _worldSeed = Random.Range(0, int.MaxValue);
+            // Networking.GetServerTimeInMilliseconds is identical on every client, so the new seed is
+            // reproducible rather than per-client like UnityEngine.Random was. The owner publishes it and
+            // everyone else -- including late joiners -- regenerates from the synced value.
+            if (!TakeSeedOwnership())
+                return;
+
+            ApplySeed(Networking.GetServerTimeInMilliseconds());
+            RequestSerialization();
+        }
+
+        /// <summary>
+        /// Regenerates from the shared seed. Called locally after the owner changes it, and on every
+        /// remote client when the synced seed arrives.
+        /// </summary>
+        public override void OnDeserialization()
+        {
+            ApplySeed(_worldSeed);
+        }
+
+        private bool TakeSeedOwnership()
+        {
+            VRCPlayerApi localPlayer = Networking.LocalPlayer;
+            if (localPlayer == null)
+                return false;
+
+            if (!Networking.IsOwner(localPlayer, gameObject))
+                Networking.SetOwner(localPlayer, gameObject);
+
+            return Networking.IsOwner(localPlayer, gameObject);
+        }
+
+        private void ApplySeed(int seed)
+        {
+            _worldSeed = seed;
             _rng = new CERandom(_worldSeed);
-            
+
             // Reset loot stats
             for (int i = 0; i < _lootDistribution.Length; i++)
             {
                 _lootDistribution[i] = 0;
             }
             _lootRollCount = 0;
-            
+
             GenerateAll();
-            
+
             if (_seedText != null)
             {
                 _seedText.text = $"Seed: {_worldSeed}";
@@ -399,10 +425,11 @@ namespace CEShowcase.Station6_Procgen
                 }
             }
             
-            _worldSeed = presetSeeds[(currentIndex + 1) % presetSeeds.Length];
-            _rng = new CERandom(_worldSeed);
-            
-            GenerateAll();
+            if (!TakeSeedOwnership())
+                return;
+
+            ApplySeed(presetSeeds[(currentIndex + 1) % presetSeeds.Length]);
+            RequestSerialization();
         }
         
         public void OnNextNoiseMode()

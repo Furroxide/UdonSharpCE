@@ -46,6 +46,23 @@ namespace CEShowcase.Station3_Leaderboard
         private int[] _sortedPlayerIds;
         private int _playerCount;
         private const int MAX_PLAYERS = 80;
+
+        // ========================================
+        // NETWORK TRANSPORT
+        // ========================================
+
+        // CEDictionary is a managed C# object, so Udon cannot sync it. Before this, the behaviour was
+        // Manual sync with *no synced fields at all*: RequestSerialization() transmitted nothing and the
+        // "multiplayer leaderboard" was single-player by construction, with OnPlayerJoined merely adding
+        // remote players locally at score 0.
+        //
+        // Parallel synced arrays are the wire format; the CEDictionary remains the in-memory index that
+        // the station is actually showcasing. Arrays require Manual sync (Continuous cannot carry them),
+        // and every synced array must be initialized at declaration or it does not sync at all.
+        [UdonSynced] private int[] _syncedPlayerIds = new int[MAX_PLAYERS];
+        [UdonSynced] private int[] _syncedScores = new int[MAX_PLAYERS];
+        [UdonSynced] private string[] _syncedNames = new string[MAX_PLAYERS];
+        [UdonSynced] private int _syncedCount;
         
         // Local player tracking
         private int _localPlayerId = -1;
@@ -58,10 +75,13 @@ namespace CEShowcase.Station3_Leaderboard
         
         void Start()
         {
-            InitializeCollections();
-            
+            // Rebuild rather than merely initialize: VRChat may deliver the synced arrays before Start
+            // runs, and a bare InitializeCollections would throw that roster away and leave the board
+            // empty until somebody happened to score again.
+            RebuildFromSyncedState();
+
             CELogger.Info("Leaderboard", "Leaderboard Manager initialized with CEDictionary");
-            
+
             // Add local player
             AddLocalPlayer();
         }
@@ -174,11 +194,147 @@ namespace CEShowcase.Station3_Leaderboard
             
             SortLeaderboard();
             UpdateDisplay();
-            
-            // Sync if local player
-            if (playerId == _localPlayerId)
+
+            // Publish to everyone. The previous version only serialized when the score belonged to the
+            // local player, which -- combined with there being nothing synced -- meant no score ever left
+            // the client that scored it. Inert unless we already hold the board; the callers that create
+            // new data claim it first.
+            PublishLeaderboard();
+        }
+
+        /// <summary>
+        /// Claims the board so the local client may publish. Reserved for the paths that genuinely
+        /// originate data nobody else has -- the local player scoring -- because every transfer costs the
+        /// instance an ownership change and hands the authoritative copy of the roster to this client.
+        /// </summary>
+        private bool ClaimLeaderboardAuthority()
+        {
+            VRCPlayerApi localPlayer = Networking.LocalPlayer;
+            if (localPlayer == null || !localPlayer.IsValid())
+                return false;
+
+            if (Networking.IsOwner(localPlayer, gameObject))
+                return true;
+
+            Networking.SetOwner(localPlayer, gameObject);
+            return Networking.IsOwner(localPlayer, gameObject);
+        }
+
+        /// <summary>
+        /// Copies the CEDictionary contents into the synced arrays and publishes them.
+        ///
+        /// Owner-only, and deliberately does NOT take ownership. This runs from paths that fire on every
+        /// client (a join, for one), and grabbing the object first meant every client in turn became the
+        /// owner and then overwrote the synced roster with its own local view. A late joiner has never
+        /// seen anybody score, so its view has everyone on zero -- last writer wins and the whole board
+        /// randomly reset. Ownership is now claimed only where new data genuinely originates; see
+        /// ClaimLeaderboardAuthority.
+        /// </summary>
+        public void PublishLeaderboard()
+        {
+            VRCPlayerApi localPlayer = Networking.LocalPlayer;
+            if (localPlayer == null)
+                return;
+
+            if (!Networking.IsOwner(localPlayer, gameObject))
+                return;
+
+            EnsureSyncArrays();
+
+            int count = 0;
+            for (int i = 0; i < _playerCount && count < MAX_PLAYERS; i++)
             {
-                RequestSerialization();
+                int playerId = _sortedPlayerIds[i];
+                if (!_playerNames.ContainsKey(playerId))
+                    continue;
+
+                _syncedPlayerIds[count] = playerId;
+                _syncedScores[count] = _playerScores[playerId];
+                _syncedNames[count] = _playerNames[playerId];
+                count++;
+            }
+
+            // Blank the tail. Null entries inside a synced string[] are a serialization hazard.
+            for (int i = count; i < MAX_PLAYERS; i++)
+            {
+                _syncedPlayerIds[i] = 0;
+                _syncedScores[i] = 0;
+                _syncedNames[i] = "";
+            }
+
+            _syncedCount = count;
+            RequestSerialization();
+        }
+
+        /// <summary>
+        /// Runs on every remote client and on late joiners, who receive the arrays automatically as part
+        /// of normal synced-variable state.
+        /// </summary>
+        public override void OnDeserialization()
+        {
+            RebuildFromSyncedState();
+        }
+
+        private void OnEnable()
+        {
+            // Re-apply on enable. The synced arrays only reach the local index through OnDeserialization,
+            // which a disabled behaviour never receives, so a leaderboard whose station is toggled on
+            // later would show an empty board until somebody happened to score again. Rebuilding is
+            // idempotent and never publishes, so a non-owner running it changes nothing on the wire.
+            if (_playerNames == null)
+            {
+                // First activation: OnEnable runs before Start, which seeds the collections and applies
+                // the state itself. Rebuilding here would only NullReference on the index.
+                return;
+            }
+
+            RebuildFromSyncedState();
+
+            // The rebuild replaces the index wholesale, so re-seat the local player: they are only in the
+            // owner's published roster if the owner has published since they joined.
+            AddLocalPlayer();
+        }
+
+        /// <summary>
+        /// Rebuilds the local CEDictionary index from the synced arrays. Never calls RequestSerialization,
+        /// so running it on a non-owner cannot publish that client's view of the board back over the top
+        /// of the owner's.
+        /// </summary>
+        private void RebuildFromSyncedState()
+        {
+            EnsureSyncArrays();
+            InitializeCollections();
+
+            int count = Mathf.Clamp(_syncedCount, 0, MAX_PLAYERS);
+            for (int i = 0; i < count; i++)
+            {
+                string name = _syncedNames[i];
+                if (string.IsNullOrEmpty(name))
+                    continue;
+
+                AddPlayer(_syncedPlayerIds[i], name);
+                _playerScores[_syncedPlayerIds[i]] = _syncedScores[i];
+            }
+
+            SortLeaderboard();
+            UpdateDisplay();
+        }
+
+        private void EnsureSyncArrays()
+        {
+            if (_syncedPlayerIds == null || _syncedPlayerIds.Length != MAX_PLAYERS)
+                _syncedPlayerIds = new int[MAX_PLAYERS];
+
+            if (_syncedScores == null || _syncedScores.Length != MAX_PLAYERS)
+                _syncedScores = new int[MAX_PLAYERS];
+
+            if (_syncedNames == null || _syncedNames.Length != MAX_PLAYERS)
+                _syncedNames = new string[MAX_PLAYERS];
+
+            for (int i = 0; i < MAX_PLAYERS; i++)
+            {
+                if (_syncedNames[i] == null)
+                    _syncedNames[i] = "";
             }
         }
         
@@ -360,7 +516,12 @@ namespace CEShowcase.Station3_Leaderboard
         {
             VRCPlayerApi localPlayer = Networking.LocalPlayer;
             if (localPlayer == null || !localPlayer.IsValid()) return;
-            
+
+            // The one path that produces a fact no other client knows: this player just scored. Claim the
+            // board here so the PublishLeaderboard inside AddScore has somewhere to write, instead of
+            // letting every client claim it on every join.
+            ClaimLeaderboardAuthority();
+
             AddScore(localPlayer.playerId, amount);
             CELogger.Info("Leaderboard", $"Added {amount} points! New score: {GetPlayerScore(_localPlayerId)}");
         }
@@ -491,6 +652,12 @@ namespace CEShowcase.Station3_Leaderboard
             AddPlayer(player.playerId, player.displayName);
             SortLeaderboard();
             UpdateDisplay();
+
+            // This callback runs on EVERY client, so nothing here may take the board: an ownership claim
+            // per client per join is an instance-wide scramble that ends with someone's zeroed local view
+            // as the authoritative roster. PublishLeaderboard is now owner-only, so exactly the one
+            // client that already holds the board adds the joiner to it and everybody else no-ops.
+            PublishLeaderboard();
         }
         
         public override void OnPlayerLeft(VRCPlayerApi player)

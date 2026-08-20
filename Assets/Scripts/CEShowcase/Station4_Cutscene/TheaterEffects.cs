@@ -21,6 +21,10 @@ namespace CEShowcase.Station4_Cutscene
         [SerializeField] private Light[] _stageLights;
         [SerializeField] private Color[] _lightColors;
         [SerializeField] private float _lightPulseSpeed = 2f;
+
+        // The showcase runs under a bright daylight directional light, so the pulse needs headroom above
+        // Unity's default intensity of 1 before coloured stage lighting reads on the backdrop at all.
+        [SerializeField] private float _lightIntensity = 1f;
         
         [Header("Props")]
         [SerializeField] private Transform[] _floatingProps;
@@ -75,7 +79,7 @@ namespace CEShowcase.Station4_Cutscene
                 float phase = _lightTimer + (i * Mathf.PI * 0.5f);
                 
                 // Pulsing intensity
-                float intensity = 1f + Mathf.Sin(phase) * 0.5f;
+                float intensity = _lightIntensity * (1f + Mathf.Sin(phase) * 0.5f);
                 light.intensity = intensity;
                 
                 // Color cycling
@@ -215,8 +219,9 @@ namespace CEShowcase.Station4_Cutscene
                 {
                     if (_stageLights[i] != null)
                     {
-                        _stageLights[i].intensity = 1f;
+                        _stageLights[i].intensity = _lightIntensity;
                         _stageLights[i].color = Color.white;
+                        _stageLights[i].enabled = false;
                     }
                 }
             }

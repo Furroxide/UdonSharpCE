@@ -14,6 +14,35 @@ namespace CEShowcase.Station1_BulletHell
     public class BulletHellDemo : UdonSharpBehaviour
     {
         private const string LogTag = "BulletHell";
+
+        /// <summary>This station's index in <see cref="CEShowcase.Core.DemoManager"/>'s shared state.</summary>
+        private const int StationIndex = 1;
+
+        [Header("Station Gating")]
+        [Tooltip("Shared station state. When this station is off, the ECS loop is skipped entirely. " +
+                 "Leave unassigned to always run.")]
+        [SerializeField] private CEShowcase.Core.DemoManager _demoManager;
+
+        private bool _wasRunning = true;
+
+        /// <summary>
+        /// True when this station is switched on for everyone, or when no DemoManager is wired.
+        /// Logs the transition so a paused station is observable rather than merely quiet.
+        /// </summary>
+        private bool IsStationRunning()
+        {
+            bool running = _demoManager == null || _demoManager.IsStationActive(StationIndex);
+
+            if (running != _wasRunning)
+            {
+                _wasRunning = running;
+                CELogger.Debug(LogTag, running
+                    ? "Station on - resuming bullet simulation"
+                    : "Station off - bullet simulation paused");
+            }
+
+            return running;
+        }
         
         [Header("Pool Settings")]
         [SerializeField] private GameObject _bulletPrefab;
@@ -21,7 +50,6 @@ namespace CEShowcase.Station1_BulletHell
         [SerializeField] private int _maxBullets = 2000;
         
         [Header("Visual Settings")]
-        [SerializeField] private Color _bulletColor = new Color(1f, 0.4f, 0.1f, 1f); // Orange glow
         [SerializeField] private float _bulletScale = 0.15f;
         
         [Header("Spawn Settings")]
@@ -248,16 +276,23 @@ namespace CEShowcase.Station1_BulletHell
         {
             CELogger.Debug(LogTag, $"Station enabled - resuming bullet simulation (active entities: {(_world != null ? _world.ActiveEntityCount : 0)})");
         }
-        
+
         void OnDisable()
         {
             CELogger.Debug(LogTag, $"Station disabled - pausing bullet simulation (active entities: {(_world != null ? _world.ActiveEntityCount : 0)})");
         }
-        
+
         void Update()
         {
+            // Station toggling deliberately no longer deactivates this GameObject: a disabled
+            // UdonBehaviour receives no Udon events at all, which would switch sync off for every
+            // behaviour hosted under the station root. Visibility is toggled instead -- so this loop
+            // must gate itself, or 2000 bullets keep simulating invisibly at full CPU cost.
+            if (!IsStationRunning())
+                return;
+
             float dt = Time.deltaTime;
-            
+
             _createdThisFrame = 0;
             _destroyedThisFrame = 0;
 

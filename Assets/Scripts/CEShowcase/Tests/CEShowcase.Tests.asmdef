@@ -8,7 +8,8 @@
         "UdonSharp.CE.Runtime",
         "UdonSharp.Editor",
         "VRC.Udon",
-        "VRC.Udon.Editor"
+        "VRC.Udon.Editor",
+        "Unity.TextMeshPro"
     ],
     "includePlatforms": [
         "Editor"
@@ -21,7 +22,9 @@
         "Microsoft.CodeAnalysis.CSharp.dll",
         "System.Collections.Immutable.dll",
         "VRCSDKBase.dll",
-        "VRCSDK3.dll"
+        "VRCSDK3.dll",
+        "VRC.Udon.Common.dll",
+        "VRC.Udon.ClientBindings.dll"
     ],
     "autoReferenced": false,
     "defineConstraints": [],

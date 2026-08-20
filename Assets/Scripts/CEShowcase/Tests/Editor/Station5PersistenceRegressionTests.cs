@@ -75,6 +75,18 @@ namespace CEShowcase.Tests.Editor
         }
 
         [Test]
+        public void Collectible_Collect_WhenVisualIsHost_KeepsBehaviourObjectActive()
+        {
+            CollectibleItem collectible = CreateComponent<CollectibleItem>("CollectibleHostVisual");
+
+            InvokePrivate(collectible, "Start");
+            InvokePrivate(collectible, "Collect", false);
+
+            Assert.IsTrue(collectible.gameObject.activeSelf, "Collecting must not deactivate the Udon host object or respawn Update will stop.");
+            Assert.IsTrue(collectible.IsCollected());
+        }
+
+        [Test]
         public void Collectible_Start_WhenSyncedCollected_HidesVisualAndStartsRespawnTimer()
         {
             CollectibleItem collectible = CreateComponent<CollectibleItem>("CollectibleSyncedState");

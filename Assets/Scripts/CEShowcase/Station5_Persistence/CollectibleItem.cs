@@ -39,13 +39,22 @@ namespace CEShowcase.Station5_Persistence
         // Synced state
         [UdonSynced] private bool _isCollected;
         [UdonSynced] private double _collectedServerTime;
-        
+
+        private const float SERIALIZATION_RETRY_DELAY = 0.5f;
+        private const float COLLECT_SHRINK_DURATION = 0.25f;
+
         // Local state
         private Vector3 _startPosition;
+        private Vector3 _startScale = Vector3.one;
+        private float _collectShrinkTimer;
         private bool _localCollected;
         private bool _pendingLocalCollect;
+        private bool _serializationRetryPending;
+        private bool _started;
         private float _respawnTimer;
-        
+        private Renderer[] _visualRenderers;
+        private Collider[] _visualColliders;
+
         void Start()
         {
             if (_visualObject == null)
@@ -54,15 +63,18 @@ namespace CEShowcase.Station5_Persistence
             }
 
             _startPosition = _visualObject.transform.position;
+            _startScale = _visualObject.transform.localScale;
+            CacheVisualComponents();
             
             if (!string.IsNullOrEmpty(_interactionText))
             {
                 InteractionText = $"{_interactionText} {_itemName}";
             }
-            
+
+            _started = true;
             ApplySyncedState();
         }
-        
+
         void Update()
         {
             // Bob and rotate animation
@@ -75,7 +87,25 @@ namespace CEShowcase.Station5_Persistence
                 // Rotation
                 _visualObject.transform.Rotate(Vector3.up, _rotateSpeed * Time.deltaTime);
             }
-            
+
+            // Collect feedback: quick pop-then-shrink before the visual switches off.
+            // Purely local; touches no synced state.
+            if (_collectShrinkTimer > 0f && _visualObject != null)
+            {
+                _collectShrinkTimer -= Time.deltaTime;
+                float t = 1f - Mathf.Max(0f, _collectShrinkTimer) / COLLECT_SHRINK_DURATION;
+                float scale = t < 0.3f
+                    ? Mathf.Lerp(1f, 1.15f, t / 0.3f)
+                    : Mathf.Lerp(1.15f, 0f, (t - 0.3f) / 0.7f);
+                _visualObject.transform.localScale = _startScale * scale;
+
+                if (_collectShrinkTimer <= 0f)
+                {
+                    SetVisualActive(false);
+                    _visualObject.transform.localScale = _startScale;
+                }
+            }
+
             // Respawn timer
             if (_localCollected && _canRespawn && Networking.IsOwner(gameObject))
             {
@@ -130,7 +160,7 @@ namespace CEShowcase.Station5_Persistence
             _isCollected = true;
             _collectedServerTime = Networking.GetServerTimeInSeconds();
             Collect(true);
-            RequestSerialization();
+            RequestCollectibleSerialization();
         }
         
         private void Collect(bool reportToInventory)
@@ -145,12 +175,18 @@ namespace CEShowcase.Station5_Persistence
                 _inventorySystem.OnItemCollected(_itemId);
             }
             
-            // Visual feedback
-            if (_visualObject != null)
+            // Visual feedback: only the local pickup (reportToInventory) shrinks away over a
+            // few frames via Update. Remote/late-join collection must hide synchronously so
+            // the visual always reflects synced state the moment it lands.
+            if (reportToInventory && _visualObject != null)
             {
-                _visualObject.SetActive(false);
+                _collectShrinkTimer = COLLECT_SHRINK_DURATION;
             }
-            
+            else
+            {
+                SetVisualActive(false);
+            }
+
             if (_collectParticles != null)
             {
                 _collectParticles.transform.position = _startPosition;
@@ -178,22 +214,43 @@ namespace CEShowcase.Station5_Persistence
             _pendingLocalCollect = false;
             _collectedServerTime = 0d;
             _respawnTimer = 0f;
-            
+
+            // Cancel any in-flight collect shrink so the respawned visual is full size
+            _collectShrinkTimer = 0f;
+
+            SetVisualActive(true);
             if (_visualObject != null)
             {
-                _visualObject.SetActive(true);
                 _visualObject.transform.position = _startPosition;
+                _visualObject.transform.localScale = _startScale;
             }
             
             // Sync respawn
             if (syncState && Networking.IsOwner(gameObject))
             {
-                RequestSerialization();
+                RequestCollectibleSerialization();
             }
             
             CELogger.Debug("Collectible", $"Respawned: {_itemName}");
         }
         
+        private void OnEnable()
+        {
+            // Re-apply on enable. Synced state arrives via OnDeserialization, which a disabled behaviour
+            // never receives, so a station toggled on later would otherwise show every collectible at its
+            // compiled heap default (un-collected) until the owner happened to serialize again.
+            if (!_started)
+            {
+                // First activation: OnEnable runs before Start, and OnDeserialization is allowed to land
+                // before Start too, so _isCollected may already be true here. Start caches _startPosition
+                // and the renderer list and then applies the state itself -- applying it now would play
+                // the pickup burst at the world origin.
+                return;
+            }
+
+            ApplySyncedState();
+        }
+
         public override void OnDeserialization()
         {
             ApplySyncedState();
@@ -225,9 +282,92 @@ namespace CEShowcase.Station5_Persistence
                 return;
             }
 
-            if (_visualObject != null)
+            SetVisualActive(true);
+        }
+
+        public override void OnPostSerialization(VRC.Udon.Common.SerializationResult result)
+        {
+            if (result.success)
             {
-                _visualObject.SetActive(true);
+                _serializationRetryPending = false;
+                return;
+            }
+
+            if (!Networking.IsOwner(gameObject))
+                return;
+
+            ScheduleCollectibleSerializationRetry();
+        }
+
+        public void _CE_RetryCollectibleSerialization()
+        {
+            _serializationRetryPending = false;
+            RequestCollectibleSerialization();
+        }
+
+        private void RequestCollectibleSerialization()
+        {
+            if (!Networking.IsOwner(gameObject))
+                return;
+
+            if (Networking.IsClogged)
+            {
+                ScheduleCollectibleSerializationRetry();
+                return;
+            }
+
+            RequestSerialization();
+        }
+
+        private void ScheduleCollectibleSerializationRetry()
+        {
+            if (_serializationRetryPending)
+                return;
+
+            _serializationRetryPending = true;
+            SendCustomEventDelayedSeconds(
+                nameof(_CE_RetryCollectibleSerialization),
+                SERIALIZATION_RETRY_DELAY,
+                VRC.Udon.Common.Enums.EventTiming.PostLateUpdate);
+        }
+
+        private void CacheVisualComponents()
+        {
+            if (_visualObject == null)
+            {
+                _visualRenderers = new Renderer[0];
+                _visualColliders = new Collider[0];
+                return;
+            }
+
+            _visualRenderers = _visualObject.GetComponentsInChildren<Renderer>(true);
+            _visualColliders = _visualObject.GetComponentsInChildren<Collider>(true);
+        }
+
+        private void SetVisualActive(bool active)
+        {
+            if (_visualObject == null)
+                return;
+
+            if (_visualObject != gameObject)
+            {
+                _visualObject.SetActive(active);
+                return;
+            }
+
+            if (_visualRenderers == null || _visualColliders == null)
+                CacheVisualComponents();
+
+            for (int i = 0; i < _visualRenderers.Length; i++)
+            {
+                if (_visualRenderers[i] != null)
+                    _visualRenderers[i].enabled = active;
+            }
+
+            for (int i = 0; i < _visualColliders.Length; i++)
+            {
+                if (_visualColliders[i] != null)
+                    _visualColliders[i].enabled = active;
             }
         }
         

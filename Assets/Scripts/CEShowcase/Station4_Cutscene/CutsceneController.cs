@@ -1,6 +1,7 @@
 using UdonSharp;
 using UdonSharp.CE.Async;
 using UdonSharp.CE.DevTools;
+using UdonSharp.CE.Net;
 using UnityEngine;
 
 namespace CEShowcase.Station4_Cutscene
@@ -12,8 +13,11 @@ namespace CEShowcase.Station4_Cutscene
     /// - async UdonTask methods for readable sequential logic
     /// - await UdonTask.Delay() for time-based waits
     /// - await UdonTask.Yield() for frame-based yields
-    /// - UdonTask.WhenAll() for parallel execution
-    /// - CancellationToken for cancellable sequences
+    /// - awaiting nested async helpers (fade, curtains, camera moves) from one flat sequence
+    /// - CancellationTokenSource / CancellationToken for a sequence that can be stopped part-way
+    ///
+    /// Deliberately not UdonTask.WhenAll(): the compiler has no lowering for it, so awaiting one
+    /// would never resume. Every step below is sequential.
     /// 
     /// Compare this ~150 lines to the previous 430-line state machine!
     /// The compiler transforms async methods into state machines automatically.
@@ -56,12 +60,39 @@ namespace CEShowcase.Station4_Cutscene
         
         // State tracking
         private bool _isPlaying;
-        private CancellationToken _cancellation;
+
+        // Cancellation is cooperative: Udon cannot interrupt a running method, so the source is only a
+        // flag that every await point in this file checks. Without it a skip left the old sequence
+        // driving the curtains, camera and fade straight over the top of the reset state.
+        private CancellationTokenSource _cancellation;
+
+        // Authored on the AudioSource in the scene; the fades lerp back to this rather than to a literal.
+        private float _musicVolume = 0.5f;
+
+        // The frame a sequence was last cancelled on. A cancelled state machine only tears itself down
+        // when it next resumes, so for the rest of that frame it is still holding the shared locals and
+        // the generated guard refuses anything new -- and the refused start's scheduled resume is lost
+        // with it. Waiting one frame costs nothing: no player can press two buttons inside a single frame.
+        private int _cancelFrame = -1;
+        // Local status text only. This was previously [SyncOnJoin], which was wrong twice over: the
+        // cutscene is started by a purely local interact and driven by a local async sequence, so every
+        // client writes its own value; and the behaviour is BehaviourSyncMode.None, so nothing on it can
+        // reach another player anyway. See ProcgenDemo for a [SyncOnJoin] field that is genuinely shared.
         private string _currentStep = "Ready";
         
         // Original positions
         private Vector3 _curtainLeftStart;
         private Vector3 _curtainRightStart;
+
+        // Where the crowd camera sits when nothing is playing, so a finished or skipped cutscene hands
+        // the screen back to the audience view instead of parking on an empty stage.
+        private Vector3 _cameraHomePosition;
+        private Quaternion _cameraHomeRotation;
+
+        // Waypoint order on the crowd camera rig.
+        private const int WaypointStageWide = 0;
+        private const int WaypointActorCloseup = 1;
+        private const int WaypointCrowd = 2;
         
         void Start()
         {
@@ -70,7 +101,19 @@ namespace CEShowcase.Station4_Cutscene
             // Store initial positions
             if (_curtainLeft != null) _curtainLeftStart = _curtainLeft.localPosition;
             if (_curtainRight != null) _curtainRightStart = _curtainRight.localPosition;
-            
+
+            if (_cameraRig != null)
+            {
+                _cameraHomePosition = _cameraRig.position;
+                _cameraHomeRotation = _cameraRig.rotation;
+            }
+
+            if (_musicSource != null)
+            {
+                _musicVolume = _musicSource.volume;
+                _musicSource.volume = 0f;
+            }
+
             // Hide stage elements initially
             SetStageElementsActive(false);
             
@@ -92,59 +135,103 @@ namespace CEShowcase.Station4_Cutscene
         /// then continues from where it left off. The compiler transforms
         /// this into a state machine behind the scenes.
         /// </summary>
-        public async UdonTask PlayCutsceneAsync()
+        public async UdonTask PlayCutsceneAsync(CancellationToken token)
         {
+            _isPlaying = true;
+            if (_playButton != null) _playButton.SetActive(false);
+
             CELogger.Info("Cutscene", "Starting async cutscene playback");
-            
-            // Step 1: Fade to black
+
+            // Step 1: Fade the crowd screen to black -- the audience should not watch the stage
+            // being set. This fade is on the screen the camera feeds, not on anyone's eyes: Udon
+            // cannot draw over a VRChat player's view.
             UpdateStatus("Fading out...");
-            await FadeScreenAsync(0f, 1f, _fadeDuration);
-            
-            // Step 2: Open curtains (with sound)
+            await FadeScreenAsync(0f, 1f, _fadeDuration, token);
+            if (token.IsCancellationRequested) return;
+
+            // Step 2: Music swells, then the curtains open and the stage is dressed behind the black
             UpdateStatus("Opening curtains...");
+            await FadeMusicAsync(0f, _musicVolume, 0.8f, token);
+            if (token.IsCancellationRequested) return;
             PlaySound(_curtainSound);
             SetStageElementsActive(true);
-            await AnimateCurtainsAsync(true, 2f);
-            
-            // Step 3: Show title with fade
+            await AnimateCurtainsAsync(true, 2f, token);
+            if (token.IsCancellationRequested) return;
+
+            // Step 3: Fade back up on the revealed stage. The screen has to return here rather than
+            // at the end -- every step after this one is meant to be watched on it.
+            UpdateStatus("Reveal...");
+            await FadeScreenAsync(1f, 0f, _fadeDuration, token);
+            if (token.IsCancellationRequested) return;
+
+            // Step 4: Show title with fade
             UpdateStatus("Showing title...");
             if (_titleText != null)
             {
                 _titleText.text = "UdonSharpCE\n<size=50%>Async Made Simple</size>";
             }
-            await FadeTitleAsync(0f, 1f, 1f);
+            await FadeTitleAsync(0f, 1f, 1f, token);
+            if (token.IsCancellationRequested) return;
             
-            // Step 4: Camera pan to first waypoint
+            // Step 5: Camera leaves the crowd view and frames the whole stage
             UpdateStatus("Camera pan...");
-            await MoveCameraToWaypointAsync(0, 3f);
-            
-            // Step 5: Hold on title
+            await MoveCameraToWaypointAsync(WaypointStageWide, GetCameraMoveDuration(WaypointStageWide, 3f), token);
+            if (token.IsCancellationRequested) return;
+
+            // Step 6: Hold on title
             UpdateStatus("Displaying...");
             await UdonTask.Delay(2f);
-            
-            // Step 6: Spotlight sequence with effects
+            if (token.IsCancellationRequested) return;
+
+            // Step 7: Push in on the performer
+            UpdateStatus("Close-up...");
+            await MoveCameraToWaypointAsync(WaypointActorCloseup, GetCameraMoveDuration(WaypointActorCloseup, 2f), token);
+            if (token.IsCancellationRequested) return;
+
+            // Step 8: Spotlight sequence with effects
             UpdateStatus("Spotlight sequence...");
-            await SpotlightSequenceAsync(4f);
-            
-            // Step 7: Fireworks and applause (effects play in parallel)
+            await SpotlightSequenceAsync(4f, token);
+            if (token.IsCancellationRequested) return;
+
+            // Step 9: Pull back so the finale reads wide
+            UpdateStatus("Curtain call...");
+            await MoveCameraToWaypointAsync(WaypointCrowd, GetCameraMoveDuration(WaypointCrowd, 3f), token);
+            if (token.IsCancellationRequested) return;
+
+            // Step 10: Fireworks and applause
             UpdateStatus("Finale effects...");
-            if (_effects != null) _effects.PlayFireworks();
+            if (_effects != null)
+            {
+                _effects.PlayFireworks();
+                _effects.PlayConfetti();
+            }
             PlaySound(_applauseSound);
             await UdonTask.Delay(2f);
-            
-            // Step 8: Hide title
+            if (token.IsCancellationRequested) return;
+
+            // Step 11: Hide title
             UpdateStatus("Hiding title...");
-            await FadeTitleAsync(1f, 0f, 0.5f);
-            
-            // Step 9: Close curtains
+            await FadeTitleAsync(1f, 0f, 0.5f, token);
+            if (token.IsCancellationRequested) return;
+
+            // Step 12: Fade out again so the curtain close happens off screen
+            UpdateStatus("Fading out...");
+            await FadeScreenAsync(0f, 1f, _fadeDuration, token);
+            if (token.IsCancellationRequested) return;
+
+            // Step 13: Close curtains, then take the music down under the black
             UpdateStatus("Closing curtains...");
             PlaySound(_curtainSound);
-            await AnimateCurtainsAsync(false, 2f);
+            await AnimateCurtainsAsync(false, 2f, token);
+            if (token.IsCancellationRequested) return;
             SetStageElementsActive(false);
-            
-            // Step 10: Fade back in
+            await FadeMusicAsync(_musicVolume, 0f, 1f, token);
+            if (token.IsCancellationRequested) return;
+
+            // Step 14: Fade back in
             UpdateStatus("Fading in...");
-            await FadeScreenAsync(1f, 0f, _fadeDuration);
+            await FadeScreenAsync(1f, 0f, _fadeDuration, token);
+            if (token.IsCancellationRequested) return;
             
             // Done!
             _isPlaying = false;
@@ -162,41 +249,75 @@ namespace CEShowcase.Station4_Cutscene
         /// Smoothly fades the screen between two alpha values.
         /// Demonstrates time-based animation with UdonTask.
         /// </summary>
-        private async UdonTask FadeScreenAsync(float from, float to, float duration)
+        private async UdonTask FadeScreenAsync(float from, float to, float duration, CancellationToken token)
         {
             if (_fadeCanvasGroup == null)
             {
                 await UdonTask.Delay(duration);
                 return;
             }
-            
+
             float elapsed = 0f;
             while (elapsed < duration)
             {
+                if (token.IsCancellationRequested) return;
+
                 float t = elapsed / duration;
                 _fadeCanvasGroup.alpha = Mathf.Lerp(from, to, t);
-                
+
                 await UdonTask.Yield(); // Wait one frame
                 elapsed += Time.deltaTime;
             }
-            
+
             _fadeCanvasGroup.alpha = to;
+        }
+
+        /// <summary>
+        /// Fades the music bed. Returning early on cancellation deliberately skips the final snap, so a
+        /// skipped cutscene leaves the volume where ResetCutscene puts it rather than where this was heading.
+        /// </summary>
+        private async UdonTask FadeMusicAsync(float from, float to, float duration, CancellationToken token)
+        {
+            if (_musicSource == null || _musicSource.clip == null)
+            {
+                await UdonTask.Delay(duration);
+                return;
+            }
+
+            _musicSource.volume = from;
+            if (to > 0f) _musicSource.Play();
+
+            float elapsed = 0f;
+            while (elapsed < duration)
+            {
+                if (token.IsCancellationRequested) return;
+
+                _musicSource.volume = Mathf.Lerp(from, to, elapsed / duration);
+
+                await UdonTask.Yield();
+                elapsed += Time.deltaTime;
+            }
+
+            _musicSource.volume = to;
+            if (to <= 0f) _musicSource.Stop();
         }
         
         /// <summary>
         /// Fades the title text alpha.
         /// </summary>
-        private async UdonTask FadeTitleAsync(float from, float to, float duration)
+        private async UdonTask FadeTitleAsync(float from, float to, float duration, CancellationToken token)
         {
             if (_titleCanvasGroup == null)
             {
                 await UdonTask.Delay(duration);
                 return;
             }
-            
+
             float elapsed = 0f;
             while (elapsed < duration)
             {
+                if (token.IsCancellationRequested) return;
+
                 float t = elapsed / duration;
                 _titleCanvasGroup.alpha = Mathf.Lerp(from, to, SmoothStep(t));
                 
@@ -210,7 +331,7 @@ namespace CEShowcase.Station4_Cutscene
         /// <summary>
         /// Animates curtains opening or closing.
         /// </summary>
-        private async UdonTask AnimateCurtainsAsync(bool opening, float duration)
+        private async UdonTask AnimateCurtainsAsync(bool opening, float duration, CancellationToken token)
         {
             if (_curtainLeft == null || _curtainRight == null)
             {
@@ -226,8 +347,10 @@ namespace CEShowcase.Station4_Cutscene
             float elapsed = 0f;
             while (elapsed < duration)
             {
+                if (token.IsCancellationRequested) return;
+
                 float t = SmoothStep(elapsed / duration);
-                
+
                 _curtainLeft.localPosition = Vector3.Lerp(leftStart, leftEnd, t);
                 _curtainRight.localPosition = Vector3.Lerp(rightStart, rightEnd, t);
                 
@@ -242,7 +365,20 @@ namespace CEShowcase.Station4_Cutscene
         /// <summary>
         /// Moves camera to a waypoint with smooth interpolation.
         /// </summary>
-        private async UdonTask MoveCameraToWaypointAsync(int waypointIndex, float duration)
+        private float GetCameraMoveDuration(int waypointIndex, float fallbackDuration)
+        {
+            if (_cameraMoveSpeed <= 0f || _cameraRig == null || _cameraWaypoints == null ||
+                waypointIndex < 0 || waypointIndex >= _cameraWaypoints.Length ||
+                _cameraWaypoints[waypointIndex] == null)
+            {
+                return fallbackDuration;
+            }
+
+            float distance = Vector3.Distance(_cameraRig.position, _cameraWaypoints[waypointIndex].position);
+            return Mathf.Max(0.1f, distance / _cameraMoveSpeed);
+        }
+
+        private async UdonTask MoveCameraToWaypointAsync(int waypointIndex, float duration, CancellationToken token)
         {
             if (_cameraRig == null || _cameraWaypoints == null || 
                 waypointIndex < 0 || waypointIndex >= _cameraWaypoints.Length)
@@ -266,8 +402,10 @@ namespace CEShowcase.Station4_Cutscene
             float elapsed = 0f;
             while (elapsed < duration)
             {
+                if (token.IsCancellationRequested) return;
+
                 float t = SmoothStep(elapsed / duration);
-                
+
                 _cameraRig.position = Vector3.Lerp(startPos, endPos, t);
                 _cameraRig.rotation = Quaternion.Slerp(startRot, endRot, t);
                 
@@ -283,7 +421,7 @@ namespace CEShowcase.Station4_Cutscene
         /// Plays a spotlight color/intensity sequence.
         /// Demonstrates effects with timed loops.
         /// </summary>
-        private async UdonTask SpotlightSequenceAsync(float duration)
+        private async UdonTask SpotlightSequenceAsync(float duration, CancellationToken token)
         {
             if (_spotlight == null)
             {
@@ -291,13 +429,19 @@ namespace CEShowcase.Station4_Cutscene
                 return;
             }
             
-            if (_effects != null) _effects.PlaySparkles();
+            if (_effects != null)
+            {
+                _effects.PlaySparkles();
+                _effects.StartStageLights();
+            }
             
             float elapsed = 0f;
             while (elapsed < duration)
             {
+                if (token.IsCancellationRequested) return;
+
                 float t = elapsed / duration;
-                
+
                 // Pulsing intensity
                 float pulse = Mathf.Sin(t * Mathf.PI * 4) * 0.3f + 0.7f;
                 _spotlight.intensity = pulse * 2f;
@@ -314,7 +458,11 @@ namespace CEShowcase.Station4_Cutscene
             _spotlight.intensity = 1f;
             _spotlight.color = Color.white;
             
-            if (_effects != null) _effects.StopSparkles();
+            if (_effects != null)
+            {
+                _effects.StopSparkles();
+                _effects.StopStageLights();
+            }
         }
         
         // ========================================
@@ -339,15 +487,35 @@ namespace CEShowcase.Station4_Cutscene
             if (_effects == null) _effects = FindTheaterEffects(searchRoot);
             if (_musicSource == null) _musicSource = FindAudioSourceByName(searchRoot, "Music");
             if (_sfxSource == null) _sfxSource = FindAudioSourceByName(searchRoot, "SFX");
+            // "CameraRig" only. The old fallback matched anything named ReferenceCamera, which in a
+            // VRChat scene is the world's own reference camera -- flying that around mid-cutscene would
+            // drag every player's post-processing reference along with it.
             if (_cameraRig == null) _cameraRig = FindTransformByName(searchRoot, "CameraRig");
-            if (_cameraRig == null) _cameraRig = FindTransformByName(searchRoot, "ReferenceCamera");
 
+            if (_cameraWaypoints == null || _cameraWaypoints.Length == 0)
+            {
+                Transform waypointRoot = FindTransformByName(searchRoot, "CameraWaypoints");
+                if (waypointRoot != null && waypointRoot.childCount > 0)
+                {
+                    Transform[] waypoints = new Transform[waypointRoot.childCount];
+                    for (int i = 0; i < waypointRoot.childCount; i++)
+                    {
+                        waypoints[i] = waypointRoot.GetChild(i);
+                    }
+
+                    _cameraWaypoints = waypoints;
+                }
+            }
+
+            // "StageProps", not "Stage". FindTransformByName matches on Contains, so the old lookup
+            // resolved to the stage platform and Start() then deactivated the floor the actor stands
+            // on -- the platform blinked out of the world instead of dressing appearing on it.
             if (_stageElements == null || _stageElements.Length == 0)
             {
-                GameObject stage = FindGameObjectByName(searchRoot, "Stage");
-                if (stage != null && stage != gameObject)
+                GameObject stageProps = FindGameObjectByName(searchRoot, "StageProps");
+                if (stageProps != null && stageProps != gameObject)
                 {
-                    _stageElements = new GameObject[] { stage };
+                    _stageElements = new GameObject[] { stageProps };
                 }
             }
         }
@@ -505,6 +673,14 @@ namespace CEShowcase.Station4_Cutscene
         
         public void ResetCutscene()
         {
+            // Stop whatever is still awaiting before putting the stage back, or the running sequence
+            // keeps animating over the reset state until it runs out of steps.
+            if (_cancellation != null)
+            {
+                _cancellation.Cancel();
+                _cancelFrame = Time.frameCount;
+            }
+
             _isPlaying = false;
             _currentStep = "Ready";
             
@@ -522,7 +698,23 @@ namespace CEShowcase.Station4_Cutscene
                 _spotlight.intensity = 1f;
                 _spotlight.color = Color.white;
             }
-            
+
+            if (_cameraRig != null)
+            {
+                _cameraRig.position = _cameraHomePosition;
+                _cameraRig.rotation = _cameraHomeRotation;
+            }
+
+            // Particles and stage lights are started mid-sequence, so a cancelled run would leave them
+            // burning; StopAllEffects is the matching teardown for every one of them.
+            if (_effects != null) _effects.StopAllEffects();
+
+            if (_musicSource != null)
+            {
+                _musicSource.Stop();
+                _musicSource.volume = 0f;
+            }
+
             SetStageElementsActive(false);
             
             if (_playButton != null) _playButton.SetActive(true);
@@ -537,25 +729,48 @@ namespace CEShowcase.Station4_Cutscene
         public void OnPlayCutscene()
         {
             if (_isPlaying) return;
-            
-            _isPlaying = true;
-            if (_playButton != null) _playButton.SetActive(false);
-            
+            if (Time.frameCount == _cancelFrame) return;
+
             // Fire off the async cutscene!
             // The compiler generates the state machine - we just write clean code.
-            _ = PlayCutsceneAsync();
+            //
+            // Nothing is committed here on purpose. A cancelled sequence only unwinds when its state
+            // machine next resumes, so a start issued in the same frame as a cancel is refused by the
+            // generated guard -- and marking the cutscene as playing before that point would hide the
+            // play button forever with nothing running. Letting the body below do it means a refused
+            // start changes nothing at all and the next press just works.
+            _ = PlayCutsceneAsync(BeginSequence());
         }
-        
+
         public void OnSkipCutscene()
         {
             if (!_isPlaying) return;
-            
-            // Cancel the current sequence
-            // In a full implementation, CancellationToken would be checked in each await
-            _isPlaying = false;
+
+            // ResetCutscene cancels the token the running sequence is holding, so it stops at its next
+            // await instead of animating on top of the state we are about to restore.
             ResetCutscene();
-            
+
             CELogger.Info("Cutscene", "Cutscene skipped");
+        }
+
+        /// <summary>
+        /// Starts a new cancellable sequence and stops whatever was running. A fresh source each time:
+        /// CancellationTokenSource.Reset() would resurrect a token an older sequence is still holding.
+        /// </summary>
+        private CancellationToken BeginSequence()
+        {
+            if (_cancellation != null)
+            {
+                _cancellation.Cancel();
+                _cancelFrame = Time.frameCount;
+
+                // A sequence cancelled mid-flight never reaches its own teardown, so anything it switched
+                // on -- sparkles, stage lights -- would still be running when the next one starts.
+                if (_effects != null) _effects.StopAllEffects();
+            }
+
+            _cancellation = new CancellationTokenSource();
+            return _cancellation.Token;
         }
         
         public void OnResetCutscene()
@@ -573,41 +788,52 @@ namespace CEShowcase.Station4_Cutscene
         /// </summary>
         public void OnDemoFade()
         {
-            _ = DemoFadeAsync();
+            if (_isPlaying) return;
+            if (Time.frameCount == _cancelFrame) return;
+            _ = DemoFadeAsync(BeginSequence());
         }
-        
-        private async UdonTask DemoFadeAsync()
+
+        private async UdonTask DemoFadeAsync(CancellationToken token)
         {
-            await FadeScreenAsync(0f, 1f, 0.5f);
+            await FadeScreenAsync(0f, 1f, 0.5f, token);
+            if (token.IsCancellationRequested) return;
             await UdonTask.Delay(0.5f);
-            await FadeScreenAsync(1f, 0f, 0.5f);
+            if (token.IsCancellationRequested) return;
+            await FadeScreenAsync(1f, 0f, 0.5f, token);
         }
-        
+
         /// <summary>
         /// Demo button to show curtain animation with async.
         /// </summary>
         public void OnDemoCurtains()
         {
-            _ = DemoCurtainsAsync();
+            if (_isPlaying) return;
+            if (Time.frameCount == _cancelFrame) return;
+            _ = DemoCurtainsAsync(BeginSequence());
         }
-        
-        private async UdonTask DemoCurtainsAsync()
+
+        private async UdonTask DemoCurtainsAsync(CancellationToken token)
         {
             SetStageElementsActive(true);
             PlaySound(_curtainSound);
-            await AnimateCurtainsAsync(true, 1.5f);
+            await AnimateCurtainsAsync(true, 1.5f, token);
+            if (token.IsCancellationRequested) return;
             await UdonTask.Delay(1f);
+            if (token.IsCancellationRequested) return;
             PlaySound(_curtainSound);
-            await AnimateCurtainsAsync(false, 1.5f);
+            await AnimateCurtainsAsync(false, 1.5f, token);
+            if (token.IsCancellationRequested) return;
             SetStageElementsActive(false);
         }
-        
+
         /// <summary>
         /// Demo button to show spotlight sequence with async.
         /// </summary>
         public void OnDemoSpotlight()
         {
-            _ = SpotlightSequenceAsync(3f);
+            if (_isPlaying) return;
+            if (Time.frameCount == _cancelFrame) return;
+            _ = SpotlightSequenceAsync(3f, BeginSequence());
         }
     }
 }

@@ -107,6 +107,14 @@ namespace CEShowcase.Station5_Persistence
         private int _estimatedSize;
         private int _autoSaveCount;
         private bool _playerDataReady;
+        // True once a restore produced an outcome that a later attempt cannot change. Retrying is only useful
+        // while the client has not answered yet; see LoadInventory.
+        private bool _inventoryLoadSettled;
+        // CEPersistence.GetUsedQuota() reaches the client on every call (ClientSim additionally logs a warning
+        // each time), so it is polled only when the stored bytes can actually have changed - not once per
+        // UpdateDisplay(), which runs on every collected item.
+        private int _cachedUsedQuota = -1;
+        private bool _usedQuotaStale = true;
         
         // Rarity colors
         private readonly Color COMMON_COLOR = new Color(0.8f, 0.8f, 0.8f);
@@ -144,7 +152,53 @@ namespace CEShowcase.Station5_Persistence
             _playerDataReady = true;
             LoadInventory();
         }
-        
+
+        public override void OnPlayerDataUpdated(VRCPlayerApi player, VRC.SDK3.Persistence.PlayerData.Info[] infos)
+        {
+            if (!Utilities.IsValid(player) || !player.isLocal)
+            {
+                return;
+            }
+
+            // OnPlayerRestored is the normal signal, but a PlayerData restore that lands after this behaviour
+            // was already running would otherwise never be applied. Recover only until the load settles: after
+            // that every one of our own auto-saves echoes back through here, and reloading then would overwrite
+            // the live inventory with whatever the last write happened to contain. A ParseError or
+            // VersionMismatch settles the load too - those read the same stored bytes on every attempt, so
+            // retrying them would only re-log while leaving this clobbering path armed forever.
+            if (_inventoryLoadSettled)
+            {
+                return;
+            }
+
+            if (!ContainsSaveKey(infos))
+            {
+                return;
+            }
+
+            CELogger.Info("Inventory", "PlayerData arrived late - recovering saved inventory.");
+            _playerDataReady = true;
+            LoadInventory();
+        }
+
+        private bool ContainsSaveKey(VRC.SDK3.Persistence.PlayerData.Info[] infos)
+        {
+            if (infos == null)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < infos.Length; i++)
+            {
+                if (infos[i].Key == SAVE_KEY)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         void Update()
         {
             _playTime += Time.deltaTime;
@@ -394,49 +448,49 @@ namespace CEShowcase.Station5_Persistence
             if (!_achieveFirstItem && _totalCollected >= 1)
             {
                 _achieveFirstItem = true;
-                achievementName = "🏆 First Discovery!";
+                achievementName = "<color=#FFD700>[TROPHY]</color> First Discovery!";
                 newAchievement = true;
             }
             else if (!_achieveTenItems && _totalCollected >= 10)
             {
                 _achieveTenItems = true;
-                achievementName = "🏆 Novice Collector (10 items)";
+                achievementName = "<color=#FFD700>[TROPHY]</color> Novice Collector (10 items)";
                 newAchievement = true;
             }
             else if (!_achieveHundredItems && _totalCollected >= 100)
             {
                 _achieveHundredItems = true;
-                achievementName = "🏆 Master Collector (100 items)";
+                achievementName = "<color=#FFD700>[TROPHY]</color> Master Collector (100 items)";
                 newAchievement = true;
             }
             else if (!_achieveFirstRare && _rareCount >= 1)
             {
                 _achieveFirstRare = true;
-                achievementName = "💎 First Rare Find!";
+                achievementName = "<color=#3399FF>[GEM]</color> First Rare Find!";
                 newAchievement = true;
             }
             else if (!_achieveFirstLegendary && _legendaryCount >= 1)
             {
                 _achieveFirstLegendary = true;
-                achievementName = "⭐ Legendary Discovery!";
+                achievementName = "<color=#FFD700>[STAR]</color> Legendary Discovery!";
                 newAchievement = true;
             }
             else if (!_achieve1000Points && _totalScore >= 1000)
             {
                 _achieve1000Points = true;
-                achievementName = "💰 Treasure Hunter (1000 pts)";
+                achievementName = "<color=#FFD700>[GOLD]</color> Treasure Hunter (1000 pts)";
                 newAchievement = true;
             }
             else if (!_achieve5000Points && _totalScore >= 5000)
             {
                 _achieve5000Points = true;
-                achievementName = "👑 Treasure Master (5000 pts)";
+                achievementName = "<color=#FFD700>[CROWN]</color> Treasure Master (5000 pts)";
                 newAchievement = true;
             }
             else if (!_achieveAllTypes && _itemNames != null && _uniqueItemCount >= _itemNames.Length)
             {
                 _achieveAllTypes = true;
-                achievementName = "🌟 Complete Collection!";
+                achievementName = "<color=#00FFFF>[STAR]</color> Complete Collection!";
                 newAchievement = true;
             }
             
@@ -506,20 +560,23 @@ namespace CEShowcase.Station5_Persistence
             EnsurePersistenceRegistration();
             InventorySaveData saveData = CreateSaveData();
             DataDictionary data = saveData.data;
-            _estimatedSize = EstimateDataSize(data);
-            
-            // Check quota
-            if (_estimatedSize > CEPersistence.PLAYER_DATA_QUOTA)
+            _estimatedSize = SizeEstimator.EstimateDataDictionarySize(data);
+
+            // Check against what is LEFT of the shared 100KB PlayerData budget. Comparing one model against the
+            // whole limit would pass a save that no longer fits alongside the other models in the world.
+            int quotaBudget = CEPersistence.GetWritableQuota(SAVE_KEY);
+            if (_estimatedSize > quotaBudget)
             {
-                CELogger.Error("Inventory", $"Data size ({_estimatedSize} bytes) exceeds quota!");
+                CELogger.Error("Inventory", $"Data size ({_estimatedSize} bytes) exceeds remaining quota ({quotaBudget} bytes)!");
                 return;
             }
-            
+
             SaveResult result = CEPersistence.Save(saveData);
             if (result == SaveResult.Success)
             {
                 _autoSaveCount++;
-                
+                _usedQuotaStale = true;
+
                 // Only log occasionally to avoid spam
                 if (_autoSaveCount % 10 == 0)
                 {
@@ -725,20 +782,46 @@ namespace CEShowcase.Station5_Persistence
             EnsurePersistenceRegistration();
             
             RestoreResult result = CEPersistence.Restore(out InventorySaveData savedData);
+
+            // Whatever happened, PlayerData was consulted, so any cached usage figure is out of date.
+            _usedQuotaStale = true;
+
             if (result == RestoreResult.Success && savedData != null)
             {
+                _inventoryLoadSettled = true;
                 ApplySaveData(savedData);
                 CELogger.Info("Inventory", "Inventory loaded - welcome back!");
             }
             else if (result == RestoreResult.NoData)
             {
+                _inventoryLoadSettled = true;
                 CELogger.Info("Inventory", "No saved data found - starting fresh");
             }
             else
             {
-                CELogger.Warning("Inventory", $"Restore failed: {result}");
+                // Only NotReady and NetworkError can produce a different answer later - the client had nothing
+                // to give us yet. Every other outcome (including a Success that handed back no model) reads the
+                // same stored bytes on every attempt, so it settles the load and stops OnPlayerDataUpdated from
+                // re-running this on each auto-save echo.
+                bool retryable = result == RestoreResult.NotReady || result == RestoreResult.NetworkError;
+                _inventoryLoadSettled = !retryable;
+
+                // The result code alone cannot say WHY a ParseError happened; the recorded corruption detail can.
+                CorruptionInfo corruption = PersistenceLifecycle.GetPendingCorruptionInfo();
+                if (corruption != null)
+                {
+                    CELogger.Warning("Inventory", $"Restore failed: {result} ({corruption.ToString()})");
+                }
+                else if (retryable)
+                {
+                    CELogger.Info("Inventory", $"Restore deferred: {result} - will retry when PlayerData updates.");
+                }
+                else
+                {
+                    CELogger.Warning("Inventory", $"Restore failed: {result}");
+                }
             }
-            
+
             UpdateDisplay();
         }
 
@@ -771,14 +854,6 @@ namespace CEShowcase.Station5_Persistence
         {
             if (saveData == null || saveData.data == null) return;
             FromDataDictionary(saveData.data);
-        }
-        
-        private int EstimateDataSize(DataDictionary data)
-        {
-            int size = 100; // Base overhead
-            size += _uniqueItemCount * 30; // Per-item
-            size += 200; // Stats and achievements
-            return size;
         }
         
         // ========================================
@@ -877,16 +952,38 @@ namespace CEShowcase.Station5_Persistence
         private void UpdateStatsDisplay()
         {
             if (_statsText == null) return;
-            
-            float quotaPercent = (_estimatedSize / (float)CEPersistence.PLAYER_DATA_QUOTA) * 100f;
-            
+
+            // Prefer what the client says we actually occupy; our own estimate is only a stand-in for edit mode
+            // and the frames before PlayerData is up, where the storage APIs cannot answer.
+            // The usage query is a real call into the client - ClientSim logs a warning on every one of them -
+            // and this method runs on every UpdateDisplay(), so refresh it only after the stored data changed.
+            if (_usedQuotaStale)
+            {
+                _cachedUsedQuota = CEPersistence.GetUsedQuota();
+                _usedQuotaStale = false;
+            }
+
+            int quotaLimit = CEPersistence.GetQuotaLimit();
+            int quotaUsed = _cachedUsedQuota;
+            string quotaLabel;
+            if (quotaUsed >= 0)
+            {
+                float quotaPercent = (quotaUsed / (float)quotaLimit) * 100f;
+                quotaLabel = $"{quotaPercent:F1}% quota used ({quotaUsed}/{quotaLimit} B)";
+            }
+            else
+            {
+                float quotaPercent = (_estimatedSize / (float)quotaLimit) * 100f;
+                quotaLabel = $"~{quotaPercent:F1}% quota used (estimate)";
+            }
+
             _statsText.text = $"<b>TREASURE STATS</b>\n" +
                              $"<color=#AAAAAA>Common:</color> {_commonCount}   " +
                              $"<color=#3399FF>Rare:</color> {_rareCount}   " +
                              $"<color=#FFD700>Legendary:</color> {_legendaryCount}\n" +
                              $"Play Time: {FormatTime(_playTime)}   |   " +
                              $"This Session: {_sessionCollected}\n" +
-                             $"<size=80%><color=#88FF88>✓ Auto-saved ({_autoSaveCount}x) • {quotaPercent:F1}% quota used</color></size>";
+                             $"<size=80%><color=#88FF88>✓ Auto-saved ({_autoSaveCount}x) • {quotaLabel}</color></size>";
         }
         
         private void UpdateRecentActivityDisplay()
