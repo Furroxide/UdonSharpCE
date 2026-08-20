@@ -1,0 +1,76 @@
+name: Publish Site
+
+# Publishes the documentation site and the VPM listing as ONE GitHub Pages deployment.
+#
+# They cannot be two workflows: a repository has a single Pages site and a custom domain binds per
+# host rather than per path, so serving vrc.furroxide.dev/ (docs) and vrc.furroxide.dev/vpm/
+# (listing) means one artifact containing both. Two deploying workflows would also contend for the
+# "pages" concurrency group.
+#
+# Replaces the inherited publish-doc-site-with-action.yml (checked out the private
+# vrchat/creators-docs-builder and deployed to cname udonsharp.docs.vrchat.com) and
+# build-listing.yml (built a listing and then discarded it -- it had no deploy step at all).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'Tools/Docusaurus/**'
+      - 'Tools/vpm/**'
+      - '.github/workflows/publish-site.yml'
+  release:
+    types: [published, edited, deleted]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One in-flight deployment; don't cancel a running one mid-publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: Tools/Docusaurus/package-lock.json
+
+      - name: Build docs site
+        working-directory: Tools/Docusaurus
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build VPM listing
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node Tools/vpm/build-listing.mjs "$GITHUB_WORKSPACE/site/vpm"
+
+      - name: Assemble artifact
+        run: |
+          # Docs at the root, listing at /vpm/. rsync rather than mv so /vpm survives.
+          mkdir -p site
+          rsync -a Tools/Docusaurus/build/ site/
+          echo 'vrc.furroxide.dev' > site/CNAME
+          test -f site/index.html || { echo "docs build produced no index.html"; exit 1; }
+          test -f site/vpm/index.json || { echo "listing build produced no index.json"; exit 1; }
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

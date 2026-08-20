@@ -1,0 +1,59 @@
+name: Validate
+
+# The repo had no CI at all before this. A full Unity compile needs a licensed runner, which this
+# repo does not have, so this deliberately covers only what can be checked without one:
+# manifest validity, listing generation, and a docs build. The docs build is a real test rather
+# than a formality -- docusaurus.config.js sets onBrokenLinks: 'throw', so a broken internal link
+# fails the job.
+#
+# The suite that exercises the compiler is CEShowcase.Tests (edit mode, ~107 tests) and must be run
+# locally in Unity; see CONTRIBUTING.md.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: Tools/Docusaurus/package-lock.json
+
+      - name: Validate JSON manifests
+        run: |
+          for f in Packages/com.merlin.UdonSharp/package.json Tools/vpm/source.json; do
+            node -e "JSON.parse(require('fs').readFileSync('$f','utf8'))" && echo "ok  $f"
+          done
+
+      - name: Package manifest matches its folder
+        run: |
+          # release.yml and the VPM listing both read this path. Upstream's copy pointed at
+          # com.vrchat.UdonSharp, which had not existed since the package was renamed.
+          name=$(node -p "require('./Packages/com.merlin.UdonSharp/package.json').name")
+          test "$name" = "com.merlin.udonsharp" \
+            || { echo "package name '$name' no longer matches Packages/com.merlin.UdonSharp"; exit 1; }
+          echo "ok  $name"
+
+      - name: Build VPM listing
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node Tools/vpm/build-listing.mjs "$RUNNER_TEMP/vpm"
+          node -e "JSON.parse(require('fs').readFileSync(process.env.RUNNER_TEMP+'/vpm/index.json','utf8'))"
+
+      - name: Build docs site
+        working-directory: Tools/Docusaurus
+        run: |
+          npm ci
+          npm run build
