@@ -93,18 +93,9 @@ Assets/Samples
 
 Packages/com.vrchat.vrcsdk3
 
-# Nuke Artifacts
-!**/Tools/Nuke/UdonSharpBuild/UdonSharpBuild.csproj
-Tools/Nuke/UdonSharpBuild/obj/
-Tools/Nuke/UdonSharpBuild/bin/
-Tools/Nuke/.nuke/temp/
-
-
-# DocFx artifacts
 Packages/com.vrchat.UdonSharp/Editor/obj/
 Packages/com.vrchat.UdonSharp/Editor/obj.meta
 
-Tools/DocFx/obj/
 Docs/Published
 
 Packages/com.vrchat.UdonSharp/Editor/BuildUtilities/obj/

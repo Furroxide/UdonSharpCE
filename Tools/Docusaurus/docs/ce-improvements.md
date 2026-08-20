@@ -440,7 +440,7 @@ Editor tools generate wrapper nodes and documentation automatically.
 UdonSharp CE installs via VPM (VRChat Creator Companion):
 
 1. Open VCC → Settings → Packages → Add Repository
-2. Add: `https://furroxide.dev/vpm/index.json`
+2. Add: `https://vrc.furroxide.dev/vpm/index.json`
 3. Open your project → Install "UdonSharp Community Edition"
 
 CE declares compatibility with standard UdonSharp, so existing prefabs work without changes.

@@ -104,7 +104,7 @@ This warning existed because:
 
 UdonSharpCE distributes via a VPM community repository hosted on GitHub Pages.
 
-**Repository URL:** `https://furroxide.dev/vpm/index.json`
+**Repository URL:** `https://vrc.furroxide.dev/vpm/index.json`
 
 **User Installation:**
 

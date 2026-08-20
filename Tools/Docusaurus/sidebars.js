@@ -51,6 +51,7 @@ const sidebars = {
         'ce-graphbridge',
         'ce-netphysics',
         'ce-editor-tools',
+        'ce-improvements',
       ],
       collapsed: true,
     },

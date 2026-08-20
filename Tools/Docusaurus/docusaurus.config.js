@@ -8,9 +8,9 @@ const darkCodeTheme = themes.dracula;
 
 /** @type {import('@docusaurus/types').Config} */
 const config = {
-  title: 'UdonSharp',
-  tagline: 'Compiler to make Udon Assembly from C#',
-  url: 'https://udonsharp.docs.vrchat.com',
+  title: 'UdonSharp CE',
+  tagline: 'Higher-level C# for VRChat Udon',
+  url: 'https://vrc.furroxide.dev',
   baseUrl: '/',
   onBrokenLinks: 'throw',
   markdown: {
@@ -19,8 +19,8 @@ const config = {
     },
   },
   favicon: 'images/favicon.ico',
-  organizationName: 'vrchat-community', // Usually your GitHub org/user name.
-  projectName: 'UdonSharp', // Usually your repo name.
+  organizationName: 'Furroxide',
+  projectName: 'UdonSharpCE',
 
   presets: [
     [
@@ -32,7 +32,7 @@ const config = {
           sidebarPath: require.resolve('./sidebars.js'),
           // Please change this to your repo.
           editUrl: ({versionDocsDirPath, docPath}) =>
-              `https://github.com/vrchat-community/UdonSharp/edit/master/Tools/Docusaurus/docs/${docPath}`,
+              `https://github.com/Furroxide/UdonSharpCE/edit/master/Tools/Docusaurus/docs/${docPath}`,
           
         },
         blog: {
@@ -41,7 +41,7 @@ const config = {
           showReadingTime: false,
           onUntruncatedBlogPosts: 'ignore',
           // Please change this to your repo.
-          // editUrl: 'https://github.com/vrchat-community/UdonSharp',
+          // editUrl: 'https://github.com/Furroxide/UdonSharpCE',
         },
         theme: {
           customCss: require.resolve('./src/css/custom.css'),
@@ -57,18 +57,10 @@ const config = {
         defaultMode: 'dark',
         respectPrefersColorScheme: true,
       },
-      announcementBar: {
-        id: 'open_beta',
-        content:
-            '<b>This Tool is in an Open Beta, the Docs are not yet complete.</b>',
-        backgroundColor: '#21af90',
-        textColor: '#000',
-        isCloseable: true,
-      },
       navbar: {
-        title: 'UdonSharp',
+        title: 'UdonSharp CE',
         logo: {
-          alt: 'VRChat Logo',
+          alt: 'UdonSharp CE',
           src: 'images/logo.png',
         },
         items: [
@@ -80,7 +72,7 @@ const config = {
           },
           {to: '/news', label: 'News', position: 'left'},
           {
-            href: 'https://github.com/vrchat-community/UdonSharp',
+            href: 'https://github.com/Furroxide/UdonSharpCE',
             label: 'GitHub',
             position: 'right',
           },
@@ -99,15 +91,11 @@ const config = {
             ],
           },
           {
-            title: 'Community',
+            title: 'Upstream',
             items: [
               {
-                label: 'Discord',
-                href: 'https://discord.com/invite/vrchat',
-              },
-              {
-                label: 'Twitter',
-                href: 'https://twitter.com/vrchat',
+                label: 'UdonSharp by Merlin',
+                href: 'https://github.com/MerlinVR/UdonSharp',
               },
             ],
           },
@@ -120,23 +108,16 @@ const config = {
               },
               {
                 label: 'GitHub',
-                href: 'https://github.com/vrchat-community/UdonSharp',
+                href: 'https://github.com/Furroxide/UdonSharpCE',
               },
             ],
           },
         ],
-        copyright: `Copyright © ${new Date().getFullYear()} VRChat Inc. Built with Docusaurus.`,
+        copyright: `Copyright © ${new Date().getFullYear()} UdonSharp CE Contributors. UdonSharp is © Merlin and VRChat Inc. Built with Docusaurus.`,
       },
       prism: {
         theme: lightCodeTheme,
         darkTheme: darkCodeTheme,
-      },
-      algolia: {
-        appId: 'NQHMNOH2YO',
-        apiKey: '292dfc501d73d6fa1352744ce4620735',
-        indexName: 'VRChat_Docs',
-        contextualSearch: true,
-        externalUrlRegex: 'https:\/\/(?!udonsharp)' // Results that don't come from this site should redirect using their absolute URL, rather than redirecting relative to the current site
       },
     }),
 };
