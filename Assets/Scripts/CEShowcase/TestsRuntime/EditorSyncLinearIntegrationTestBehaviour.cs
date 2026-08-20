@@ -6,7 +6,7 @@ namespace CESyncRuntimeTests
 {
     public class EditorSyncLinearIntegrationTestBehaviour : UdonSharpBehaviour
     {
-        [Sync(InterpolationMode.Linear)]
+        [Sync(Authority.Owner, InterpolationMode.Linear)]
         public Vector3 pos;
     }
 }

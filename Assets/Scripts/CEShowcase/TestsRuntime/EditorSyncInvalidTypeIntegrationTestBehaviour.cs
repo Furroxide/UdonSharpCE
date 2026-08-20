@@ -6,7 +6,7 @@ namespace CESyncRuntimeTests
 {
     public class EditorSyncInvalidTypeIntegrationTestBehaviour : UdonSharpBehaviour
     {
-        [Sync]
+        [Sync(Authority.Owner)]
         public Object obj;
     }
 }
