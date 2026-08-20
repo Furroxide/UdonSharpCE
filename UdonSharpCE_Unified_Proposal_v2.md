@@ -73,15 +73,15 @@ UdonSharpCE treats **Merlin's 1.2-beta1** as the minimum baseline. This provides
 
 | Package ID                            | Display Name                | Dependencies      |
 | ------------------------------------- | --------------------------- | ----------------- |
-| `com.charlvs.udonsharpce`             | UdonSharp Community Edition | VRChat Worlds SDK |
-| `com.charlvs.udonsharpce.devtools`    | CE.DevTools                 | Core              |
-| `com.charlvs.udonsharpce.data`        | CE.Data                     | Core              |
-| `com.charlvs.udonsharpce.persist`     | CE.Persistence              | Core, CE.Data     |
-| `com.charlvs.udonsharpce.async`       | CE.Async                    | Core              |
-| `com.charlvs.udonsharpce.net`         | CE.Net                      | Core              |
-| `com.charlvs.udonsharpce.perf`        | CE.Perf                     | Core              |
-| `com.charlvs.udonsharpce.procgen`     | CE.Procgen                  | Core, CE.Perf     |
-| `com.charlvs.udonsharpce.graphbridge` | CE.GraphBridge              | Core              |
+| `com.furroxide.udonsharpce`             | UdonSharp Community Edition | VRChat Worlds SDK |
+| `com.furroxide.udonsharpce.devtools`    | CE.DevTools                 | Core              |
+| `com.furroxide.udonsharpce.data`        | CE.Data                     | Core              |
+| `com.furroxide.udonsharpce.persist`     | CE.Persistence              | Core, CE.Data     |
+| `com.furroxide.udonsharpce.async`       | CE.Async                    | Core              |
+| `com.furroxide.udonsharpce.net`         | CE.Net                      | Core              |
+| `com.furroxide.udonsharpce.perf`        | CE.Perf                     | Core              |
+| `com.furroxide.udonsharpce.procgen`     | CE.Procgen                  | Core, CE.Perf     |
+| `com.furroxide.udonsharpce.graphbridge` | CE.GraphBridge              | Core              |
 
 ---
 
@@ -104,7 +104,7 @@ This warning existed because:
 
 UdonSharpCE distributes via a VPM community repository hosted on GitHub Pages.
 
-**Repository URL:** `https://charlvs.github.io/vpm/index.json`
+**Repository URL:** `https://furroxide.github.io/vpm/index.json`
 
 **User Installation:**
 
@@ -120,7 +120,7 @@ The core package declares explicit conflict with official UdonSharp:
 
 ```json
 {
-  "name": "com.charlvs.udonsharpce",
+  "name": "com.furroxide.udonsharpce",
   "displayName": "UdonSharp Community Edition",
   "version": "1.0.0",
   "conflicts": {
@@ -150,9 +150,9 @@ With VPM, prefab creators can safely depend on UdonSharpCE features:
 {
   "name": "com.coolcreator.awesome-inventory",
   "vpmDependencies": {
-    "com.charlvs.udonsharpce": ">=1.0.0",
-    "com.charlvs.udonsharpce.data": ">=1.0.0",
-    "com.charlvs.udonsharpce.persist": ">=1.0.0"
+    "com.furroxide.udonsharpce": ">=1.0.0",
+    "com.furroxide.udonsharpce.data": ">=1.0.0",
+    "com.furroxide.udonsharpce.persist": ">=1.0.0"
   }
 }
 ```
@@ -172,11 +172,11 @@ UdonSharpCE/
 │   ├── index.json                     ← VPM repository listing
 │   ├── index.html                     ← Landing page
 │   └── packages/
-│       └── com.charlvs.udonsharpce/
+│       └── com.furroxide.udonsharpce/
 │           ├── 1.0.0.zip
 │           └── ...
 ├── Packages/
-│   ├── com.charlvs.udonsharpce/       ← Source packages
+│   ├── com.furroxide.udonsharpce/       ← Source packages
 │   │   ├── package.json
 │   │   ├── Editor/
 │   │   ├── Runtime/
@@ -437,7 +437,7 @@ Before release, each CE module must pass:
 **Goal:** Type-safe, ergonomic data abstractions bridging Merlin's collections to VRChat's Data Containers.
 
 **Status:** ✅ Complete  
-**Location:** `Packages/com.charlvs.udonsharpce/Runtime/Libraries/CE/Data`
+**Location:** `Packages/com.furroxide.udonsharpce/Runtime/Libraries/CE/Data`
 
 #### Features
 
