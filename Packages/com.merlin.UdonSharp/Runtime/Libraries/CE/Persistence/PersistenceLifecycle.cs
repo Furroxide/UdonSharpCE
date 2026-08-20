@@ -116,46 +116,10 @@ namespace UdonSharp.CE.Persistence
     }
 
     /// <summary>
-    /// Interface for receiving persistence lifecycle callbacks.
-    ///
-    /// Implement this interface on your UdonSharpBehaviour and register with
-    /// <see cref="PersistenceLifecycle.RegisterCallback"/> to receive notifications
-    /// about save and restore operations.
+    /// Removed. The cross-behaviour callback registry this interface belonged to could never work in Udon.
     /// </summary>
-    /// <example>
-    /// <code>
-    /// public class MySaveManager : UdonSharpBehaviour, IPersistenceCallbacks
-    /// {
-    ///     void Start()
-    ///     {
-    ///         PersistenceLifecycle.RegisterCallback(this);
-    ///     }
-    ///
-    ///     public void OnDataRestored()
-    ///     {
-    ///         RestoreResult result = PersistenceLifecycle.GetPendingRestoreResult();
-    ///         string modelKey = PersistenceLifecycle.GetPendingModelKey();
-    ///         if (result == RestoreResult.Success)
-    ///             Debug.Log($"Data loaded for {modelKey}!");
-    ///     }
-    ///
-    ///     public void OnDataSaved()
-    ///     {
-    ///         SaveResult result = PersistenceLifecycle.GetPendingSaveResult();
-    ///         string modelKey = PersistenceLifecycle.GetPendingModelKey();
-    ///         if (result == SaveResult.Success)
-    ///             Debug.Log($"Data saved for {modelKey}!");
-    ///     }
-    ///
-    ///     public void OnDataCorrupted()
-    ///     {
-    ///         CorruptionInfo info = PersistenceLifecycle.GetPendingCorruptionInfo();
-    ///         Debug.LogError($"Data corruption: {info}");
-    ///     }
-    /// }
-    /// </code>
-    /// </example>
     [PublicAPI]
+    [Obsolete(PersistenceLifecycle.RegistryRemovedMessage, true)]
     public interface IPersistenceCallbacks
     {
         /// <summary>
@@ -175,333 +139,174 @@ namespace UdonSharp.CE.Persistence
     }
 
     /// <summary>
-    /// Manages persistence lifecycle events and callback notifications.
+    /// Records the outcome of the most recent persistence operation performed by the calling behaviour.
     ///
-    /// This class provides a registration system for behaviours that want to
-    /// receive notifications about persistence operations. Register your callback
-    /// handler in Start() and unregister in OnDestroy().
+    /// <see cref="CEPersistence"/> writes the result of every save and restore here, along with the corruption
+    /// detail that <see cref="RestoreResult.ParseError"/> alone cannot carry. Read it from the same behaviour
+    /// that issued the operation, immediately after the call returns.
     /// </summary>
     /// <remarks>
-    /// Due to Udon limitations, callbacks are invoked via SendCustomEvent rather
-    /// than direct method calls. Use the GetPending* accessors inside the callback
-    /// to read the result data for the current event.
+    /// This state is per-behaviour, not global. UdonSharp emits the statics of a non-behaviour type into each
+    /// calling behaviour's own program heap, so behaviour A's records are invisible to behaviour B - which is
+    /// why the old cross-behaviour callback registry was removed rather than repaired. If several behaviours
+    /// need to hear about one save, have the behaviour that called Save forward the result itself with
+    /// SendCustomEvent to references it holds.
     /// </remarks>
+    /// <example>
+    /// <code>
+    /// RestoreResult result = CEPersistence.Restore(out PlayerSaveData loaded);
+    /// if (result == RestoreResult.ParseError)
+    /// {
+    ///     CorruptionInfo info = PersistenceLifecycle.GetPendingCorruptionInfo();
+    ///     Debug.LogError($"Save data is unusable: {info}");
+    /// }
+    /// </code>
+    /// </example>
     [PublicAPI]
     public static class PersistenceLifecycle
     {
         #region Constants
 
-        /// <summary>
-        /// Maximum number of callback handlers that can be registered.
-        /// </summary>
-        public const int MAX_CALLBACKS = 32;
+        internal const string RegistryRemovedMessage =
+            "[CE.Persistence] The PersistenceLifecycle callback registry has been removed: it could not work under Udon. UdonSharp emits the statics of a non-behaviour type into each calling behaviour's own program heap, so behaviour A's RegisterCallback(this) wrote A's private copy while a CEPersistence.Save inside behaviour B checked B's empty copy - callbacks only ever reached the behaviour that registered them. Use the SaveResult/RestoreResult that Save/Restore return, call PersistenceLifecycle.GetPendingCorruptionInfo() in the same behaviour for corruption detail, and forward the outcome to other behaviours yourself with SendCustomEvent.";
 
-        // Event method names for SendCustomEvent
-        private const string EVENT_ON_DATA_RESTORED = "OnDataRestored";
-        private const string EVENT_ON_DATA_SAVED = "OnDataSaved";
-        private const string EVENT_ON_DATA_CORRUPTED = "OnDataCorrupted";
+        /// <summary>
+        /// Removed along with the callback registry.
+        /// </summary>
+        [Obsolete(RegistryRemovedMessage, true)]
+        public const int MAX_CALLBACKS = 32;
 
         #endregion
 
         #region State
 
-        // Registered callback handlers
-        private static UdonSharpBehaviour[] _callbacks;
-        private static int _callbackCount;
-
-        // Pending event data (used to pass data to callbacks via SendCustomEvent)
+        // Behaviour-local record of the last operation. See the remarks on the class: these are not shared.
         private static RestoreResult _pendingRestoreResult;
         private static SaveResult _pendingSaveResult;
         private static string _pendingModelKey;
         private static CorruptionInfo _pendingCorruptionInfo;
 
+        // Set by RecordCorruption and consumed by the RecordRestoreResult that closes the same restore, so a
+        // CorruptionInfo only survives the operation that produced it.
+        private static bool _corruptionRecordedThisRestore;
+
         #endregion
 
-        #region Registration
+        #region Removed Registration API
 
         /// <summary>
-        /// Registers a behaviour to receive persistence lifecycle callbacks.
-        ///
-        /// The behaviour should implement <see cref="IPersistenceCallbacks"/> or
-        /// provide the appropriate callback methods.
+        /// Removed. See <see cref="PersistenceLifecycle"/> remarks for the replacement pattern.
         /// </summary>
-        /// <param name="behaviour">The behaviour to register.</param>
-        /// <returns>True if registration was successful, false otherwise.</returns>
+        [Obsolete(RegistryRemovedMessage, true)]
         public static bool RegisterCallback(UdonSharpBehaviour behaviour)
         {
-            if (behaviour == null)
-            {
-                Debug.LogError("[CE.Persistence] RegisterCallback: behaviour cannot be null");
-                return false;
-            }
-
-            // Initialize array on first use
-            if (_callbacks == null)
-            {
-                _callbacks = new UdonSharpBehaviour[MAX_CALLBACKS];
-                _callbackCount = 0;
-            }
-            else
-            {
-                CleanupDestroyedCallbacks();
-            }
-
-            // Check if already registered
-            for (int i = 0; i < _callbackCount; i++)
-            {
-                if (_callbacks[i] == behaviour)
-                {
-                    Debug.LogWarning($"[CE.Persistence] RegisterCallback: {behaviour.name} is already registered");
-                    return true;
-                }
-            }
-
-            // Check capacity
-            if (_callbackCount >= MAX_CALLBACKS)
-            {
-                Debug.LogError($"[CE.Persistence] RegisterCallback: maximum callbacks ({MAX_CALLBACKS}) reached");
-                return false;
-            }
-
-            // Add to array
-            _callbacks[_callbackCount] = behaviour;
-            _callbackCount++;
-
-            Debug.Log($"[CE.Persistence] Registered callback: {behaviour.name}");
-            return true;
-        }
-
-        /// <summary>
-        /// Unregisters a behaviour from receiving persistence callbacks.
-        /// </summary>
-        /// <param name="behaviour">The behaviour to unregister.</param>
-        /// <returns>True if the behaviour was found and removed, false otherwise.</returns>
-        public static bool UnregisterCallback(UdonSharpBehaviour behaviour)
-        {
-            if (behaviour == null || _callbacks == null)
-            {
-                return false;
-            }
-
-            for (int i = 0; i < _callbackCount; i++)
-            {
-                if (_callbacks[i] == behaviour)
-                {
-                    // Swap with last element and shrink
-                    _callbackCount--;
-                    _callbacks[i] = _callbacks[_callbackCount];
-                    _callbacks[_callbackCount] = null;
-
-                    Debug.Log($"[CE.Persistence] Unregistered callback: {behaviour.name}");
-                    return true;
-                }
-            }
-
             return false;
         }
 
         /// <summary>
-        /// Gets the number of registered callback handlers.
+        /// Removed. See <see cref="PersistenceLifecycle"/> remarks for the replacement pattern.
         /// </summary>
-        public static int CallbackCount => _callbackCount;
+        [Obsolete(RegistryRemovedMessage, true)]
+        public static bool UnregisterCallback(UdonSharpBehaviour behaviour)
+        {
+            return false;
+        }
+
+        /// <summary>
+        /// Removed. See <see cref="PersistenceLifecycle"/> remarks for the replacement pattern.
+        /// </summary>
+        [Obsolete(RegistryRemovedMessage, true)]
+        public static void CleanupDestroyedCallbacks()
+        {
+        }
+
+        /// <summary>
+        /// Removed. See <see cref="PersistenceLifecycle"/> remarks for the replacement pattern.
+        /// </summary>
+        [Obsolete(RegistryRemovedMessage, true)]
+        public static int CallbackCount => 0;
 
         #endregion
 
-        #region Event Accessors
+        #region Result Accessors
 
         /// <summary>
-        /// Gets the pending restore result for the current callback.
-        /// Call this from your OnDataRestored handler to get the result.
+        /// Gets the result of the last restore this behaviour performed.
         /// </summary>
         public static RestoreResult GetPendingRestoreResult() => _pendingRestoreResult;
 
         /// <summary>
-        /// Gets the pending save result for the current callback.
-        /// Call this from your OnDataSaved handler to get the result.
+        /// Gets the result of the last save this behaviour performed.
         /// </summary>
         public static SaveResult GetPendingSaveResult() => _pendingSaveResult;
 
         /// <summary>
-        /// Gets the pending model key for the current callback.
-        /// Call this from your callback handler to get the model key.
+        /// Gets the model key of the last save or restore this behaviour performed.
         /// </summary>
         public static string GetPendingModelKey() => _pendingModelKey;
 
         /// <summary>
-        /// Gets the pending corruption info for the current callback.
-        /// Call this from your OnDataCorrupted handler to get the corruption details.
+        /// Gets the corruption detail recorded by the last restore this behaviour performed, or null when
+        /// that restore reported no corruption. Detail from an earlier restore is never returned.
         /// </summary>
         public static CorruptionInfo GetPendingCorruptionInfo() => _pendingCorruptionInfo;
 
         #endregion
 
-        #region Internal Notifications
+        #region Internal Recording
 
         /// <summary>
-        /// Notifies all registered callbacks that a restore operation completed.
-        /// Called internally by CEPersistence.
+        /// Records the outcome of a restore operation. Called internally by CEPersistence.
         /// </summary>
         /// <param name="result">The result of the restore operation.</param>
         /// <param name="modelKey">The persistence key of the restored model.</param>
-        internal static void NotifyDataRestored(RestoreResult result, string modelKey)
+        internal static void RecordRestoreResult(RestoreResult result, string modelKey)
         {
-            if (_callbacks == null || _callbackCount == 0)
-                return;
-
-            CleanupDestroyedCallbacks();
-
             _pendingRestoreResult = result;
             _pendingModelKey = modelKey;
 
-            for (int i = 0; i < _callbackCount; i++)
+            // Every restore invalidates whatever corruption an earlier attempt recorded, not just a successful
+            // one: NotReady, NoData, VersionMismatch and NetworkError are all failures with nothing corrupt
+            // about them, and leaving the old CorruptionInfo in place made callers that read
+            // GetPendingCorruptionInfo() after any of them report a corruption that did not happen. ParseError
+            // keeps the detail only when this operation actually diagnosed it - some ParseError paths return
+            // before any corruption is identified (an unregistered type in the editor path, for one).
+            if (result != RestoreResult.ParseError || !_corruptionRecordedThisRestore)
             {
-                var callback = _callbacks[i];
-                if (callback != null && callback.gameObject != null)
-                {
-#if COMPILER_UDONSHARP
-                    callback.SendCustomEvent(EVENT_ON_DATA_RESTORED);
-#else
-                    try
-                    {
-                        callback.SendCustomEvent(EVENT_ON_DATA_RESTORED);
-                    }
-                    catch (Exception e)
-                    {
-                        Debug.LogError($"[CE.Persistence] NotifyDataRestored: callback {callback.name} failed - {e.Message}");
-                    }
-#endif
-                }
+                _pendingCorruptionInfo = null;
             }
 
-            // Clear pending data
-            _pendingModelKey = null;
+            _corruptionRecordedThisRestore = false;
         }
 
         /// <summary>
-        /// Notifies all registered callbacks that a save operation completed.
-        /// Called internally by CEPersistence.
+        /// Records the outcome of a save operation. Called internally by CEPersistence.
         /// </summary>
         /// <param name="result">The result of the save operation.</param>
         /// <param name="modelKey">The persistence key of the saved model.</param>
-        internal static void NotifyDataSaved(SaveResult result, string modelKey)
+        internal static void RecordSaveResult(SaveResult result, string modelKey)
         {
-            if (_callbacks == null || _callbackCount == 0)
-                return;
-
-            CleanupDestroyedCallbacks();
-
             _pendingSaveResult = result;
             _pendingModelKey = modelKey;
-
-            for (int i = 0; i < _callbackCount; i++)
-            {
-                var callback = _callbacks[i];
-                if (callback != null && callback.gameObject != null)
-                {
-#if COMPILER_UDONSHARP
-                    callback.SendCustomEvent(EVENT_ON_DATA_SAVED);
-#else
-                    try
-                    {
-                        callback.SendCustomEvent(EVENT_ON_DATA_SAVED);
-                    }
-                    catch (Exception e)
-                    {
-                        Debug.LogError($"[CE.Persistence] NotifyDataSaved: callback {callback.name} failed - {e.Message}");
-                    }
-#endif
-                }
-            }
-
-            // Clear pending data
-            _pendingModelKey = null;
         }
 
         /// <summary>
-        /// Notifies all registered callbacks that data corruption was detected.
-        /// Called internally by CEPersistence.
+        /// Records corruption detected during a restore. Called internally by CEPersistence.
         /// </summary>
         /// <param name="info">Details about the corruption that was detected.</param>
-        internal static void NotifyDataCorrupted(CorruptionInfo info)
+        internal static void RecordCorruption(CorruptionInfo info)
         {
-            if (_callbacks == null || _callbackCount == 0)
-                return;
-
             if (info == null)
             {
-                Debug.LogError("[CE.Persistence] NotifyDataCorrupted: info cannot be null");
+                Debug.LogError("[CE.Persistence] RecordCorruption: info cannot be null");
                 return;
             }
-
-            CleanupDestroyedCallbacks();
 
             _pendingCorruptionInfo = info;
             _pendingModelKey = info.ModelKey;
+            _corruptionRecordedThisRestore = true;
 
             Debug.LogWarning($"[CE.Persistence] Data corruption detected: {info}");
-
-            for (int i = 0; i < _callbackCount; i++)
-            {
-                var callback = _callbacks[i];
-                if (callback != null && callback.gameObject != null)
-                {
-#if COMPILER_UDONSHARP
-                    callback.SendCustomEvent(EVENT_ON_DATA_CORRUPTED);
-#else
-                    try
-                    {
-                        callback.SendCustomEvent(EVENT_ON_DATA_CORRUPTED);
-                    }
-                    catch (Exception e)
-                    {
-                        Debug.LogError($"[CE.Persistence] NotifyDataCorrupted: callback {callback.name} failed - {e.Message}");
-                    }
-#endif
-                }
-            }
-
-            // Clear pending data
-            _pendingCorruptionInfo = null;
-            _pendingModelKey = null;
-        }
-
-        #endregion
-
-        #region Cleanup
-
-        /// <summary>
-        /// Removes all null or destroyed callbacks from the registry.
-        /// Called automatically during notification, but can be called manually
-        /// for cleanup.
-        /// </summary>
-        public static void CleanupDestroyedCallbacks()
-        {
-            if (_callbacks == null || _callbackCount == 0)
-                return;
-
-            int writeIndex = 0;
-            for (int readIndex = 0; readIndex < _callbackCount; readIndex++)
-            {
-                var callback = _callbacks[readIndex];
-                if (callback != null && callback.gameObject != null)
-                {
-                    _callbacks[writeIndex] = callback;
-                    writeIndex++;
-                }
-            }
-
-            // Clear remaining slots
-            for (int i = writeIndex; i < _callbackCount; i++)
-            {
-                _callbacks[i] = null;
-            }
-
-            if (writeIndex != _callbackCount)
-            {
-                Debug.Log($"[CE.Persistence] CleanupDestroyedCallbacks: removed {_callbackCount - writeIndex} destroyed callbacks");
-            }
-
-            _callbackCount = writeIndex;
         }
 
         #endregion

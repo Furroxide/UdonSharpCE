@@ -18,6 +18,14 @@ namespace UdonSharp.CE.NetPhysics
         [SerializeField] private bool _alwaysRelevant;
         [SerializeField] private Rigidbody _rb;
 
+        [Header("Correction")]
+        [Tooltip("Divergence in metres above which a correction is snapped instead of eased in.")]
+        public float CorrectionSnapDistance = 2f;
+        [Tooltip("Fraction of the remaining error removed per physics step while easing a correction in. 1 snaps.")]
+        [Range(0.01f, 1f)] public float CorrectionBlendRate = 0.2f;
+
+        private CorrectionBlender _correctionBlender;
+
         protected Rigidbody RigidbodyComponent => _rb;
 
         public int EntityId => _entityId;
@@ -90,6 +98,17 @@ namespace UdonSharp.CE.NetPhysics
                 World.UnregisterEntity(this);
         }
 
+        /// <summary>
+        /// Drives the correction blend. Derived entities that need their own FixedUpdate must call
+        /// base.FixedUpdate(), otherwise a started correction is never finished and the entity sits
+        /// permanently short of the authoritative position.
+        /// </summary>
+        protected virtual void FixedUpdate()
+        {
+            if (_correctionBlender != null && _rb != null)
+                _correctionBlender.ApplyBlend(_rb);
+        }
+
         internal void SetEntityIdInternal(int entityId)
         {
             _entityId = entityId;
@@ -118,11 +137,39 @@ namespace UdonSharp.CE.NetPhysics
             AngularVelocity = snapshot.AngularVelocities[index];
         }
 
-        public virtual void ApplyCorrection(Vector3 position, Quaternion rotation, Vector3 velocity)
+        /// <summary>
+        /// Applies an authoritative state received from the network. Small divergences are eased in
+        /// over the following physics steps; only a divergence past <see cref="CorrectionSnapDistance"/>
+        /// is worth the visible jump. Writing the transform straight from the packet, which is what
+        /// this used to do, made every remote object teleport several times a second.
+        /// </summary>
+        public virtual void ApplyCorrection(Vector3 position, Quaternion rotation, Vector3 velocity, Vector3 angularVelocity)
         {
-            Position = position;
-            Rotation = rotation;
-            Velocity = velocity;
+            // Angular velocity is not blended: a rigidbody spinning at the wrong rate reads as wrong
+            // far faster than one sitting a few centimetres off, and it carries no visible pop.
+            AngularVelocity = angularVelocity;
+
+            float error = Vector3.Distance(Position, position);
+
+            if (_rb == null || CorrectionBlendRate >= 1f || CorrectionSnapDistance <= 0f || error > CorrectionSnapDistance)
+            {
+                Position = position;
+                Rotation = rotation;
+                Velocity = velocity;
+
+                if (_correctionBlender != null)
+                    _correctionBlender.ClearTarget();
+
+                return;
+            }
+
+            if (_correctionBlender == null)
+                _correctionBlender = new CorrectionBlender();
+
+            _correctionBlender.PositionBlendRate = CorrectionBlendRate;
+            _correctionBlender.RotationBlendRate = CorrectionBlendRate;
+            _correctionBlender.VelocityBlendRate = Mathf.Min(1f, CorrectionBlendRate * 1.5f);
+            _correctionBlender.SetTarget(position, rotation, velocity);
         }
 
         public virtual void OnPredictedCollision(NetPhysicsEntity other, Vector3 point) { }

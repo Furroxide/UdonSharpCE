@@ -58,6 +58,12 @@ namespace UdonSharp.CE.Core
         /// Invokes the callback by calling SendCustomEvent on the target behaviour.
         /// Does nothing if the callback is invalid.
         /// </summary>
+        /// <remarks>
+        /// <see cref="MethodName"/> has to name a <b>public, parameterless, instance</b> method on
+        /// <see cref="Target"/>. U# only exports those under their written name -- anything else is either
+        /// left out of the program entirely or exported under a mangled one, and SendCustomEvent then finds
+        /// no entry point and returns without raising anything.
+        /// </remarks>
         public void Invoke()
         {
             if (IsValid)
@@ -108,7 +114,13 @@ namespace UdonSharp.CE.Core
         /// <summary>
         /// Returns an invalid/empty callback instance.
         /// </summary>
-        public static CECallback None => default;
+        /// <remarks>
+        /// Constructed explicitly rather than returned as <c>default</c>. Udon represents a user type as an
+        /// <c>object[]</c>, and the compiler lowers <c>default</c> for one to a plain null reference -- so
+        /// the "empty" callback had no backing array at all and reading <see cref="IsValid"/> on it threw
+        /// instead of answering false.
+        /// </remarks>
+        public static CECallback None => new CECallback(null, null);
 
         /// <summary>
         /// Returns a string representation of this callback for debugging.

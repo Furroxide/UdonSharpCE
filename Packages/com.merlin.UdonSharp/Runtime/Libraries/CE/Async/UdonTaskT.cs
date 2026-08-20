@@ -9,29 +9,31 @@ namespace UdonSharp.CE.Async
     /// </summary>
     /// <typeparam name="T">The type of the result value.</typeparam>
     /// <remarks>
-    /// UdonTask{T} extends UdonTask to support returning values from async methods.
-    /// The result is stored in a generated field and available after completion.
+    /// <b>'async UdonTask&lt;T&gt;' is a compile error (CE0022).</b> CE's state machine returns to its caller
+    /// at the first await, long before a result exists, and UdonTask carries no continuation a caller could
+    /// register against -- so there is no moment at which the value could be handed back. This type is for
+    /// values you already have: build one with FromResult, pass it around, read Result. An async method
+    /// cannot produce one.
     ///
-    /// Note: Due to Udon limitations with generics, some complex generic scenarios
-    /// may require using UdonTask with out parameters instead.
+    /// To return a value from asynchronous work, write 'async UdonTask' and store the result in a field.
     /// </remarks>
     /// <example>
     /// <code>
     /// public class DataLoader : UdonSharpBehaviour
     /// {
-    ///     public async UdonTask<int> CalculateAsync(int input)
+    ///     private int _lastResult;
+    ///
+    ///     // 'async UdonTask<int>' here would be CE0022.
+    ///     public async UdonTask CalculateAsync(int input)
     ///     {
     ///         await UdonTask.Delay(1f);  // Simulate async work
-    ///         return input * 2;
+    ///         _lastResult = input * 2;
     ///     }
     ///
     ///     public async UdonTask UseResult()
     ///     {
-    ///         var task = CalculateAsync(5);
-    ///         await task;
-    ///
-    ///         int result = task.Result;  // 10
-    ///         Debug.Log($"Result: {result}");
+    ///         await CalculateAsync(5);
+    ///         Debug.Log($"Result: {_lastResult}");  // 10
     ///     }
     /// }
     /// </code>
@@ -43,7 +45,9 @@ namespace UdonSharp.CE.Async
         /// <summary>
         /// Internal task identifier for tracking and debugging.
         /// </summary>
+#pragma warning disable CS0649 // Reserved for CE compiler-generated async state.
         internal int _taskId;
+#pragma warning restore CS0649
 
         /// <summary>
         /// Current status of the task.
@@ -59,7 +63,9 @@ namespace UdonSharp.CE.Async
         /// <summary>
         /// The UdonSharpBehaviour that owns this task.
         /// </summary>
+#pragma warning disable CS0649 // Reserved for CE compiler-generated async state.
         internal UdonSharpBehaviour _owner;
+#pragma warning restore CS0649
 
         /// <summary>
         /// Optional error message if the task faulted.

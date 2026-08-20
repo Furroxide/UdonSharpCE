@@ -12,11 +12,18 @@ namespace UdonSharp.CE.Async
     /// that use SendCustomEventDelayedSeconds/Frames for continuation.
     /// </summary>
     /// <remarks>
-    /// UdonTask provides a promise-like API for async operations in VRChat worlds.
+    /// UdonTask is fire-and-forget, not a handle. It is a value type with nowhere to register a
+    /// continuation, so the struct a caller receives is a snapshot of the moment the call returned and
+    /// never changes afterwards. Only an <c>await</c> inside another <c>async UdonTask</c> method observes
+    /// completion, because CE wires that one up at compile time; awaiting a UdonTask from anywhere else is
+    /// a compile error rather than an await that resumes immediately.
+    ///
     /// Unlike .NET Tasks, UdonTasks:
     /// - Cannot run in parallel (Udon is single-threaded)
     /// - Use frame-based scheduling via SendCustomEventDelayed*
     /// - Don't support true exception handling
+    /// - Cannot have two calls to the same async method in flight at once; the state machine's locals live
+    ///   in shared fields, so CE refuses and logs the second call
     ///
     /// The async transformation generates:
     /// - State fields for the state machine
@@ -104,6 +111,18 @@ namespace UdonSharp.CE.Async
         /// Use this when you need to return immediately from an async method.
         /// </summary>
         public static UdonTask CompletedTask => new UdonTask { _status = TaskStatus.RanToCompletion };
+
+        /// <summary>
+        /// A task that has started and has not finished yet.
+        /// </summary>
+        /// <remarks>
+        /// Returned by the entry point CE generates for an <c>async UdonTask</c> method that suspended on
+        /// its first await. UdonTask is a value type with nowhere to register a continuation, so this is a
+        /// snapshot of the moment the call returned and never updates -- it says "started", not "watch me".
+        /// It exists so a caller inspecting <see cref="Status"/> is not told a running sequence already
+        /// finished; to react to completion, have the async method set a field or call a method at its end.
+        /// </remarks>
+        public static UdonTask Started => new UdonTask { _status = TaskStatus.Running };
 
         /// <summary>
         /// Creates a task that completes after the specified time delay.

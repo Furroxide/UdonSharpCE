@@ -75,7 +75,26 @@ namespace UdonSharp.CE.NetPhysics
             }
         }
 
+        /// <summary>
+        /// Writes this snapshot straight onto the entities. Rollback resimulation depends on the
+        /// restored state being bit-for-bit what was recorded, so this path never smooths.
+        /// </summary>
         public void Restore(NetPhysicsEntity[] entities, int count)
+        {
+            Apply(entities, count, false);
+        }
+
+        /// <summary>
+        /// Hands this snapshot to the entities as a network correction instead of writing their
+        /// transforms directly, so an entity can ease the jump in. Use this for anything driven by a
+        /// received packet -- raw pokes here are what made remote objects teleport on every packet.
+        /// </summary>
+        public void ApplyAsCorrection(NetPhysicsEntity[] entities, int count)
+        {
+            Apply(entities, count, true);
+        }
+
+        private void Apply(NetPhysicsEntity[] entities, int count, bool asCorrection)
         {
             if (entities == null)
                 return;
@@ -101,14 +120,7 @@ namespace UdonSharp.CE.NetPhysics
             {
                 for (int i = 0; i < restoreCount; i++)
                 {
-                    var entity = entities[i];
-                    if (entity == null)
-                        continue;
-
-                    entity.Position = Positions[i];
-                    entity.Rotation = Rotations[i];
-                    entity.Velocity = Velocities[i];
-                    entity.AngularVelocity = AngularVelocities[i];
+                    ApplyToEntity(entities[i], i, asCorrection);
                 }
 
                 return;
@@ -122,15 +134,25 @@ namespace UdonSharp.CE.NetPhysics
                 if (entityIndex < 0)
                     continue;
 
-                var entity = entities[entityIndex];
-                if (entity == null)
-                    continue;
-
-                entity.Position = Positions[i];
-                entity.Rotation = Rotations[i];
-                entity.Velocity = Velocities[i];
-                entity.AngularVelocity = AngularVelocities[i];
+                ApplyToEntity(entities[entityIndex], i, asCorrection);
             }
+        }
+
+        private void ApplyToEntity(NetPhysicsEntity entity, int index, bool asCorrection)
+        {
+            if (entity == null)
+                return;
+
+            if (asCorrection)
+            {
+                entity.ApplyCorrection(Positions[index], Rotations[index], Velocities[index], AngularVelocities[index]);
+                return;
+            }
+
+            entity.Position = Positions[index];
+            entity.Rotation = Rotations[index];
+            entity.Velocity = Velocities[index];
+            entity.AngularVelocity = AngularVelocities[index];
         }
 
         public void CopyFrom(PhysicsSnapshot other)
@@ -215,12 +237,16 @@ namespace UdonSharp.CE.NetPhysics
             return compressor.Compress(this);
         }
 
-        public void Deserialize(byte[] data, StateCompressor compressor)
+        /// <summary>
+        /// Returns false when the packet was rejected, in which case this snapshot still holds
+        /// whatever it held before.
+        /// </summary>
+        public bool Deserialize(byte[] data, StateCompressor compressor)
         {
             if (compressor == null || data == null)
-                return;
+                return false;
 
-            compressor.Decompress(data, this);
+            return compressor.Decompress(data, this);
         }
 
         private void EnsureCapacity(int count)

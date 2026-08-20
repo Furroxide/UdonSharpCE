@@ -81,27 +81,43 @@ namespace UdonSharp.CE.Net
     }
 
     /// <summary>
-    /// Attribute to specify merge strategy for a synced field.
+    /// Declares how a [SyncOnJoin] field should be merged when the incoming value conflicts with the
+    /// local one. Valid only on a [SyncOnJoin] field; anywhere else it is a compile error (CE0046).
     /// </summary>
     /// <remarks>
-    /// When network conditions cause conflicting values,
-    /// the specified strategy determines which value is kept.
+    /// A merge needs both values at once, and CE only ever holds both for a [SyncOnJoin] field, because
+    /// the generated late-join glue is what performs the write. On an [UdonSynced] field Udon copies the
+    /// incoming value into the heap slot before any CE code runs, so by the time OnDeserialization is
+    /// called the local value is already gone -- the attribute could only ever have described
+    /// LastWriteWins while claiming to do something else. That is why the restriction is enforced rather
+    /// than documented.
+    ///
+    /// Be aware of what this does and does not do today: the attribute is read and its placement is
+    /// checked, but the generated [SyncOnJoin] glue does not yet apply the strategy when it writes. Until
+    /// it does, use <see cref="ConflictResolver"/> directly in the code that consumes the field. The
+    /// methods on that class take both values explicitly and work regardless of how the field syncs.
     /// </remarks>
     /// <example>
     /// <code>
     /// public class ScoreManager : UdonSharpBehaviour
     /// {
-    ///     [UdonSynced]
+    ///     [SyncOnJoin]
     ///     [MergeStrategy(MergeStrategy.HigherWins)]
     ///     public int highScore;
     ///
-    ///     [UdonSynced]
+    ///     [SyncOnJoin]
     ///     [MergeStrategy(MergeStrategy.Additive)]
     ///     public int totalCoins;
     ///
-    ///     [UdonSynced]
-    ///     [MergeStrategy(MergeStrategy.MasterWins)]
-    ///     public int gamePhase;
+    ///     // An [UdonSynced] field cannot carry one: Udon has already overwritten the local value.
+    ///     // Merge it by hand instead.
+    ///     [UdonSynced] public int gamePhase;
+    ///
+    ///     public override void OnDeserialization()
+    ///     {
+    ///         gamePhase = ConflictResolver.ResolveInt(_lastKnownPhase, gamePhase, MergeStrategy.HigherWins);
+    ///         _lastKnownPhase = gamePhase;
+    ///     }
     /// }
     /// </code>
     /// </example>

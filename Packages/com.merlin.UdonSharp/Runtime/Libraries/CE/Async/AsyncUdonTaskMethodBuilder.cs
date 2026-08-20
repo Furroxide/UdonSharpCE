@@ -7,18 +7,16 @@ namespace UdonSharp.CE.Async
     /// <summary>
     /// Async method builder for UdonTask.
     /// This enables 'async UdonTask' method declarations.
-    /// 
-    /// Note: In the Udon runtime, async methods are transformed by AsyncStateMachineTransformer
-    /// into state machines using SendCustomEventDelayed*. This builder provides compile-time
-    /// compatibility with the C# async pattern.
+    ///
+    /// Note: nothing in a VRChat world ever runs this builder. CE's async transform replaces every
+    /// 'async UdonTask' method with a hand-built state machine before Roslyn sees the method, so Roslyn
+    /// never emits a builder call for it. The type exists so the same source still compiles as ordinary
+    /// C# in Assembly-CSharp, where Unity and editor tooling do compile it.
     /// </summary>
     [PublicAPI]
     public struct AsyncUdonTaskMethodBuilder
     {
         private UdonTask _task;
-        private bool _hasResult;
-        private string _error;
-        private bool _isCanceled;
 
         /// <summary>
         /// Creates a new builder instance.
@@ -27,10 +25,7 @@ namespace UdonSharp.CE.Async
         {
             return new AsyncUdonTaskMethodBuilder
             {
-                _task = new UdonTask(),
-                _hasResult = false,
-                _error = null,
-                _isCanceled = false
+                _task = new UdonTask()
             };
         }
 
@@ -56,7 +51,6 @@ namespace UdonSharp.CE.Async
         /// </summary>
         public void SetResult()
         {
-            _hasResult = true;
             _task = UdonTask.CompletedTask;
         }
 
@@ -65,7 +59,6 @@ namespace UdonSharp.CE.Async
         /// </summary>
         public void SetException(Exception exception)
         {
-            _error = exception?.Message ?? "Unknown error";
             _task = UdonTask.FromException(exception);
         }
 
@@ -76,20 +69,16 @@ namespace UdonSharp.CE.Async
 
         /// <summary>
         /// Schedules the state machine to await the given awaiter.
-        /// 
-        /// Note: In Udon, this is transformed at compile time. The runtime implementation
-        /// uses SendCustomEventDelayedFrames as a fallback for editor testing.
+        ///
+        /// Note: only the Assembly-CSharp compilation reaches this. CE's transform has already removed
+        /// every await from the Udon compilation, so continuing the state machine straight away here
+        /// cannot affect world behaviour.
         /// </summary>
         public void AwaitOnCompleted<TAwaiter, TStateMachine>(
             ref TAwaiter awaiter, ref TStateMachine stateMachine)
             where TAwaiter : INotifyCompletion
             where TStateMachine : IAsyncStateMachine
         {
-            // This path is used by the C# compiler for standard awaiters.
-            // For UdonTaskAwaiter, the AsyncStateMachineTransformer generates
-            // direct SendCustomEventDelayed* calls instead.
-            // 
-            // This fallback implementation supports editor testing scenarios.
             stateMachine.MoveNext();
         }
 
@@ -126,10 +115,6 @@ namespace UdonSharp.CE.Async
     public struct AsyncUdonTaskMethodBuilder<T>
     {
         private UdonTask<T> _task;
-        private T _result;
-        private bool _hasResult;
-        private string _error;
-        private bool _isCanceled;
 
         /// <summary>
         /// Creates a new builder instance.
@@ -138,11 +123,7 @@ namespace UdonSharp.CE.Async
         {
             return new AsyncUdonTaskMethodBuilder<T>
             {
-                _task = new UdonTask<T>(),
-                _result = default,
-                _hasResult = false,
-                _error = null,
-                _isCanceled = false
+                _task = new UdonTask<T>()
             };
         }
 
@@ -168,8 +149,6 @@ namespace UdonSharp.CE.Async
         /// </summary>
         public void SetResult(T result)
         {
-            _result = result;
-            _hasResult = true;
             _task = UdonTask<T>.FromResult(result);
         }
 
@@ -178,7 +157,6 @@ namespace UdonSharp.CE.Async
         /// </summary>
         public void SetException(Exception exception)
         {
-            _error = exception?.Message ?? "Unknown error";
             _task = UdonTask<T>.FromException(exception);
         }
 
@@ -223,7 +201,6 @@ namespace UdonSharp.CE.Async
         }
     }
 }
-
 
 
 

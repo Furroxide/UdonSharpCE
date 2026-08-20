@@ -8,10 +8,14 @@ namespace UdonSharp.CE.Persistence
     ///
     /// Use this attribute to define data models that will be saved to and restored from
     /// VRChat's persistent storage system. Each model must have a unique key within the world.
+    ///
+    /// The attribute is the whole registration step. CE finds every <c>[PlayerData]</c> class during the Udon
+    /// compile and generates that model's converter plus non-generic Save/Restore/ToData/FromData/ToJson/
+    /// FromJson/Validate/EstimateSize overloads that take the model type directly.
     /// </summary>
     /// <example>
     /// <code>
-    /// [PlayerData("rpg_save")]
+    /// [PlayerData("rpg_save", Version = 1)]
     /// public class PlayerSaveData
     /// {
     ///     [PersistKey("xp")] public int experience;
@@ -20,18 +24,21 @@ namespace UdonSharp.CE.Persistence
     ///     [PersistKey("inv")] public int[] inventory = new int[50];
     /// }
     ///
-    /// // Registration (Phase 2 - manual):
-    /// CEPersistence.Register<PlayerSaveData>(
-    ///     toData: data => { /* conversion */ },
-    ///     fromData: dict => { /* conversion */ },
-    ///     key: "rpg_save",
-    ///     version: 1
-    /// );
+    /// // No registration call - use the generated overloads with the model type:
+    /// PlayerSaveData save = new PlayerSaveData();
+    /// SaveResult saveResult = CEPersistence.Save(save);
+    /// RestoreResult restoreResult = CEPersistence.Restore(out PlayerSaveData loaded);
     /// </code>
     /// </example>
     /// <remarks>
-    /// VRChat PlayerData has a 100KB limit per player. Use <see cref="CEPersistence.EstimateSize{T}"/>
-    /// to check your model's serialized size before deployment.
+    /// Do not call CEPersistence.Register from behaviour code: it is editor-only and is a compile error under
+    /// Udon. UdonSharp emits the statics of a non-behaviour type into each calling behaviour's own program
+    /// heap, so a registration performed in one behaviour is invisible to a save issued from another - which is
+    /// why the attribute, resolved at compile time, is the only registration path that works.
+    ///
+    /// VRChat PlayerData has a 100KB limit per player that every model shares. Check a model against
+    /// <see cref="CEPersistence.GetRemainingQuota"/> with the generated <c>EstimateSize(model)</c> overload
+    /// before deployment.
     /// </remarks>
     [PublicAPI]
     [AttributeUsage(AttributeTargets.Class, Inherited = false)]

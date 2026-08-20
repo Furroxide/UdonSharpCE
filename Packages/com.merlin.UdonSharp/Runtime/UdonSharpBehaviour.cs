@@ -535,10 +535,10 @@ namespace UdonSharp
             get => serializationData;
             set => serializationData = value;
         }
-#pragma warning disable CS0414 // Referenced via reflection
+#pragma warning disable CS0414, CS0649 // Referenced via reflection
         [UsedImplicitly]
         private static bool _skipEvents;
-#pragma warning restore CS0414
+#pragma warning restore CS0414, CS0649
 
         [UsedImplicitly]
         private static bool ShouldSkipEvents() => _skipEvents;

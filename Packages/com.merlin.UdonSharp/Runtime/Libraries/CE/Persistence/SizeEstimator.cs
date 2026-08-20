@@ -330,7 +330,9 @@ namespace UdonSharp.CE.Persistence
         /// <returns>True if within quota, false otherwise.</returns>
         public static bool IsWithinQuota(int estimatedSize)
         {
-            return estimatedSize <= CEPersistence.PLAYER_DATA_QUOTA;
+            // Ask the running client for the limit rather than trusting the constant: the constant is only a
+            // fallback, and a world that sizes its data against the wrong number fails at the SetString.
+            return estimatedSize <= CEPersistence.GetQuotaLimit();
         }
 
         /// <summary>
@@ -340,7 +342,35 @@ namespace UdonSharp.CE.Persistence
         /// <returns>Percentage of quota used (0-100+).</returns>
         public static float GetQuotaPercentage(int estimatedSize)
         {
-            return (estimatedSize / (float)CEPersistence.PLAYER_DATA_QUOTA) * 100f;
+            int quotaLimit = CEPersistence.GetQuotaLimit();
+            if (quotaLimit <= 0)
+            {
+                return 0f;
+            }
+
+            return (estimatedSize / (float)quotaLimit) * 100f;
+        }
+
+        /// <summary>
+        /// Gets the percentage of the PlayerData quota the local player actually occupies, as reported by the
+        /// running client.
+        /// </summary>
+        /// <returns>Percentage of quota used (0-100+), or -1 when no running client can report usage.</returns>
+        public static float GetReportedQuotaPercentage()
+        {
+            int used = CEPersistence.GetUsedQuota();
+            if (used < 0)
+            {
+                return -1f;
+            }
+
+            int quotaLimit = CEPersistence.GetQuotaLimit();
+            if (quotaLimit <= 0)
+            {
+                return -1f;
+            }
+
+            return (used / (float)quotaLimit) * 100f;
         }
 
         /// <summary>

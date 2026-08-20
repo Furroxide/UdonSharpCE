@@ -20,7 +20,7 @@ namespace UdonSharp.CE.NetPhysics
         public Vector3 WorldMax = new Vector3(100, 50, 100);
 
         // Header: frame (4) + entityCount (4)
-        private const int HeaderBytes = 8;
+        public const int HeaderBytes = 8;
 
         // Entity: id (2) + pos (6) + rot (6) + vel (5) + angVel (5) = 24 bytes
         public const int BytesPerEntity = 24;
@@ -54,16 +54,29 @@ namespace UdonSharp.CE.NetPhysics
             return data;
         }
 
-        public void Decompress(byte[] data, PhysicsSnapshot snapshot)
+        /// <summary>
+        /// Reads a packet into <paramref name="snapshot"/>. Returns false and leaves the snapshot
+        /// untouched when the payload cannot hold the entity count it claims.
+        /// </summary>
+        public bool Decompress(byte[] data, PhysicsSnapshot snapshot)
         {
             if (data == null || snapshot == null || data.Length < HeaderBytes)
-                return;
+                return false;
 
             int offset = 0;
-            snapshot.Frame = ReadInt32(data, ref offset);
+            int frame = ReadInt32(data, ref offset);
             int entityCount = ReadInt32(data, ref offset);
-            snapshot.EntityCount = entityCount;
 
+            // The entity count arrives from the wire, and Udon has no exception handling: a truncated
+            // or garbage packet that claimed more entities than it carried used to read past the end
+            // of the array, and the resulting IndexOutOfRange permanently halts the Udon program that
+            // hits it. A negative count did the same via a huge Initialize allocation.
+            int maxByPayload = (data.Length - HeaderBytes) / BytesPerEntity;
+            if (entityCount < 0 || entityCount > maxByPayload)
+                return false;
+
+            snapshot.Frame = frame;
+            snapshot.EntityCount = entityCount;
             snapshot.Initialize(entityCount);
 
             for (int i = 0; i < entityCount; i++)
@@ -74,6 +87,8 @@ namespace UdonSharp.CE.NetPhysics
                 snapshot.Velocities[i] = ReadPackedVector3_12Bit(data, ref offset, VelocityPrecision);
                 snapshot.AngularVelocities[i] = ReadPackedVector3_12Bit(data, ref offset, VelocityPrecision);
             }
+
+            return true;
         }
 
         private void WritePosition(byte[] data, ref int offset, Vector3 pos)

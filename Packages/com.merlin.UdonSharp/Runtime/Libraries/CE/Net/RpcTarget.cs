@@ -6,6 +6,10 @@ namespace UdonSharp.CE.Net
     /// Specifies the target recipients for an RPC call.
     /// Maps to VRChat's NetworkEventTarget but provides clearer naming.
     /// </summary>
+    /// <remarks>
+    /// <see cref="CENet.ToNetworkEventTarget"/> performs the mapping, and is public so hand-written
+    /// SendCustomNetworkEvent calls can spell their target the same way an [Rpc] attribute does.
+    /// </remarks>
     [PublicAPI]
     public enum RpcTarget
     {

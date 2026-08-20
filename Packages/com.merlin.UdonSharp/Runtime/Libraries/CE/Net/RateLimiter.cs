@@ -1,12 +1,18 @@
+using System;
 using JetBrains.Annotations;
 using UnityEngine;
 
 namespace UdonSharp.CE.Net
 {
     /// <summary>
-    /// Runtime rate limiter for RPC calls.
-    /// Use this to enforce rate limits on frequently-called network methods.
+    /// Runtime rate limiter for anything you send or run on a schedule of your own.
+    /// Use this to pace hand-written network sends, serialization requests, or any hot local call.
     /// </summary>
+    /// <remarks>
+    /// Do not stack one of these on an [Rpc] method: VRChat already enforces that method's declared rate
+    /// through [NetworkCallable], and a second limiter in front of it only makes the effective rate
+    /// harder to reason about.
+    /// </remarks>
     /// <example>
     /// <code>
     /// public class ChatSystem : UdonSharpBehaviour
@@ -140,12 +146,23 @@ namespace UdonSharp.CE.Net
         /// <param name="rpcAttribute">The RPC attribute to read settings from.</param>
         /// <param name="methodName">Optional method name for logging.</param>
         /// <returns>A configured rate limiter, or null if no rate limit is set.</returns>
+        /// <remarks>
+        /// [Rpc(RateLimit = n)] compiles into [NetworkCallable(n)] and VRChat enforces it natively, so a
+        /// limiter built from the same attribute throttles the same call a second time: the effective
+        /// rate becomes whichever of the two fires first, and calls disappear at a rate neither the
+        /// attribute nor this object describes on its own.
+        /// </remarks>
+        [Obsolete("VRChat enforces [Rpc(RateLimit = n)] itself through [NetworkCallable(n)]; a limiter " +
+                  "built from the same attribute throttles the call twice. Construct a RateLimiter " +
+                  "directly for pacing that is not an [Rpc].")]
         public static RateLimiter FromAttribute(RpcAttribute rpcAttribute, string methodName = null)
         {
             if (rpcAttribute == null || rpcAttribute.RateLimit <= 0f)
                 return null;
 
-            return new RateLimiter(rpcAttribute.RateLimit, rpcAttribute.DropOnRateLimit, methodName);
+            // DropOnRateLimit is gone: VRChat drops and offers no queue, so true is the only behaviour
+            // this could ever have produced.
+            return new RateLimiter(rpcAttribute.RateLimit, true, methodName);
         }
     }
 }

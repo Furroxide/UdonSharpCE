@@ -1,5 +1,6 @@
 using System;
 
+#if !NET_4_6 && !NET_UNITY_4_8
 // This attribute must be in System.Runtime.CompilerServices namespace
 // for the C# compiler to recognize it as the async method builder attribute
 namespace System.Runtime.CompilerServices
@@ -34,7 +35,7 @@ namespace System.Runtime.CompilerServices
         public Type BuilderType { get; }
     }
 }
-
+#endif
 
 
 
