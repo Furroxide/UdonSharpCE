@@ -1,3 +1,7 @@
+---
+id: class-exposure-tree
+---
+
 # Class Exposure Tree
 
 The Class Exposure Tree will tell you what classes and methods that are available in Udon.

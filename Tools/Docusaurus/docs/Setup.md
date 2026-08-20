@@ -1,3 +1,7 @@
+---
+id: setup
+---
+
 # Setup
 
 **Requirements**

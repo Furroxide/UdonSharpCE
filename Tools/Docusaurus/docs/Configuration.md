@@ -1,3 +1,7 @@
+---
+id: configuration
+---
+
 # Configuration
 
 All these settings can be found at `Edit > Project Settings > Udon Sharp`

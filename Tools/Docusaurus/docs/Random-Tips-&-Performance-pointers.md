@@ -1,3 +1,7 @@
+---
+id: random-tips-&-performance-pointers
+---
+
 # Random Tips & Performance Pointers
 
 This page contains a list of things to keep in mind while using Udon with U#.

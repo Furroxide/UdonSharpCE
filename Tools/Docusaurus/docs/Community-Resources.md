@@ -1,3 +1,7 @@
+---
+id: community-resources
+---
+
 # Community Resources
 
 ## Tutorials and info

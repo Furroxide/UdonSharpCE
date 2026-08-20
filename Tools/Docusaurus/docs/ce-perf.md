@@ -77,7 +77,7 @@ public class BulletSystem : UdonSharpBehaviour
 | `Execute(int[] result)` | Get matching entity IDs. |
 | `ForEach(Action<int>)` | Iterate matching entities. |
 
-### CEPool<T>
+### CEPool&lt;T&gt;
 
 | Member | Description |
 | --- | --- |

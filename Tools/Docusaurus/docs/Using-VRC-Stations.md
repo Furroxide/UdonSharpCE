@@ -1,3 +1,7 @@
+---
+id: using-vrc-stations
+---
+
 # Using VRC Stations
 
 ### Making a chair to sit in

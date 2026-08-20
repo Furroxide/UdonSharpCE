@@ -1,9 +1,13 @@
+---
+id: events
+---
+
 # Events
 
 * [Udon Events](#udon-events)
 * [Unity Events](#unity-events)
 
-# Udon Events
+## Udon Events
 These are the method stubs you can override via `UdonSharpBehaviour`.
  - [VRChat Event Documentation](https://docs.vrchat.com/docs/event-nodes)
 
@@ -97,7 +101,7 @@ public override void <method>() {}
 |`void`|OnStringLoadSuccess(IVRCStringDownload result)|Triggered when a string download succeeds. See [String Loading](https://docs.vrchat.com/docs/string-loading).|
 |`void`|OnStringLoadError(IVRCStringDownload result)|Triggered when a string download fails. See [String Loading](https://docs.vrchat.com/docs/string-loading).|
 
-# Unity Events
+## Unity Events
 These are the method stubs available for Unity events.
 [Unity MonoBehaviour Documentation](https://docs.unity3d.com/ScriptReference/MonoBehaviour.html)
 

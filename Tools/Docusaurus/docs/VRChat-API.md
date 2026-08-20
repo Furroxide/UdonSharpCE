@@ -1,3 +1,7 @@
+---
+id: vrchat-api
+---
+
 # VRChat API
 
 ## API

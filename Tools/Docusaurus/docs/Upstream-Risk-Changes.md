@@ -1,3 +1,7 @@
+---
+id: upstream-risk-changes
+---
+
 # Upstream Higher-Risk Changes
 
 This document tracks upstream PRs that were evaluated as higher-risk for UdonSharpCE and not merged yet. It summarizes scope, risk, and the validation needed before adoption.

@@ -1,3 +1,7 @@
+---
+id: examples
+---
+
 # Examples
 
 * [Spinning Cube](#spinning-cube)

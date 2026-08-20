@@ -1,3 +1,7 @@
+---
+id: editor-scripting
+---
+
 # Editor Scripting
 
 ## Overview

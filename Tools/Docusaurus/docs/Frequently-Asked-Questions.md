@@ -1,3 +1,7 @@
+---
+id: frequently-asked-questions
+---
+
 # Frequently Asked Questions
 
 ### Questions

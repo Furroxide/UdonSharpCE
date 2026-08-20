@@ -1,8 +1,10 @@
 // @ts-check
 // Note: type annotations allow type checking and IDEs autocompletion
 
-const lightCodeTheme = require('prism-react-renderer/themes/github');
-const darkCodeTheme = require('prism-react-renderer/themes/dracula');
+const {themes} = require('prism-react-renderer');
+
+const lightCodeTheme = themes.github;
+const darkCodeTheme = themes.dracula;
 
 /** @type {import('@docusaurus/types').Config} */
 const config = {
@@ -11,7 +13,11 @@ const config = {
   url: 'https://udonsharp.docs.vrchat.com',
   baseUrl: '/',
   onBrokenLinks: 'throw',
-  onBrokenMarkdownLinks: 'warn',
+  markdown: {
+    hooks: {
+      onBrokenMarkdownLinks: 'warn',
+    },
+  },
   favicon: 'images/favicon.ico',
   organizationName: 'vrchat-community', // Usually your GitHub org/user name.
   projectName: 'UdonSharp', // Usually your repo name.
@@ -33,6 +39,7 @@ const config = {
           path: 'news',
           routeBasePath: 'news',
           showReadingTime: false,
+          onUntruncatedBlogPosts: 'ignore',
           // Please change this to your repo.
           // editUrl: 'https://github.com/vrchat-community/UdonSharp',
         },

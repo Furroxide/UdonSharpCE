@@ -70,7 +70,9 @@ If you need custom conversion (complex types, nested models, etc.), register a c
 | `ToJson<T>(T model, bool beautify)` / `FromJson<T>(string, out T)` | Convert to and from JSON. |
 | `Validate<T>(T model, out List<ValidationError>)` | Validate a model against constraints. |
 | `EstimateSize<T>(T model)` | Estimate serialized size in bytes. |
-| `GetRemainingQuota()` | Returns the full quota; VRChat does not expose exact remaining PlayerData usage. |
+| `GetQuotaLimit()` | The PlayerData storage limit, from `Networking.GetPlayerDataStorageLimit()`. |
+| `GetUsedQuota()` | Bytes currently used, from `Networking.GetPlayerDataStorageUsage(localPlayer)`. |
+| `GetRemainingQuota()` | Limit minus current usage. This is a real measurement — the earlier note claiming VRChat does not expose usage was wrong; both SDK calls exist and are now used. |
 
 ### PersistenceLifecycle
 

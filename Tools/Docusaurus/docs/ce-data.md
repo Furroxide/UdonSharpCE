@@ -48,7 +48,7 @@ Use converter overloads for custom types.
 
 ## API Reference
 
-### CEList<T>
+### CEList&lt;T&gt;
 
 | Member | Description |
 | --- | --- |
@@ -68,7 +68,7 @@ Use converter overloads for custom types.
 | `ToJson()` / `ToJson(bool)` | Serialize to JSON. |
 | `FromJson(string)` / `FromJson(string, Func<DataToken, T>)` | Deserialize from JSON. |
 
-### CEDictionary<TKey, TValue>
+### CEDictionary&lt;TKey, TValue&gt;
 
 | Member | Description |
 | --- | --- |
