@@ -44,10 +44,12 @@ public class CEQuickStart : UdonSharpBehaviour
 - Async transformation currently supports `await UdonTask.Delay`, `DelayFrames`, and `Yield`. Awaiting tasks that return values or `WhenAll/WhenAny` is not yet implemented.
 - `UdonTask<T>` exists, but awaited result assignment is not wired in the current transformer.
 - `[Sync]` participates in UdonSharp's normal synced-variable pipeline by inheriting `UdonSyncedAttribute`. Do not combine `[Sync]` and `[UdonSynced]` on the same field.
-- `[SyncOnJoin]` and `LateJoinerSync` emit and use generated JSON glue for supported pure data graphs. Scene/object references, polymorphic data, and cyclic graphs require `[SyncSerializer]`; CE0032 warns when generated glue is omitted.
+- `[Sync]` now requires an `Authority` as its first positional argument: `[Sync(Authority.Owner)]` for state one client decides and the rest are told about, `[Sync(Authority.Predicted)]` for state every client simulates locally and the owner's packet corrects. This is a breaking change — bare `[Sync]` and `[Sync(InterpolationMode.X)]` no longer compile, and `Authority.Owner` is the behaviour-preserving migration for both. Interpolation is now the second positional argument or a named one. See [CE Net](ce-net#sync-authority).
+- `[UdonSynced]` is unchanged and fully supported; it has no authority parameter and needs no migration. The difference is precision, not capability: CE0014 infers authority for a bare `[UdonSynced]` field from the code around the write, and a declared `Authority` replaces that inference with a statement. CE0014 is authority-aware as a result, and CE0063 warns when an `Authority.Predicted` field lives on a behaviour whose declared sync mode replicates no variables at all, so there is no owner value it could ever reconcile against. CE0063 stops at that provable case rather than guessing whether a Manual behaviour publishes, and CE0033 rejects that combination during codegen before analysis runs, so CE0063 is a backstop rather than a routine check — declaring a field `Predicted` turns CE0014 off and takes the owner's reconciliation on trust. See [CE Editor Tools](ce-editor-tools#compile-time-analyzers).
+- `[SyncOnJoin]` emits generated JSON glue for supported pure data graphs and carries it in an `[UdonSynced]` string on the behaviour itself; the behaviour is forced to Manual sync. Scene/object references, polymorphic data, and cyclic graphs require `[SyncSerializer]`; CE0032 warns when generated glue is omitted.
 - `CEPersistence.Save` and `CEPersistence.Restore` use VRChat PlayerData string storage through JSON. Models are auto-registered from `[PlayerData]`/`[PersistKey]` at compile time.
 - `DeltaEncode` is advisory only; use manual sync plus a custom payload for true delta-style updates.
-- Optimization attributes like `[CEInline]` and `[CENoOptimize]` are declared but not yet enforced (only `[CEPreserveAction]` is active).
+- The optimizer opt-out attributes (`[CENoOptimize]`, `[CENoInline]`, `[CEInline]`, `[CENoUnroll]`, `[CEUnroll]`, `[CEConst]`, `[CEDebugOnly]`) are now `[Obsolete(error: true)]`. The syntactic optimizers they exempted from are all disabled by default — each was found able to change or delete program behaviour — so there is nothing left to opt out of, and an attribute that silently does nothing is the failure class this fork removes. `[CEPreserveAction]` is still active and still read.
 - `[CEComponent]` and `[CESystem]` are metadata only; CEWorld does not auto-register them yet.
 - `CELogger` calls are transformed to `Debug.Log` in Udon compilation; in-world console integration requires manual wiring.
 
@@ -67,7 +69,9 @@ using UdonSharp.CE.Net;
 public class Scoreboard : UdonSharpBehaviour
 {
     [UdonSynced]
-    [Sync] public int score; // Invalid: choose one sync attribute
+    [Sync(Authority.Owner)] public int score; // Invalid: choose one sync attribute
+
+    [Sync] public int lives;                  // Invalid: Authority is required
 }
 ```
 
@@ -79,7 +83,7 @@ using UdonSharp.CE.Net;
 
 public class Scoreboard : UdonSharpBehaviour
 {
-    [Sync(InterpolationMode.None)]
+    [Sync(Authority.Owner)]
     public int score;
 }
 ```

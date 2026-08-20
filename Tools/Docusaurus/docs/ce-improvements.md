@@ -47,7 +47,8 @@ public class TooBig : UdonSharpBehaviour
 
 - `[SyncOnJoin]` attribute marks fields that need late-join handling
 - **Late-Join Simulator** editor tool lets you test reconstruction without leaving Unity
-- `LateJoinerSync` helpers for manual state reconstruction patterns
+- State travels as an `[UdonSynced]` string on the behaviour that declared the fields, so authority is
+  normal object ownership and VRChat replays it to late joiners with no extra machinery
 
 ### RPC & Sync Validation (CE0010, CE0011, CE0012)
 
@@ -58,6 +59,59 @@ public class TooBig : UdonSharpBehaviour
 - RPC methods with unsupported parameter types
 - Sync attributes that conflict with the behaviour's sync mode
 - Network calls to methods marked `[LocalOnly]`
+
+### Declared Sync Authority (CE0014, CE0063)
+
+**The Problem:** Only the owner's copy of a synced variable is ever sent. A write on any other client
+is not rejected and does not log anything — it changes the local copy, never leaves the machine, and
+is quietly overwritten by the owner's next update. That is a desync you can only see by having a
+second player in the world.
+
+Analyzers can warn about it, but only by guessing: scan the code around the write for an ownership
+check, and complain if there isn't one. The guess is wrong for a whole class of correct code.
+Predict-and-reconcile netcode _wants_ every client writing the value locally so it keeps moving
+between packets, with the owner's update pulling the guesses back together.
+
+```csharp
+// ❌ The analyzer sees an unguarded write and warns. The code is correct — every client
+//    is supposed to drain its own boost meter so the HUD does not stall between packets.
+[UdonSynced] private float _boostRemaining;
+
+private void ApplyBoost(float dt) => _boostRemaining -= dt;
+```
+
+**CE Solution:** Say which it is at the declaration, and the compiler checks _more_ instead of less.
+
+```csharp
+// ✅ Owner-authoritative: CE0014 requires every write to be ownership-guarded.
+[Sync(Authority.Owner)] private int _score;
+
+// ✅ Predicted: every client writes it locally, and the owner's serialization corrects it.
+//    CE0014 steps aside, and nothing takes its place — CE0063 only catches a behaviour
+//    that replicates nothing at all. That the owner publishes is on you.
+[Sync(Authority.Predicted)] private float _boostRemaining;
+```
+
+- `Authority` is the required first argument to `[Sync]`, because a wrong interpolation only looks
+  janky while a wrong authority silently desyncs.
+- CE0063 catches the provable half of the failure the exemption opens up: a predicted field on a
+  behaviour whose sync mode replicates nothing (`None`/`NoVariableSync`) diverges forever and nothing
+  else notices. It stops there on purpose — this feature exists to remove five false positives, so it
+  does not guess that a Manual behaviour fails to publish just because no `RequestSerialization()` is
+  visible in its own source. CE0015 reports that common case from the other side.
+- Be honest about the size of that: `Predicted` switches CE0014 off for the field and puts almost
+  nothing back. CE0063 never looks at `Manual` or `Continuous` behaviours, and even the case it does
+  cover is normally rejected earlier by CE0033 during codegen, so CE0063 is a backstop rather than a
+  working check. Declaring a field predicted is an assertion that the owner reconciles it, and that
+  assertion is taken on trust.
+- `[UdonSynced]` is unchanged and still fully supported. The difference is precision — a declared
+  authority replaces an inference.
+
+`NetVehicle` ships this shape: `_ownerPlayerId`, `_boostRemaining` and `_jumpTimer` are all
+`Authority.Predicted`, and `_airStateFlags` is the only owner-only field. `_ownerPlayerId` is the
+instructive one — every client latches the driver id from the `AssignDriver` broadcast rather than
+simulating it, and it is still predicted, because authority records who may write the field and not
+where the value came from.
 
 ### Bandwidth Analyzer
 
@@ -395,17 +449,18 @@ CE declares compatibility with standard UdonSharp, so existing prefabs work with
 
 ## Summary
 
-| Category         | Standard U# Pain Point | CE Solution                                        |
-| ---------------- | ---------------------- | -------------------------------------------------- |
-| **Networking**   | Silent sync failures   | Compile-time analyzers (CE0001, CE0003, CE0010-12) |
-| **Late Joiners** | Broken initial state   | `[SyncOnJoin]` + Late-Join Simulator               |
-| **Bandwidth**    | Unknown usage          | Bandwidth Analyzer tool                            |
-| **Timing**       | Callback spaghetti     | `async`/`await` with `UdonTask`                    |
-| **Collections**  | Raw arrays only        | `CEList<T>`, `CEDictionary<K,V>`                   |
-| **Persistence**  | Manual serialization   | `[PlayerData]` attribute mapping                   |
-| **Performance**  | Entity limits          | ECS-lite, pooling, spatial grids                   |
-| **Debugging**    | Print debugging        | In-world console, profiler, validators             |
-| **Testing**      | Multi-client required  | Network Simulator, Late-Join Simulator             |
+| Category         | Standard U# Pain Point     | CE Solution                                        |
+| ---------------- | -------------------------- | -------------------------------------------------- |
+| **Networking**   | Silent sync failures       | Compile-time analyzers (CE0001, CE0003, CE0010-12) |
+| **Ownership**    | Discarded non-owner writes | Declared `[Sync(Authority...)]` + CE0014, CE0063   |
+| **Late Joiners** | Broken initial state       | `[SyncOnJoin]` + Late-Join Simulator               |
+| **Bandwidth**    | Unknown usage              | Bandwidth Analyzer tool                            |
+| **Timing**       | Callback spaghetti         | `async`/`await` with `UdonTask`                    |
+| **Collections**  | Raw arrays only            | `CEList<T>`, `CEDictionary<K,V>`                   |
+| **Persistence**  | Manual serialization       | `[PlayerData]` attribute mapping                   |
+| **Performance**  | Entity limits              | ECS-lite, pooling, spatial grids                   |
+| **Debugging**    | Print debugging            | In-world console, profiler, validators             |
+| **Testing**      | Multi-client required      | Network Simulator, Late-Join Simulator             |
 
 ---
 

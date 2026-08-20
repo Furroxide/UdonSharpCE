@@ -539,20 +539,21 @@ public class CutsceneController : UdonSharpBehaviour
 #### Features
 
 1. **Visibility Attributes** — `[LocalOnly]`, `[Rpc]`, `[RpcOwnerOnly]`, `[EventExport]`
-2. **Typed Sync Properties** — Interpolation, delta encoding, quantization
+2. **Typed Sync Properties** — Declared write authority, interpolation, quantization, advisory delta hint
 3. **Compile-Time Analysis** — Bandwidth estimation, oversized payload warnings
 4. **RPC Parameter Marshalling** — Type-safe up to 8 arguments
 
 #### Example
 
 ```csharp
-using UdonSharpCE.Net;
+using UdonSharp;
+using UdonSharp.CE.Net;
 
 [UdonBehaviourSyncMode(BehaviourSyncMode.Manual)]
 public class ScoreBoard : UdonSharpBehaviour
 {
-    [Sync] public int redScore;
-    [Sync(DeltaEncode = true)] public int[] playerScores = new int[16];
+    [Sync(Authority.Owner)] public int redScore;
+    [Sync(Authority.Owner, DeltaEncodeHint = true)] public int[] playerScores = new int[16];
 
     [Rpc(Target = RpcTarget.All, RateLimit = 5)]
     public void AnnounceGoal(int team, int scorerId) { /* ... */ }
@@ -561,6 +562,18 @@ public class ScoreBoard : UdonSharpBehaviour
     private void PlayGoalAnimation(int team) { /* ... */ }
 }
 ```
+
+> **Updated 2026-08-20.** This snippet was corrected in place rather than left as a period record,
+> because the surrounding section is marked shipped and a reader will paste it. `[Sync]` now takes
+> an `Authority` as its first, required argument, so bare `[Sync]` and `[Sync(DeltaEncode = ...)]`
+> no longer compile. `Authority.Owner` is the behaviour-preserving migration. The `using`
+> directives are fixed for that same reason: the shipped namespace is `UdonSharp.CE.Net`, not
+> `UdonSharpCE.Net`, so the old `using UdonSharpCE.Net;` turned every CE type in this block into
+> CS0246 the moment it was pasted, and `using UdonSharp;` was missing for `UdonSharpBehaviour` and
+> `BehaviourSyncMode`. The rest of this document is a proposal snapshot and is not maintained
+> against the shipped API — `Tools/Docusaurus/docs/ce-net.md` is the reference. Note also that
+> `DeltaEncodeHint` is advisory only (CE0013 says so at compile time); VRChat has no delta sync for
+> Udon synced variables.
 
 ---
 

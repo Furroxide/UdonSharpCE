@@ -19,6 +19,16 @@ These tools address the core pain points of VRChat world development:
 
 **Status:** Core implementation complete — Network Simulator, Bandwidth Analyzer, World Validator, and Late-Join Simulator are live; advanced tools (Async Visualizer, ECS Browser, Persistence Schema Manager) remain in design.
 
+> **Historical, and superseded where it disagrees with the code (noted 2026-08-20).** This is the design
+> specification the tools were built from, not a description of what shipped. Its code listings are
+> illustrative and have diverged — the real `BehaviourAnalyzer`, for instance, computes different sizes and
+> emits different recommendation text than the listing near the end of this file. Read
+> `Packages/com.merlin.UdonSharp/Editor/CE/DevTools/` for behaviour and
+> `Tools/Docusaurus/docs/ce-editor-tools.md` for the published analyzer table; that table is the one kept
+> in step with `CEAnalyzerRunner`. One correction was applied inline rather than left to rot: every
+> `[Sync]` sample now carries the `Authority` argument that became required and positional, because a
+> sample that produces CS7036 when pasted is worse than no sample.
+
 ### Tool Status
 
 | Tool | Status | Notes |
@@ -1322,7 +1332,8 @@ namespace UdonSharpCE.Editor.Analysis
                         {
                             Field = field.Field,
                             Message = "Float/Vector without quantization",
-                            Suggestion = "Use [Sync(Quantize = 0.01f)] to reduce precision and bandwidth"
+                            Suggestion = "Add Quantize to the field's [Sync], e.g. [Sync(Authority.Owner, Quantize = 0.01f)]. " +
+                                         "Authority is required and positional; keep whichever one the field already declares."
                         });
                     }
                 }

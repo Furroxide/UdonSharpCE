@@ -1,202 +1,282 @@
-# UdonSharpCE: Fix the Sync Pipeline (A1–A5)
+# UdonSharpCE Sync — Status and Correction
 
-## Progress Status (2026-04-26)
+## Correction to the previous report (2026-04-28)
 
-This plan is no longer purely prospective. The core sync-pipeline work has been implemented, including the deep `[SyncOnJoin]` follow-up pass requested on 2026-04-26.
+The earlier version of this file declared the sync rewrite "Completed". It was not, and three of the
+statements it relied on were false. They are corrected here so the record does not mislead again.
 
-| Area                                    |                     Status | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| --------------------------------------- | -------------------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A1 `[Sync]` upstream integration        |                       Done | `SyncAttribute` now inherits `UdonSyncedAttribute`, keeps interpolation mapped to `NetworkSyncType`, and related tooling uses assignable synced-attribute lookup. Existing upstream binder calls still read `GetAttribute<UdonSyncedAttribute>()`.                                                                                                                                                                                           |
-| A2/A3 `[SyncOnJoin]` glue and transport |                       Done | `SyncOnJoinGlueEmitter` generates payload/inbound fields, serialize/deserialize events, and nested helpers for Unity-serializable pure data graphs. Supported roots include primitives, enums, strings, Udon-compatible Unity value structs, `DataDictionary`/`DataList`, one-dimensional arrays, `List<T>`, and custom classes/structs walked through Unity-serialized fields. Manual-only roots emit CE0032 as a warning and are omitted unless `[SyncSerializer(...)]` is supplied. |
-| A4 Quantize / DeltaEncode honesty       |                       Done | `QuantizePreSerializeEmitter` injects `OnPreSerialization` rounding. `DeltaEncode` is now an obsolete compatibility alias over `DeltaEncodeHint`, and analyzers/tooling treat it as advisory.                                                                                                                                                                                                                                                |
-| A5 storage cache thread-safety          |                       Done | `UdonVariableStorageInterface` now locks `_variableTypeLookup` for cache clear/build/read, preventing stale cache publish races.                                                                                                                                                                                                                                                                                                             |
-| Persistence backing for showcase saves  |                       Done | `CEPersistence.Save/Restore` and generated overloads now serialize model `DataDictionary` JSON to VRChat `PlayerData.SetString` and restore with `PlayerData.TryGetString`, returning `NotReady`/`NoData` as appropriate.                                                                                                                                                                                                                    |
-| Treasure hunt saved-data load timing    |                       Done | `InventorySystem` waits for `OnPlayerRestored(VRCPlayerApi player)` before reading PlayerData and skips auto-save until local PlayerData is restored.                                                                                                                                                                                                                                                                                        |
-| Treasure collectible authority/sync     |                       Done | `CollectibleItem` defers collection until local ownership transfer completes, syncs collected state plus server timestamp, limits respawn serialization to the owner, and prevents remote deserialization from crediting local inventory.                                                                                                                                                                                                    |
-| Cutscene async lowering                 | Done for showcase patterns | `AsyncMethodTransformOptimizer` now preserves awaited child calls via continuations, supports the showcase `while` + `await` patterns, and throws on unsupported await targets instead of silently dropping work.                                                                                                                                                                                                                            |
-| Cutscene scene-reference fallback       |                       Done | `CutsceneController.Start()` now auto-wires missing safe child references at runtime when serialized scene fields are null/empty.                                                                                                                                                                                                                                                                                                            |
+| Previous claim | Reality |
+| --- | --- |
+| "Unity MCP focused EditMode suite: 24 passed", listing `UdonSharp.CE.Tests.Net.*` suites | Those suites live under `Packages/com.merlin.UdonSharp/Tests~/`. Unity **excludes `~`-suffixed folders from the asset pipeline**, so there is no `UdonSharp.CE.Tests` assembly and those tests have never run. The 24 were entirely `CEShowcase.Tests`, which is exactly what a run of that assembly reports today. |
+| "ClientSim is not installed in this project" — used to excuse skipping runtime verification | ClientSim **is** installed. It ships inside the Worlds SDK at `Packages/com.vrchat.worlds/Integrations/ClientSim`, with `VRC.ClientSim.csproj` at the repo root and live data in `ClientSimStorage/`. |
+| "`[SyncOnJoin]` … works; synced state is the late-join source of truth" | `LateJoinerSync.SerializeAllBehaviours` ran on the coordinator's owner — pinned to the **master** — and read each registered behaviour's payload from the **master's own local heap**. It never captured state authored by any other client, so late joiners received the master's view and nothing else. |
 
-Verification completed after the deep `[SyncOnJoin]` pass:
+A separate problem hid all of this: `UdonSharpCompilerV1.RunCompileTimeOptimizers` caught every CE
+codegen failure, logged one `Debug.LogWarning`, and continued with the untransformed trees. The
+compile then *succeeded*, emitted programs with no `[SyncOnJoin]` glue, no async state machine and no
+quantization, and called `RehashAllScripts()` marking everything up to date.
 
-- Focused EditMode fixtures: `23 passed, 0 failed` across `CEShowcase.Tests.Editor.UdonSharpCESyncPipelineTests` and `CEShowcase.Tests.Editor.Station5PersistenceRegressionTests`.
-- Full UdonSharp compile: `Errors=0, Warnings=0` (`8` informational diagnostics).
-- A first batchmode Unity test attempt could not run because this project was already open in the interactive Unity editor; verification was rerun through Unity MCP against the open editor.
+## Current architecture
 
-Remaining work:
-
-- Promote the current showcase/editor regression coverage into the originally planned package-level `Tests~/CE/...` layout if that test organization is still desired.
-- Run live multi-client VRChat/ClientSim smoke coverage for late-join sync and treasure collection. The automated EditMode tests and full compiler pass are green, but live multi-user runtime behavior was not exercised in this session.
-- Broader package-level tests were not run in this session.
-
-## Context
-
-UdonSharpCE is a fork of VRChat's UdonSharp C# compiler. The project markets itself on filling VRChat SDK gaps and "automagically" hiding complexity. An audit (three parallel Explore passes) surfaced ~15 fundamental flaws across sync, optimizers, and runtime libraries. This plan is scoped to the **sync pipeline**, with "wire real implementations" as the repair philosophy.
-
-This plan addresses the five sync-pipeline flaws (A1–A5). The current situation is user-hostile: a developer writes `[Sync] public int score;` and `[SyncOnJoin] public GameState state;`, sees no compiler error, ships their world, and discovers in production that **nothing syncs and late joiners see empty state**. This is the worst kind of API failure — silent, confidence-eroding, and expensive to debug inside VRChat.
-
-## Root-Cause Summary
-
-| #   | Root cause                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | File(s)                                                                                                                                                                                           |
-| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A1  | CE's `[Sync]` attribute is invisible to the core binder. `FieldSymbol.SyncMode` only inspects `[UdonSynced]`, so the entire upstream sync pipeline (`CheckSyncCompatibility`, heap init, UASM emission) never sees CE-synced fields. They compile without error but produce no synced slot.                                                                                                                                                                                         | `Editor/Compiler/Binder/Symbols/FieldSymbol.cs:61-62`, `Editor/Compiler/UdonSharpCompilerV1.cs:913,1143`                                                                                          |
-| A2  | `LateJoinerSync.SerializeBehaviour()` returns `behaviour.name`. The comment openly says "full implementation would use reflection on `[SyncOnJoin]` fields." **Reflection isn't available at Udon runtime**, so the stub can't be fixed in place — it requires compiler-emitted glue.                                                                                                                                                                                               | `Runtime/Libraries/CE/Net/LateJoinerSync.cs:454-459`                                                                                                                                              |
-| A3  | Symmetric to A2: `DeserializeBehaviour()` is an empty method body. Late joiners cannot apply received state even if A2 were fixed.                                                                                                                                                                                                                                                                                                                                                  | `Runtime/Libraries/CE/Net/LateJoinerSync.cs:548-552`                                                                                                                                              |
-| A4  | `SyncAttribute.Quantize` and `SyncAttribute.DeltaEncode` have docstrings promising bandwidth savings, but there is no transform and no hook into serialization. They are pure analyzer hints dressed as runtime features.                                                                                                                                                                                                                                                           | `Runtime/Libraries/CE/Net/SyncAttribute.cs:58-79`                                                                                                                                                 |
-| A5  | `UdonVariableStorageInterface.ClearCache()` is called from `CleanupCompile` on the main thread (safe today), but the static cache is read by serializer code at arbitrary times. If compilation ever moves fully off-main (CE already runs optimizers on background threads), the unlocked `Dictionary` can corrupt. Also, there is no assertion that `ClearCache()` has run before `GetElementStorage()` is called post-recompile, so a stale program asset reference can survive. | `Editor/Serialization/StorageInterfaces/UdonVariableStorageInterface.cs:106-115,117-136`; callers at `Editor/Compiler/UdonSharpCompilerV1.cs:286-287`, `Editor/UdonSharpEditorUtility.cs:217-218` |
-
-## Guiding Principle
-
-**Honesty over optimism.** Every fix here either makes the API work as advertised, or surfaces a diagnostic instead of silently skipping work. Manual-only `[SyncOnJoin]` roots now warn with CE0032 and require `[SyncSerializer(...)]` for generated late-join glue.
-
----
-
-## Fix Design
-
-### A1 — Make `[Sync]` actually sync
-
-**Approach (minimal blast radius):** make `UdonSharp.CE.Net.SyncAttribute` inherit from `UdonSharp.UdonSyncedAttribute`. Forward `SyncAttribute.SyncMode` (already derived from `InterpolationMode`) to the base constructor.
-Because named attribute arguments execute after base construction, `SyncAttribute.Interpolation` must also keep the inherited `NetworkSyncType` property in sync; ctor-only wiring is not enough for `[Sync(Interpolation = InterpolationMode.Linear)]`.
-
-This means:
-
-- Zero change to the core binder/emitter — `GetAttribute<UdonSyncedAttribute>()` at `Packages/com.merlin.UdonSharp/Editor/Compiler/Binder/Symbols/FieldSymbol.cs:61`, `Packages/com.merlin.UdonSharp/Editor/Compiler/UdonSharpCompilerV1.cs:913`, and `Packages/com.merlin.UdonSharp/Editor/Compiler/UdonSharpCompilerV1.cs:1143` resolves `[Sync]` automatically via inheritance.
-- `[Sync]` fields go through the full existing pipeline: type-compat check, heap slot, sync mode enforcement.
-- The analyzer at `Packages/com.merlin.UdonSharp/Editor/CE/Net/SyncFieldAnalyzer.cs:119-127` becomes obsolete (no longer an "also has `[UdonSynced]`" info). Simplify it.
-
-**Files to change:**
-
-- `Packages/com.merlin.UdonSharp/Runtime/Libraries/CE/Net/SyncAttribute.cs` — change declaration to `public class SyncAttribute : UdonSyncedAttribute`, call `base(SyncMode)` from constructor. Drop the redundant `SyncMode` property (inherited as `NetworkSyncType`).
-- `Packages/com.merlin.UdonSharp/Editor/CE/Net/SyncFieldAnalyzer.cs:119-127` — remove the "both present" info diagnostic; keep Quantize/DeltaEncode/Interpolation validations.
-- `Packages/com.merlin.UdonSharp/Editor/CE/Net/BandwidthEstimator.cs:439,466` — already handles both names; keep.
-- `Packages/com.merlin.UdonSharp/Editor/CE/DevTools/Analysis/BehaviourAnalyzer.cs`, `Packages/com.merlin.UdonSharp/Editor/CE/DevTools/Validation/Validators/SyncModeValidator.cs`, and `Packages/com.merlin.UdonSharp/Editor/CE/DevTools/Validation/Validators/UninitializedSyncedArrayValidator.cs` — detect synced fields via assignable attribute lookup, not literal `UdonSynced*` name checks, so `[Sync]` participates in tooling.
-
-**Edge case:** users who write `[Sync][UdonSynced]` on the same field will now be applying the base attribute twice. `AttributeUsage(AllowMultiple = false)` on `UdonSyncedAttribute` means this throws a C# error — which is the right outcome (force one or the other). Document the breaking change in `UDONSHARP_CE_FEATURES.md`.
-
-### A2/A3 — Make `[SyncOnJoin]` actually sync
-
-**Approach:** emit per-behaviour serialize/deserialize glue at compile time. Reflection isn't viable in Udon runtime, so we lean on the compiler. Use VRChat's `VRCJson` + `DataDictionary` as the wire format — it's fully supported in Udon and already pulled in by CE.Data.
-
-**New contract per-behaviour with `[SyncOnJoin]` fields:**
+`[SyncOnJoin]` no longer uses a coordinator. Each behaviour carries its own synced payload — one per
+`SyncOnJoinAttribute.Group`, and one in total for a behaviour that names no group:
 
 ```csharp
-// Emitted by the compiler (CE optimizer pass), not written by user:
-public string _CE_SyncOnJoin_Serialize() {
-    var dict = new DataDictionary();
-    dict["phase"] = new DataToken(gamePhase);
-    dict["completed"] = /* array → DataList */;
-    VRCJson.TrySerializeToJson(new DataToken(dict), JsonExportType.Minify, out DataToken json);
-    return json.String;
-}
-public void _CE_SyncOnJoin_Deserialize(string payload) {
-    VRCJson.TryDeserializeFromJson(payload, out DataToken root);
-    var dict = root.DataDictionary;
-    if (dict.TryGetValue("phase", out DataToken v)) gamePhase = (int)v.Number;
-    /* ... */
-}
+[SyncOnJoinGenerated, HideInInspector, UdonSynced]
+protected string _CE_SyncOnJoinPayload = "";          // default group: unsuffixed, unchanged
+
+[SyncOnJoinGenerated, HideInInspector, UdonSynced]
+protected string _CE_SyncOnJoinPayload_terrain = "";  // [SyncOnJoin(Group = "terrain")]
 ```
 
-**LateJoinerSync changes:**
+written in `OnPreSerialization` and applied in `OnDeserialization`, both woven in around any handler
+the author already wrote. `_CE_SyncOnJoin_RequestCapture` stays the single entry point whatever the group
+count — it re-serializes every group and calls `RequestSerialization()` only if one of them actually
+changed, so a write to a hot group leaves a cold group's string untouched. Consequences:
 
-- Do not key payloads by `behaviour.name`. Use a stable registration identifier captured during `RegisterBehaviour()` — for example the transform sibling-index path plus the backing `UdonBehaviour` component slot — so duplicate object names and multiple UdonSharp behaviours on one GameObject still deserialize to the correct target.
-- `SerializeBehaviour(behaviour)` at `LateJoinerSync.cs:454` → call `behaviour.SendCustomEvent("_CE_SyncOnJoin_Serialize")` then read `behaviour._CE_SyncOnJoinPayload` (a generated public string field that the emitted method writes to). Udon SendCustomEvent discards return values, so we must use a field-return idiom.
-- `DeserializeBehaviour(behaviour, data)` at `LateJoinerSync.cs:548` → set `behaviour._CE_SyncOnJoinInbound = data;` then `SendCustomEvent("_CE_SyncOnJoin_Deserialize_Trigger")` which reads the inbound field and dispatches.
+- **Authority follows object ownership.** State authored by any client reaches late joiners.
+- **VRChat delivers it natively.** Synced-variable state is sent to late joiners automatically; no
+  coordinator, no hidden scene object, no build-time scene mutation, no hierarchy-path IDs.
+- **No 2-second world-wide poll** and no O(n²) chunk reassembly.
+- **Blast radius is one behaviour**, and each gets its own ~280 KB manual-sync budget rather than
+  sharing one 262 KB envelope that was resent in full whenever any single field changed.
 
-**Alternative if emitting behaviour members turns out invasive:** require users to override `public virtual string _CE_SyncOnJoinSerialize()` / `public virtual void _CE_SyncOnJoinDeserialize(string)` on their UdonSharpBehaviour, and CE generates the body via source generators only when the base is not overridden. Either way the user experience is identical (annotate `[SyncOnJoin]`, it just works).
+Sync mode is now **inferred**. A behaviour with synced state and no `[UdonBehaviourSyncMode]` gets one
+injected — Manual when something requires it (arrays, `[SyncOnJoin]` payloads, synced strings),
+Continuous otherwise. A *declared* mode is never silently overridden: `None`/`NoVariableSync` with
+synced state is CE0033, and `Continuous` with Manual-only state is CE0034.
 
-**Files to create/modify:**
+### Declared sync authority (2026-08-20)
 
-- NEW: `Packages/com.merlin.UdonSharp/Editor/CE/Optimizers/SyncOnJoinGlueEmitter.cs` — an `ICECompileTimeOptimizer` that visits `UdonSharpBehaviour` classes with at least one `[SyncOnJoin]` field and appends the two generated methods + the two payload fields.
-- MODIFY: `Packages/com.merlin.UdonSharp/Runtime/Libraries/CE/Net/LateJoinerSync.cs:454-459,548-552` — call the generated methods via `SendCustomEvent`, read/write payload fields via `GetProgramVariable`/`SetProgramVariable` (see `UdonBehaviour` API for field access).
-- MODIFY: `Packages/com.merlin.UdonSharp/Runtime/Libraries/CE/Net/SyncOnJoinAttribute.cs` — add `internal` marker `class SyncOnJoinGenerated : Attribute` that the emitter stamps on generated methods so the compiler ignores them if already present (idempotent re-emit).
-- MODIFY: CE analyzer: add `CE0031` — "[SyncOnJoin] used but no LateJoinerSync component found in scene" (scene-level check, can live in `Editor/CE/DevTools/Validation/Validators/`).
+`[Sync]` now takes an `Authority` as its first, required argument:
 
-**Type support:** emit JSON glue for primitives, enums, strings, supported Udon-compatible Unity value structs, `DataDictionary`/`DataList`, one-dimensional arrays, `List<T>`, and Unity-serializable pure data models. Custom models are walked through public instance fields and private `[SerializeField]` fields; static, readonly, `[NonSerialized]`, `[DataIgnore]`, and `[PersistIgnore]` fields are skipped. `DataField("key")` and `PersistKey("key")` provide nested field keys when present. Manual-only roots such as `UnityEngine.Object` references, delegates/events, interfaces, abstract/open generic types, `[SerializeReference]` polymorphic fields, non-`DataDictionary` dictionaries, jagged/multidimensional arrays, and recursive graphs emit CE0032 as a warning and are omitted from generated glue unless `[SyncSerializer(...)]` is supplied.
+```csharp
+[Sync(Authority.Owner)]     private byte  _airStateFlags;   // one client decides, the rest are told
+[Sync(Authority.Predicted)] private float _boostRemaining;  // every client simulates, the owner corrects
+```
 
-**Chunking and transport** are already correct in `LateJoinerSync` (master-driven, `[UdonSynced]` string chunks, `SendCustomEventDelayedSeconds` pacing, timeout). No transport changes required.
+This exists because of the five CE0014 warnings recorded under *Verification status* below. Both roles
+produce the same wire behaviour — VRChat serializes only the owner's copy and overwrites everyone else's —
+so a non-owner write is either a silent desync or the entire point of the field, and no amount of flow
+analysis can tell which from the source alone. CE0014 had to assume desync, because that is the direction
+that reports a bug rather than hiding one, and on `NetVehicle`'s prediction that assumption was wrong five
+times.
 
-### A4 — Quantize / DeltaEncode honesty
+Declaring the role at the field replaces a guess with a statement, so each analyzer knows which rule it is
+enforcing rather than inferring one:
 
-**Approach:** implement Quantize properly (it's cheap, works with any `[UdonSynced]` float), mark DeltaEncode as hint-only (requires Manual sync + user cooperation for a correct implementation).
+- `Authority.Owner` keeps the strict CE0014 check: every write must sit on a path guarded by an ownership
+  check, or on a path that takes ownership first.
+- `Authority.Predicted` switches CE0014 off for the field — the unguarded write *is* the prediction — and
+  **nothing takes its place**. `Authority` records who may write the field, not where the local value came
+  from, and the claim that the owner republishes is taken on trust. CE0063 is a narrow backstop rather than
+  a replacement, and the temptation is to overstate it: it reports only when the declaring behaviour's sync
+  mode replicates nothing at all (`None` or `NoVariableSync`), which is the one shape where the prediction
+  is provably unreconcilable. `NetVehicle` is Manual, so CE0063 never examines the very fields that
+  motivated it. It does not attempt to prove that a Manual behaviour publishes from the owner. Failing to
+  *find* an owner-reachable `RequestSerialization()` is not evidence there is none —
+  `other.RequestSerialization()` from a manager behaviour serializes this one, an inspector-wired
+  `SendCustomEvent` is invisible to source analysis, and an ungated call in `Update` runs on the owner
+  every frame. An analyzer built to remove five false positives cannot be allowed to invent new ones;
+  CE0015 covers the common unpublished case from the other side, and the rest is review.
+- Bare `[UdonSynced]` is untouched: it keeps the inference CE0014 has always used, and CE0063 only ever
+  looks at fields that declared an authority. Upstream sync behaviour does not change.
 
-**Quantize:**
+**Breaking change.** `Authority` is positional and required, so `[Sync]`, `[Sync(InterpolationMode.Linear)]`
+and `[Sync(Quantize = 0.1f)]` no longer compile. `Authority.Owner` is the behaviour-preserving migration for
+all three; interpolation moved to the second positional argument, or to a named one.
 
-- Add a compiler pass: for any field with `[Sync(Quantize = Q)]`, inject a pre-serialize quantizer into the behaviour's `OnPreSerialization` override (create one if missing; chain to user's if present). For float: `field = Mathf.Round(field / Q) * Q;`. For Vector3: component-wise. Saves no bytes at the VRChat network layer (they don't expose sub-byte packing), but it **does** shrink the effective precision so downstream compression/delta-on-same-value skips become possible, and — more importantly — it matches the documented contract.
-- The quantize and SyncOnJoin emitters must classify field types from Roslyn semantic symbols, not `TypeSyntax.ToString()`, so aliases like `using Vec = UnityEngine.Vector3;` still receive generated code.
-- Files: NEW `Packages/com.merlin.UdonSharp/Editor/CE/Optimizers/QuantizePreSerializeEmitter.cs`; reference `SyncAttribute` from runtime.
+### Known limits (VRChat, not CE)
 
-**DeltaEncode:**
+- All synced UdonBehaviours on one GameObject share a single sync method. An interpolated
+  `[Sync(Authority.Owner, InterpolationMode.Smooth)] Vector3` (needs Continuous) and a `[SyncOnJoin]`
+  payload (needs Manual) cannot coexist on one GameObject. This is scene composition and no compile-time
+  analyzer can see it.
+- Cross-*behaviour* late-join ordering is not achievable — VRChat delivers each behaviour's
+  deserialization independently. `[SyncOnJoin(Priority)]` therefore orders fields *within one payload*,
+  which since groups landed means within one `Group`. Two groups are two synced variables and may arrive
+  in either order. Express any dependency that has to hold as data, not ordering, or keep both fields in
+  one group.
 
-- Rename runtime property to `DeltaEncodeHint` with `[Obsolete("DeltaEncode is a bandwidth-estimator hint only; VRChat does not support true delta sync. Use Manual sync + a custom serializer for real delta encoding.", false)]` on the old name so existing code compiles with a warning.
-- Update `SyncFieldAnalyzer.cs` to emit CE0013: "DeltaEncode is advisory; set `UdonBehaviourSyncMode(Manual)` and use `RequestSerialization()` after changing specific indices for real delta sync."
-- Update `UDONSHARP_CE_FEATURES.md` to state this plainly.
+## Verification status
 
-### A5 — ClearCache thread-safety and ordering
+**Verified in-editor (2026-08-18)**
 
-**Approach:** low-risk hardening.
+- **Compile gate green.** Full C# compile clean; `UdonSharpCompilerV1.CompileSync` reports **0 errors,
+  5 warnings**, and **32/32** program assets emit a program. Getting here took three real fixes: a missed
+  second call site of the binder change, a `DiagnosticSeverity` ambiguity in the async transformer, and
+  `VRC.Udon.Common.dll` missing from the test assembly's `overrideReferences` whitelist.
+- **`CEShowcase.Tests`: 54/54 passing** (was 29–30 two sessions ago, 47/47 before `Group` landed; 7 more
+  tests added with it).
+- **`SyncOnJoin.Group` isolates payloads, proven on two Udon heaps.** Writing a field in one group leaves
+  every other group's synced string byte-identical, and a delivery carrying one group applies that group,
+  sets that group's applied-guard, and leaves the rest untouched — through the author's own
+  `OnDeserialization`, not the generated trigger.
+- **Whole-project sync sweep**, read off the *emitted programs* rather than source:
+  `manualWithZeroSynced` **2 → 0** (`NetBall` and `NetVehicle` previously declared Manual and synced
+  nothing at all), `arraysUnderContinuousOrAny` **0**, and **2** live `_CE_SyncOnJoinPayload` synced strings.
+- **`[SyncOnJoin]` round-trips as Udon.** Owner captures `{"_worldSeed":987654}`, the remote receives it
+  through the real `OnDeserialization` event on a genuinely separate Udon heap, and the field lands.
+- **Scene/prefab audit clean.** 64 scene UdonBehaviours, 0 missing `programSource`/`serializedProgramAsset`,
+  0 sync-mode mismatches against their program assets, 0 disabled behaviour hosts. Prefabs are Manual.
+- **Console clean of the UniTask GUID flood** (0 hits), so real diagnostics are visible again.
 
-- Wrap `_variableTypeLookup` access in a private `lock (_sync)` in all three methods (`ClearCache`, `GetElementType`, constructor). Unity's editor is mostly single-threaded but CE optimizer passes already run on background threads (confirmed earlier in explore).
-- Keep the field-definition snapshot and cache publish under that same lock (or add a generation check) so `ClearCache()` cannot invalidate the cache and then have stale definitions written back immediately afterward.
-- Add a domain-reload assertion: `[InitializeOnLoadMethod]` that checks `_variableTypeLookup.Count == 0` at load and logs a warning if not (means a reference survived reload unexpectedly).
+The 5 remaining warnings were all CE0014 on `NetVehicle`. **This entry previously called them "honest".
+That was wrong, and correcting it is what *Declared sync authority* above exists for.** `ApplyInput` and its
+helpers write `_boostRemaining`/`_jumpTimer` during per-client prediction; VRChat discards those writes on
+non-owners and the next deserialization corrects them — which is not the bug CE0014 describes, it is
+predict-and-reconcile working as designed. CE0014 flagged them because nothing in the source distinguished
+a prediction from a desync, so it assumed the worse of the two. Five warnings on correct code is a false
+positive, and the remedy is a declaration at the field, not a rewrite of the vehicle.
 
-**Files:**
+Those two fields are now `[Sync(Authority.Predicted)]` (as is `_ownerPlayerId`, for the separate
+reason that every client latches it from the `AssignDriver` broadcast). That exempts them from
+CE0014 and puts nothing equivalent in its place: `NetVehicle` is Manual, and CE0063 only ever
+reports a behaviour whose sync mode replicates nothing at all. **The post-change warning count has
+not been re-measured in the editor**; treat "0 errors, 5 warnings" above as the pre-change number
+until a compile says otherwise.
 
-- MODIFY: `Packages/com.merlin.UdonSharp/Editor/Serialization/StorageInterfaces/UdonVariableStorageInterface.cs:106-136`.
+**A false alarm, recorded so it is not rediscovered**
 
----
+Mid-session this file nearly gained a "critical: `[SyncOnJoin]` never applies" entry. It was wrong, and the
+way it was wrong is worth keeping: an editor harness that builds `UdonBehaviour`s by hand leaves
+`_hasDoneStart` false, and `UdonBehaviour.RunEvent<T0>` forwards `canRunBeforeStart: false` — so
+`OnDeserialization(DeserializationResult)` returns before entering the program. That is indistinguishable
+from generated glue that was never wired up. `SendCustomEvent("_onDeserialization")` worked the whole time.
+Any future harness must set `_hasDoneStart`; `UdonSyncHarness` now does, with a comment saying why.
 
-## Critical Files
+**A second editor-only trap, same shape**
 
-Existing — read before modifying:
+`_CE_SyncOnJoin_RequestCapture` opens with `Networking.IsOwner(Networking.LocalPlayer, gameObject)`, and
+the Udon EXTERN behind that call cannot run in EditMode: it fails with *"DontDestroyOnLoad can only be
+used in play mode"*, which halts the behaviour before any payload is written. From the outside that looks
+exactly like capture not being wired up — empty payloads, no `RequestSerialization`. It is the ownership
+extern, not the glue. EditMode tests therefore drive capture per group via
+`SendCustomEvent("_CE_SyncOnJoin_Serialize<group>")`, which has no gate, and cover the gate's own change
+detection by running the same generated method as plain .NET.
 
-- `Packages/com.merlin.UdonSharp/Editor/Compiler/Binder/Symbols/FieldSymbol.cs` (line 61: `SyncMode`)
-- `Packages/com.merlin.UdonSharp/Editor/Compiler/UdonSharpCompilerV1.cs` (lines 286, 913, 1143; optimizer integration around 1164–1221)
-- `Packages/com.merlin.UdonSharp/Runtime/Libraries/CE/Net/SyncAttribute.cs`
-- `Packages/com.merlin.UdonSharp/Runtime/Libraries/CE/Net/SyncOnJoinAttribute.cs`
-- `Packages/com.merlin.UdonSharp/Runtime/Libraries/CE/Net/LateJoinerSync.cs` (serialize/apply paths now call generated glue through Udon program variables)
-- `Packages/com.merlin.UdonSharp/Editor/Serialization/StorageInterfaces/UdonVariableStorageInterface.cs`
-- `Packages/com.merlin.UdonSharp/Editor/CE/Net/SyncFieldAnalyzer.cs`
-- `Packages/com.merlin.UdonSharp/Editor/Compiler/CompileTimeOptimizerRegistry.cs` (pattern to mirror for new emitters)
+**The first build attempt failed, and it was nothing to do with sync**
 
-New files to create:
+`Build & Test` aborted with `BuilderException: Failed to build the World`. The cause is three lines
+further up in the Editor log, not in the console: the `AssignSceneNetworkIDs` preprocess callback
+returned false with *"Failed to assign network IDs, 3 errors encountered!"*, and VRChat aborts the build
+whenever an `IVRCSDKPreprocessSceneCallback` reports failure.
 
-- `Packages/com.merlin.UdonSharp/Editor/CE/Optimizers/SyncOnJoinGlueEmitter.cs`
-- `Packages/com.merlin.UdonSharp/Editor/CE/Optimizers/QuantizePreSerializeEmitter.cs`
-- `Packages/com.merlin.UdonSharp/Editor/CE/DevTools/Validation/Validators/SyncOnJoinSceneValidator.cs`
-- Tests (see below)
+The three were `IncompatibleTypes` on network IDs 18/19/20 — `ScoreButton_10`, `ScoreButton_100`,
+`ScoreButton_50`. Each stored `NetworkIDPair` recorded **two** `VRC.Udon.UdonBehaviour` entries while the
+GameObject now carries **one**, left over from when those objects had a duplicate behaviour. Repairing
+those three uncovered a fourth the SDK had never got far enough to report: an `InvalidObject` entry at ID
+64 whose GameObject no longer exists.
 
-Existing optimizer utilities to reuse:
+This is pre-existing and unrelated to `[SyncOnJoin]`. It blocked *any* build of this scene, and it went
+unnoticed because this project had never been built — the checks that were run all predate the preprocess
+stage. Fixed by rewriting the three stale type lists to match reality and letting
+`NetworkIDAssignment.ConfigureNetworkIDs` drop the dangling entry, rather than by regenerating all 65 IDs,
+so every existing object keeps the ID it had. `OnPreprocessScene` now returns true from a clean disk
+reload and makes no further changes; the objects added this session hold IDs 66-68 and 73-74.
 
-- Look at `Editor/CE/Optimizers/AsyncMethodTransformOptimizer.cs` and `Editor/CE/Optimizers/TinyMethodInliningOptimizer.cs` for the `ICECompileTimeOptimizer` contract and syntax-tree rewriter patterns — both emitters should be straight `CSharpSyntaxRewriter` passes.
+Worth knowing for next time: the console shows the CE0014 warnings and a `BuilderException`, but the
+actual reason is only in `%LOCALAPPDATA%/Unity/Editor/Editor.log`, and the console's own USCE0001 entries
+are test noise from `CESourceGeneratorContractTests.SuppressedGenerator_TripsTheTripwire`, which trips
+that tripwire on purpose.
 
-## Verification Plan
+**Still not verified, and not verifiable from the editor**
 
-**Unit tests (`Packages/com.merlin.UdonSharp/Tests~/`):**
+A live two-client smoke test: that a late joiner receives prior `[SyncOnJoin]` state, and that state
+authored by a **non-master** client reaches a late joiner — the direct test of the authority bug this
+rewrite exists to fix. Also true wire byte counts, size-proportional rate limiting, `Networking.IsClogged`
+behaviour, non-owner write discard, and the bandwidth `Group` is supposed to save: the editor proves one
+group's payload stops being rewritten, not that VRChat then stops putting it on the wire. ClientSim substitutes for the codec and for the
+player/ownership statics, not for the transport: its remote players have no second Udon heap
+(`ClientSimSyncedObjectManager.cs` says so in its own TODOs).
 
-1. `Tests~/CE/Net/SyncAttributeIntegrationTests.cs`
-   - Define behaviour with `[Sync(InterpolationMode.Linear)] Vector3 pos;`. Compile. Assert the resulting program has a synced heap slot with `UdonSyncMode.Linear`.
-   - Define with `BehaviourSyncMode.Manual` + `[Sync(InterpolationMode.Linear)]` — assert compile error (existing check now fires for CE).
-   - Define with invalid sync type (e.g. `[Sync] UnityEngine.Object o;`) — assert compile error.
-2. `Tests~/CE/Net/SyncOnJoinEmitterTests.cs`
-   - Compile behaviour with `[SyncOnJoin] int gamePhase; [SyncOnJoin] bool[] completed;`. Introspect the emitted syntax tree; assert `_CE_SyncOnJoin_Serialize` / `_CE_SyncOnJoin_Deserialize` exist and have correct bodies.
-   - Round-trip: run Serialize → pass string → Deserialize on a fresh instance → assert field equality.
-3. `Tests~/CE/Net/QuantizeEmitterTests.cs`
-   - `[Sync(Quantize = 0.1f)] float value = 0.1234f;` → after `OnPreSerialization`, assert `value == 0.1f`.
-4. `Tests~/CE/Serialization/UdonVariableStorageInterfaceThreadTests.cs`
-   - Hammer `ClearCache()` and `GetElementType()` from parallel tasks; assert no exception and no deadlock.
+Do not mark this work "verified in game" until that smoke test has been run.
 
-**Integration tests (`Assets/Scripts/CEShowcase/Tests/`):** 5. `LateJoinerSyncClientSimTest.cs` — use ClientSim's multi-client to simulate: master sets state, second client joins, assert the joiner's fields match after `LateJoinerSyncStatus.Complete`.
+## The two-client smoke test
 
-**Manual smoke tests:** 6. Open `Assets/IntegrationTestScene.unity` (already in repo, untracked). Build and run in ClientSim with two simulated clients. Verify a `[Sync]` Vector3 interpolates, a `[SyncOnJoin]` game phase restores on late-join, and no warnings fire in the console.
+The scene now carries a subject and a readout for this, so the test is runnable rather than aspirational.
 
-**Regression guard:** 7. Run existing `Tests~/` suite end-to-end — sync-compatibility tests (if any) must still pass on plain `[UdonSynced]`, since the fix is purely additive.
+**What was added** (Station 6, because it is the only station whose `[SyncOnJoin]` state already has a
+working in-world readout):
 
----
+- `Station6_Procgen/SyncGroupProbe` — `SyncGroupDemo`, which mixes the two shapes `Group` separates: a
+  256-int `cold` snapshot, a one-int `hot` counter, and an ungrouped label. Its emitted program carries
+  three synced payloads: `_CE_SyncOnJoinPayload`, `_CE_SyncOnJoinPayload_cold`,
+  `_CE_SyncOnJoinPayload_hot`. It publishes with `SendCustomEvent("_CE_SyncOnJoin_RequestCapture")`, not
+  `RequestSerialization()`, so the change gate is what decides whether anything is sent.
+- `Btn_BumpCold` / `Btn_BumpHot` / `Btn_BumpLabel` at local x 6.5 / 8.0 / 9.5, continuing the station's
+  existing button row.
+- `Station6_Procgen/UI/SyncGroupPanel` + `SyncGroupReadoutHost` — `SyncGroupReadout` reads each group's
+  payload and applied-guard off the probe through `UdonBehaviour.GetProgramVariable` (the only way in;
+  generated members are invisible to Unity-compiled C#) and shows per-group length, prefix, applied
+  state, and a change counter.
 
-## Out of Scope (explicitly deferred to later sessions)
+**Setup trap.** Every station is hidden at world load. Activate station 6 with
+`CentralHub/StationButton_Procgen` — *not* `StationButton_6`, which is wired to the RocketLeague
+teleport. Station 6 is at world x≈42.7. `_stationActive` is plain `[UdonSynced]`, so a second client
+should find station 6 already visible; if it does not, ordinary manual-sync late-join is broken and no
+`[SyncOnJoin]` result below means anything.
 
-- B1–B5 (optimizer safety): silent exception swallowing, unsafe caching, synced-field-aware inlining. Will cause issues independent of sync pipeline; flagged for next session.
-- C1–C5 (runtime placeholders): `await` scheduling, `CEPersistence.Save/Restore`, `WhenAll/WhenAny`, pool recycle of synced fields.
-- Tooling honesty updates (`UDONSHARP_CE_FEATURES.md` sweep, `[Obsolete]` annotations on unfixed placeholders).
-- Full `BandwidthEstimator.cs` accuracy audit.
+**Test A — late-join delivery.** Client 1 joins, activates station 6, presses `Btn_SetSeed` until
+SeedPanel reads 1337 (use `Btn_SetSeed`, whose presets are deterministic, not `Btn_ChangeSeed`, which
+uses server time). Client 2 joins. PASS: station 6 already visible, SeedPanel reads 1337, terrain matches.
+FAIL: 12345, the compiled default.
 
-These are all real flaws, but splitting them into separate sessions keeps each change reviewable and testable.
+**Test B — non-master authorship.** This is the direct test of the authority bug the rewrite exists to
+fix. Clients 1 and 2 in world; client 2, *not* the master, drives `Btn_SetSeed` to 9001 — `OnSetSeed`
+takes ownership first, so client 2 becomes the owner. Confirm client 1 updates. Client 3 joins: PASS is
+9001. FAIL is 12345, or the master's earlier value, which is the old master-only capture resurfacing.
+Hard variant worth running: client 2 leaves before client 3 joins, so ownership has moved on.
+
+**Test C — per-group isolation.** Clients 1 and 2 at station 6, both reading `SyncGroupPanel`. Client 1
+presses `Btn_BumpCold` once, then `Btn_BumpHot` ten times. PASS on client 2: the `hot` line's change
+counter advances ten times while `cold`'s advances exactly once and its length and prefix stay put after
+that first bump; the `default` line never moves. FAIL: `cold` tracks `hot`.
+
+**What this closes, and what it does not.** Passing A, B and C closes late-join delivery, non-master
+authorship, and per-group payload/guard isolation. It closes none of: wire byte counts, size-proportional
+rate limiting, `Networking.IsClogged`, or non-owner write discard. Record the `Group` result as two
+separate lines — *per-group payload/guard isolation: verified in game*, and *per-group wire bandwidth:
+still unverified*. `RequestSerialization()` publishes the behaviour's whole synced set, and nothing in
+this project can count what VRChat actually sends. To close the second line, temporarily add
+`OnPostSerialization(SerializationResult)` logging `byteCount` to the probe and bump only the hot group:
+if `byteCount` still carries the cold group's bytes, `Group` buys isolation and CPU locality but no wire
+bytes.
+
+**Do not use `LateJoinSimulator` for any of this.** It reflects over the Unity-compiled C# proxy, which
+contains none of the `_CE_SyncOnJoin*` members, and it only looks at fields carrying `[UdonSynced]` —
+`SyncOnJoinAttribute` does not derive from it. Its "100% coverage" is a statement about proxy field
+assignment, not about sync.
+
+**Failure modes worth watching**, all pre-existing to the design rather than introduced by `Group`: a
+deserialization landing before the behaviour's first `ManagedUpdate` is dropped by Udon with no retry,
+and the change gate means nothing re-sends it in a quiet world; a serialization VRChat drops is never
+retried, because the payload was written locally before the send; and a client that never applied a
+payload republishes its own defaults if ownership lands on it — with groups that reverts one group,
+which reads as corruption rather than a reset.
+
+## Remaining work
+
+- ~~**`NetVehicle` prediction**~~ — **built differently, 2026-08-20. Do not build the mirror fields.** The
+  prescription here was to predict into unsynced mirror fields and publish from the owner. That was not
+  done: it doubles the vehicle's state to silence a warning that was itself wrong, and it deletes the check
+  instead of teaching it. What landed is *Declared sync authority* above — `_ownerPlayerId`,
+  `_boostRemaining` and `_jumpTimer` are `[Sync(Authority.Predicted)]`, `_airStateFlags` stays
+  `[Sync(Authority.Owner)]` because its only write is in `OnPreSerialization`. `NetVehicle` is Manual, so
+  CE0063 does not apply to it at all; the owner-side publish cadence is the part CE0063 deliberately does
+  not check, and it stays a review item. Still open on this line: re-measure the warning count against a
+  real compile rather than assuming it went to zero.
+- **`Tests~/CE`** — superseded and documented as never-run (see its README), but not deleted: those files
+  are untracked, so deleting them before a commit would be unrecoverable. Delete after committing.
+- **Two-client smoke test**, as above. Everything it needs is in the scene; it needs two accounts.
+- **`CESyncRuntimeTests.asmdef` is not editor-only** (`includePlatforms: []`), so its six U# fixtures are
+  parsed and run through the CE source generators on every world build. They produce no shipped Udon
+  program, because a behaviour only becomes one when a `UdonSharpProgramAsset` exists and none is
+  committed for them — the cost is build time and diagnostic surface, not world content. Adding
+  `"includePlatforms": ["Editor"]` was tried and reverted: it fails 7 tests, because
+  `UdonSharpEditorUtility.GetUdonSharpProgramAsset` returns null for a behaviour in an Editor-only U#
+  assembly and `CreateProgramAssetForBehaviourType` then throws `ArgumentNullException: key`. Fixing it
+  properly means teaching program-asset creation about editor-only U# assemblies.
+- **13 orphaned compiled programs** (~65 KB) sit in the gitignored `Assets/SerializedUdonPrograms` from
+  test runs before the TearDown cleanup existed. Unreferenced, never shipped, safe to delete by hand; new
+  runs no longer add to them.
