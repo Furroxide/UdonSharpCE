@@ -1,0 +1,31 @@
+{
+    "name": "UdonSharp.CE.Tests",
+    "references": [
+        "UdonSharp.CE.Editor",
+        "UdonSharp.CE.Runtime",
+        "UdonSharp.Editor",
+        "UdonSharp.Runtime",
+        "UdonSharp.Tests",
+        "VRC.Udon"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "Microsoft.CodeAnalysis.dll",
+        "Microsoft.CodeAnalysis.CSharp.dll",
+        "System.Collections.Immutable.dll",
+        "VRCSDKBase.dll",
+        "VRCSDK3.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false,
+    "optionalUnityReferences": [
+        "TestAssemblies"
+    ]
+}

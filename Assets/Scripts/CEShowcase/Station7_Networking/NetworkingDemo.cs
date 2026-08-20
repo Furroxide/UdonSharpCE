@@ -11,7 +11,7 @@ namespace CEShowcase.Station7_Networking
     /// Station 7: Networking Demo - Demonstrates CE.Net features for multiplayer synchronization.
     /// 
     /// This showcases:
-    /// - [Sync] attribute for variable synchronization with interpolation
+    /// - [Sync(Authority...)] attribute for variable synchronization with declared write authority
     /// - [Rpc] attribute for network method calls
     /// - RateLimiter for bandwidth management
     /// - Owner-based authority patterns
@@ -23,16 +23,22 @@ namespace CEShowcase.Station7_Networking
     [UdonBehaviourSyncMode(BehaviourSyncMode.Manual)]
     public class NetworkingDemo : UdonSharpBehaviour
     {
+        // All three are Authority.Owner: this station exists to demonstrate owner-based authority, and
+        // every mutator below refuses to run unless _isOwner (or takes ownership first). Declaring that
+        // at the field is what keeps CE0014 checking it, so a future mutator that forgets the guard is
+        // reported instead of quietly writing a value only the local client will ever see.
         [Header("Synced State")]
-        // In a full CE implementation, these would use [Sync]:
-        // [Sync(InterpolationMode.Linear)]
-        [UdonSynced] private int _syncedScore;
+        [Sync(Authority.Owner)]
+        private int _syncedScore;
         
-        // [Sync(InterpolationMode.Smooth)]
-        [UdonSynced] private Vector3 _syncedPosition;
+        // No interpolation: VRChat only supports Linear/Smooth on Continuous-sync behaviours, and this
+        // behaviour must be Manual because it also syncs a string and a [SyncOnJoin] payload. Declaring
+        // Smooth here is a hard compile error that aborts emit for the entire project.
+        [Sync(Authority.Owner)]
+        private Vector3 _syncedPosition;
         
-        // [Sync]
-        [UdonSynced] private string _syncedMessage;
+        [Sync(Authority.Owner)]
+        private string _syncedMessage;
         
         [Header("Interactive Object")]
         [SerializeField] private Transform _movableObject;
@@ -69,7 +75,10 @@ namespace CEShowcase.Station7_Networking
         private RateLimiter _positionLimiter;
         
         // State
-        private string[] _messageLog;
+        [SyncOnJoin(Priority = 20)]
+        private string[] _messageLog = new string[MAX_MESSAGES];
+
+        [SyncOnJoin(Priority = 21)]
         private int _messageCount;
         private const int MAX_MESSAGES = 10;
         
@@ -84,6 +93,11 @@ namespace CEShowcase.Station7_Networking
         private bool _isOwner;
         private int _localPlayerId;
         private string _localPlayerName;
+
+        // Ownership tint, eased in Update via a cached property block
+        private MaterialPropertyBlock _objectPropertyBlock;
+        private Color _objectColor = new Color(0.9f, 0.3f, 0.25f);
+        private Color _objectTargetColor = new Color(0.9f, 0.3f, 0.25f);
         
         void Start()
         {
@@ -136,8 +150,19 @@ namespace CEShowcase.Station7_Networking
                     Time.deltaTime * 10f
                 );
             }
-            
+
+            // Ease the ownership tint instead of snapping when ownership transfers
+            if (_objectRenderer != null)
+            {
+                if (_objectPropertyBlock == null) _objectPropertyBlock = new MaterialPropertyBlock();
+                _objectColor = Color.Lerp(_objectColor, _objectTargetColor, Time.deltaTime * 8f);
+                _objectRenderer.GetPropertyBlock(_objectPropertyBlock);
+                _objectPropertyBlock.SetColor("_Color", _objectColor);
+                _objectRenderer.SetPropertyBlock(_objectPropertyBlock);
+            }
+
             UpdateDisplay();
+            UpdateMessagesText();
         }
         
         // ========================================
@@ -178,8 +203,23 @@ namespace CEShowcase.Station7_Networking
         }
         
         /// <summary>
+        /// Claims write authority. VRChat silently discards writes to synced variables from non-owners,
+        /// so every synced write in this behaviour must be gated on this returning true.
+        /// </summary>
+        private bool TakeOwnership()
+        {
+            VRCPlayerApi localPlayer = Networking.LocalPlayer;
+            if (localPlayer == null || !localPlayer.IsValid())
+                return false;
+
+            if (!Networking.IsOwner(localPlayer, gameObject))
+                Networking.SetOwner(localPlayer, gameObject);
+
+            return Networking.IsOwner(localPlayer, gameObject);
+        }
+
+        /// <summary>
         /// Updates the object position (owner only).
-        /// Demonstrates [Sync] with interpolation.
         /// </summary>
         public void OnMoveObject(Vector3 direction)
         {
@@ -240,11 +280,19 @@ namespace CEShowcase.Station7_Networking
                 return;
             }
             
+            if (!TakeOwnership())
+            {
+                CELogger.Warning("Networking", "Could not take ownership; chat message not sent.");
+                return;
+            }
+
             string message = $"Hello from {_localPlayerName}!";
             _syncedMessage = message;
-            
-            // In CE, this would be decorated with [Rpc]:
-            // [Rpc(Target = RpcTarget.All, RateLimit = 2f)]
+
+            // Publish the text before announcing it. Without this the remotes run ReceiveChatMessage and
+            // read their own stale _syncedMessage, so the message never crosses the wire.
+            RequestSerialization();
+
             SendCustomNetworkEvent(NetworkEventTarget.All, nameof(ReceiveChatMessage));
             
             _rpcSentCount++;
@@ -254,6 +302,7 @@ namespace CEShowcase.Station7_Networking
         /// <summary>
         /// Network callback for chat messages.
         /// </summary>
+        [Rpc(RpcTarget.All, RateLimit = 2f)]
         public void ReceiveChatMessage()
         {
             _rpcReceivedCount++;
@@ -283,7 +332,6 @@ namespace CEShowcase.Station7_Networking
                 return;
             }
             
-            // [Rpc(Target = RpcTarget.All, RateLimit = 5f)]
             SendCustomNetworkEvent(NetworkEventTarget.All, nameof(ReceivePlaySound));
             
             _rpcSentCount++;
@@ -292,6 +340,7 @@ namespace CEShowcase.Station7_Networking
         /// <summary>
         /// Network callback for sound effects.
         /// </summary>
+        [Rpc(RpcTarget.All, RateLimit = 5f)]
         public void ReceivePlaySound()
         {
             _rpcReceivedCount++;
@@ -332,6 +381,7 @@ namespace CEShowcase.Station7_Networking
             CELogger.Info("Networking", "Object reset by owner");
         }
         
+        [Rpc(RpcTarget.All, RateLimit = 2f, OwnerOnly = true)]
         public void ReceiveReset()
         {
             _rpcReceivedCount++;
@@ -378,15 +428,8 @@ namespace CEShowcase.Station7_Networking
         
         private void UpdateObjectVisuals()
         {
-            if (_objectRenderer == null) return;
-            
-            // Color based on ownership
-            Color color = _isOwner ? new Color(0.3f, 0.8f, 0.3f) : new Color(0.8f, 0.3f, 0.3f);
-            
-            MaterialPropertyBlock block = new MaterialPropertyBlock();
-            _objectRenderer.GetPropertyBlock(block);
-            block.SetColor("_Color", color);
-            _objectRenderer.SetPropertyBlock(block);
+            // Update() eases the actual tint toward this target with a cached property block
+            _objectTargetColor = _isOwner ? new Color(0.2f, 0.85f, 0.45f) : new Color(0.9f, 0.3f, 0.25f);
         }
         
         private void AddMessage(string message)
@@ -513,4 +556,3 @@ namespace CEShowcase.Station7_Networking
         }
     }
 }
-
