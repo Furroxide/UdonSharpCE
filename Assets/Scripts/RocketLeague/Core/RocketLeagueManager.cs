@@ -3,6 +3,7 @@ using UdonSharp;
 using UdonSharp.CE.NetPhysics;
 using UnityEngine;
 using VRC.SDKBase;
+using VRC.Udon.Common;
 
 namespace RocketLeague
 {
@@ -64,22 +65,64 @@ namespace RocketLeague
         public GameState State => (GameState)_state;
         public int LastScoringTeam => _lastScoringTeam;
 
+        // Match state changes are meaningful at a few Hz, not per frame.
+        private const float SerializeInterval = 0.25f;
+        private float _lastSerializeTime;
+
         private void Start()
         {
             _initialized = true;
-            _matchTimeRemaining = MatchDuration;
-            _state = (int)GameState.Lobby;
 
             if (BlueGoal != null) BlueGoal.Manager = this;
             if (OrangeGoal != null) OrangeGoal.Manager = this;
+
+            // Only the owner may seed the match state. This previously ran on every client, so every
+            // non-owner overwrote its local copy of synced fields with lobby defaults on join -- which
+            // then flickered back as soon as the real state arrived.
+            if (!EnsureOwnership())
+                return;
+
+            _matchTimeRemaining = MatchDuration;
+            _state = (int)GameState.Lobby;
+            RequestMatchSerialization();
         }
 
         private void Update()
         {
-            if (!Networking.IsMaster)
+            // Gate on ownership, not on IsMaster. VRChat discards writes to synced variables from
+            // non-owners, so a master that does not own this object was silently writing into the void
+            // while the real owner never wrote at all.
+            if (!Networking.IsOwner(Networking.LocalPlayer, gameObject))
                 return;
 
             UpdateGameState();
+        }
+
+        /// <summary>
+        /// The match state is instance-wide, so the master claims it. Ownership -- not master status --
+        /// is what actually grants the right to write synced variables.
+        /// </summary>
+        private bool EnsureOwnership()
+        {
+            VRCPlayerApi localPlayer = Networking.LocalPlayer;
+            if (localPlayer == null)
+                return false;
+
+            if (Networking.IsOwner(localPlayer, gameObject))
+                return true;
+
+            if (!Networking.IsMaster)
+                return false;
+
+            Networking.SetOwner(localPlayer, gameObject);
+            return Networking.IsOwner(localPlayer, gameObject);
+        }
+
+        public override void OnMasterTransferred(VRCPlayerApi newMaster)
+        {
+            // Without this, a master handover leaves the match clock owned by a player who has left.
+            if (newMaster != null && newMaster.isLocal)
+                EnsureOwnership();
         }
 
         private void UpdateGameState()
@@ -125,7 +168,35 @@ namespace RocketLeague
                     break;
             }
 
+            // Rate-gated. This used to run unconditionally at the end of a per-frame Update, i.e. ~90
+            // serialization requests/second of six fields even while sitting in the lobby, against a
+            // world-wide ~11 KB/s Udon budget shared with every other synced object.
+            if (Time.time - _lastSerializeTime < SerializeInterval)
+                return;
+
+            RequestMatchSerialization();
+        }
+
+        /// <summary>
+        /// Single funnel for every synced write in this behaviour. Stamping the clock here -- rather than
+        /// only in Update -- means the event-driven paths (goal, countdown, kickoff, reset) count against
+        /// the same budget instead of slipping past the rate gate that Update carefully respects.
+        /// </summary>
+        private void RequestMatchSerialization()
+        {
+            _lastSerializeTime = Time.time;
             RequestSerialization();
+        }
+
+        public override void OnPostSerialization(SerializationResult result)
+        {
+            // Failures were previously invisible: no OnPostSerialization meant a clogged network silently
+            // stopped the scoreboard updating with nothing in the log.
+            if (!result.success)
+            {
+                _lastSerializeTime = 0f;
+                Debug.LogWarning($"[RocketLeague] Match state serialization failed ({result.byteCount} bytes); will retry.");
+            }
         }
 
         /// <summary>
@@ -133,7 +204,9 @@ namespace RocketLeague
         /// </summary>
         public void StartMatch()
         {
-            if (!Networking.IsMaster)
+            // EnsureOwnership, not IsMaster. Master status grants nothing on the wire: if any client owns
+            // this object, a master's writes below are silently discarded and the scoreboard never moves.
+            if (!EnsureOwnership())
                 return;
 
             _blueScore = 0;
@@ -148,7 +221,7 @@ namespace RocketLeague
         /// </summary>
         public void OnGoalScored(int scoringTeam)
         {
-            if (!Networking.IsMaster)
+            if (!EnsureOwnership())
                 return;
 
             if ((GameState)_state != GameState.Playing && (GameState)_state != GameState.Overtime)
@@ -179,7 +252,7 @@ namespace RocketLeague
                 _state = (int)GameState.GameOver;
             }
 
-            RequestSerialization();
+            RequestMatchSerialization();
             SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget.All, nameof(OnGoalScoredRemote));
         }
 
@@ -211,7 +284,7 @@ namespace RocketLeague
             ResetBallPosition();
             ResetPlayerPositions();
 
-            RequestSerialization();
+            RequestMatchSerialization();
             SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget.All, nameof(OnCountdownStartRemote));
         }
 
@@ -227,7 +300,7 @@ namespace RocketLeague
         private void StartPlaying()
         {
             _state = (int)GameState.Playing;
-            RequestSerialization();
+            RequestMatchSerialization();
 
             SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget.All, nameof(OnPlayingStartRemote));
         }
@@ -262,7 +335,7 @@ namespace RocketLeague
                 _state = (int)GameState.GameOver;
             }
 
-            RequestSerialization();
+            RequestMatchSerialization();
             SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget.All, nameof(OnMatchEndRemote));
         }
 
@@ -297,7 +370,7 @@ namespace RocketLeague
         /// </summary>
         public void ResetMatch()
         {
-            if (!Networking.IsMaster)
+            if (!EnsureOwnership())
                 return;
 
             _blueScore = 0;
@@ -307,7 +380,7 @@ namespace RocketLeague
 
             ResetBallPosition();
 
-            RequestSerialization();
+            RequestMatchSerialization();
         }
 
         public override void OnDeserialization()

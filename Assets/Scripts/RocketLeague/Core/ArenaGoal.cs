@@ -12,7 +12,11 @@ namespace RocketLeague
     /// Team 1 = Orange goal (when ball enters, Blue scores)
     /// </summary>
     [PublicAPI]
-    [UdonBehaviourSyncMode(BehaviourSyncMode.None)]
+    // NoVariableSync, not None: this behaviour has no synced variables, but it must still be able to
+    // receive SendCustomNetworkEvent so goal effects fire on every client. BehaviourSyncMode.None
+    // disables network events entirely, which is why goal light/particles/sound only ever played for
+    // the instance master.
+    [UdonBehaviourSyncMode(BehaviourSyncMode.NoVariableSync)]
     public class ArenaGoal : UdonSharpBehaviour
     {
         [Header("Configuration")]
@@ -78,14 +82,25 @@ namespace RocketLeague
             if (ball == null)
                 return;
 
-            // Notify the manager
-            if (Manager != null)
-            {
-                Manager.OnGoalScored(Team);
-            }
+            if (Manager == null)
+                return;
 
-            // Trigger local effects
-            TriggerGoalEffects();
+            // Test the same condition RocketLeagueManager.OnGoalScored early-returns on, and test it
+            // before announcing anything. The ball keeps rolling through the goal mouth during the
+            // celebration and the kickoff countdown, and an unconditional broadcast turned each of those
+            // stray passes into a full horn/particles/light replay for the whole instance -- a glitch that
+            // used to be cosmetic and local to the master.
+            GameState state = Manager.State;
+            if (state != GameState.Playing && state != GameState.Overtime)
+                return;
+
+            Manager.OnGoalScored(Team);
+
+            // Broadcast instead of calling locally. Only the master ever reaches this line, so the direct
+            // call meant the light, the particles and the horn played for exactly one player in the
+            // instance while everyone else watched a silent, unlit goal. NetworkEventTarget.All includes
+            // the sender, so the master still sees its own effects.
+            SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget.All, nameof(TriggerGoalEffects));
         }
 
         /// <summary>

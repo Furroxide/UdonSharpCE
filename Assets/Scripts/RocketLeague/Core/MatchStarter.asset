@@ -20,7 +20,7 @@ MonoBehaviour:
   scriptVersion: 2
   compiledVersion: 2
   networkEntrypointMetadata: []
-  behaviourSyncMode: 1
+  behaviourSyncMode: 2
   hasInteractEvent: 1
   scriptID: 8459820223066951752
   serializationData:
@@ -228,7 +228,8 @@ MonoBehaviour:
       Data: 14|UnityEngine.TooltipAttribute, UnityEngine.CoreModule
     - Name: tooltip
       Entry: 1
-      Data: If true, interacting with this object starts the match (master only)
+      Data: If true, interacting with this object starts the match (non-masters ask
+        the master)
     - Name: 
       Entry: 8
       Data: 
