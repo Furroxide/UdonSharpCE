@@ -71,3 +71,6 @@ CE ships compile-time diagnostics (`CE0001`–`CE0063`). If you add or change on
    and the VPM listing is rebuilt from the published release.
 
 Pushing a `vx.y.z` tag instead publishes the release straight away, without a draft.
+
+If a **Publish Site** deploy fails, start a new Publish Site run from the Actions tab. Re-running the
+failed job cannot succeed: the run then holds two `github-pages` artifacts, and the deploy refuses both.

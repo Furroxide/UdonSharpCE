@@ -32,6 +32,7 @@ on:
 
 permissions:
   contents: read
+  actions: read # to see this run's own artifacts before deploying them
   pages: write
   id-token: write
 
@@ -83,6 +84,26 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
+
+      # The artifact list can lag the upload, and deploy-pages gives up on its first empty answer ("No
+      # artifacts named github-pages were found"), which failed the first listing rebuild chained off a
+      # release. Wait until the artifact is listed. Never fails the job by itself: if the list stays
+      # empty, deploy-pages reports the real error. Re-running a failed deploy job cannot help -- the run
+      # then holds two github-pages artifacts and deploy-pages refuses both -- so start a new run instead.
+      - name: Wait for the Pages artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in $(seq 1 12); do
+            count=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?name=github-pages" \
+              --jq '.total_count' 2>/dev/null || echo 0)
+            if [ "${count:-0}" -ge 1 ] 2>/dev/null; then
+              echo "github-pages artifact listed after ${attempt} check(s)"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::warning::github-pages artifact still not listed after 60 s; deploying anyway"
 
       - id: deployment
         uses: actions/deploy-pages@v4
