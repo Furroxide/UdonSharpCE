@@ -49,6 +49,12 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
         public bool IsUnknown { get; set; }
 
         /// <summary>
+        /// Whether the bytes above are only the part that could be counted: the field's length is not
+        /// known ahead of time, so its real cost is this or more.
+        /// </summary>
+        public bool IsLowerBound { get; set; }
+
+        /// <summary>
         /// Creates a fixed-size result.
         /// </summary>
         public static SizeResult Fixed(int bytes, string description)
@@ -77,6 +83,22 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
         }
 
         /// <summary>
+        /// Creates a result for a field whose length cannot be read: the bytes that are certain, flagged
+        /// as a floor so a total built from it is never presented as a measurement.
+        /// </summary>
+        public static SizeResult LowerBound(int knownBytes, string description)
+        {
+            return new SizeResult
+            {
+                MinBytes = knownBytes,
+                MaxBytes = knownBytes,
+                IsFixed = false,
+                IsLowerBound = true,
+                Description = description
+            };
+        }
+
+        /// <summary>
         /// Creates an unknown type result.
         /// </summary>
         public static SizeResult Unknown(string typeName)
@@ -93,6 +115,9 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
 
         public override string ToString()
         {
+            // '4-4B' for a field whose length is unknown reads as a four-byte field. It is at least four.
+            if (IsLowerBound)
+                return $">={MinBytes}B";
             if (IsFixed)
                 return $"{MaxBytes}B";
             return $"{MinBytes}-{MaxBytes}B";
@@ -133,6 +158,13 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
         /// Array length if known, -1 otherwise.
         /// </summary>
         public int ArrayLength { get; set; } = -1;
+
+        /// <summary>
+        /// Whether <see cref="Size"/> counts only part of what this field costs because its length is not
+        /// known ahead of time -- an unbounded string, or an array whose length could not be read. A
+        /// behaviour with one of these has a total that is a floor, not an estimate.
+        /// </summary>
+        public bool IsLowerBound => Size != null && Size.IsLowerBound;
 
         /// <summary>
         /// Whether the field has the [UdonSynced] attribute.
@@ -184,6 +216,14 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
         /// Suggested fix for the violation.
         /// </summary>
         public string Recommendation { get; set; }
+
+        /// <summary>
+        /// The behaviour a world-level violation was raised for, or null when it is about the world as a
+        /// whole. WorldAnalyzer copies each behaviour's errors up to the world list; without this a
+        /// consumer could only attribute them by reading the behaviour list a second time, which is how
+        /// the validator came to report every one of them twice.
+        /// </summary>
+        public Type BehaviourType { get; set; }
 
         /// <summary>
         /// Creates an error violation.
@@ -340,9 +380,9 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
         public int TotalSyncedFields { get; set; }
 
         /// <summary>
-        /// Percentage of the 11 KB/s network budget used.
+        /// Percentage of the network budget used.
         /// </summary>
-        public float BudgetPercentage => (TotalEstimatedBandwidthKBps / 11f) * 100f;
+        public float BudgetPercentage => (TotalEstimatedBandwidthKBps / WorldAnalyzer.NETWORK_BUDGET_KBPS) * 100f;
     }
 }
 

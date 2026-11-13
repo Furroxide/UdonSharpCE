@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using UdonSharp.Compiler;
 using UdonSharp.Compiler.Binder;
@@ -97,6 +98,9 @@ namespace UdonSharp.CE.Editor.Analyzers
 
                     if (methodName != null && GetComponentMethods.Contains(methodName))
                     {
+                        if (IsLazyCacheFill(invocation, methodSyntax))
+                            continue;
+
                         diagnostics.Add(AnalyzerDiagnostic.Warning(
                             invocation.GetLocation(),
                             $"'{methodName}' called in '{method.Name}'. " +
@@ -110,6 +114,114 @@ namespace UdonSharp.CE.Editor.Analyzers
             }
 
             return diagnostics;
+        }
+
+        /// <summary>
+        /// Whether the call only runs to fill an empty cache:
+        /// 'if (_renderer == null) _renderer = GetComponent&lt;Renderer&gt;();'.
+        ///
+        /// That line sits in Update and calls GetComponent, and it is the fix this diagnostic asks for
+        /// written lazily -- the lookup happens on the first frame and never again. Reporting it told the
+        /// author that a call which runs once "should not be called every frame", and the only way to make
+        /// the warning go away was to move correct code.
+        ///
+        /// The shape is matched narrowly on purpose. The result has to be assigned to a name, the
+        /// assignment has to sit in the body of an 'if' that tests that same name for being missing, and
+        /// the name must not be a local of the method: a local is empty again on every call, so a
+        /// null-checked local caches nothing.
+        /// </summary>
+        private bool IsLazyCacheFill(InvocationExpressionSyntax invocation, SyntaxNode methodSyntax)
+        {
+            AssignmentExpressionSyntax assignment = null;
+
+            for (SyntaxNode node = invocation.Parent; node != null && node != methodSyntax; node = node.Parent)
+            {
+                if (node is AssignmentExpressionSyntax candidate)
+                {
+                    if (candidate.IsKind(SyntaxKind.SimpleAssignmentExpression) && candidate.Right.Span.Contains(invocation.Span))
+                        assignment = candidate;
+
+                    break;
+                }
+
+                if (node is StatementSyntax)
+                    break;
+            }
+
+            string cacheName = GetSimpleName(assignment?.Left);
+            if (cacheName == null)
+                return false;
+
+            foreach (VariableDeclaratorSyntax local in methodSyntax.DescendantNodes().OfType<VariableDeclaratorSyntax>())
+            {
+                if (local.Identifier.Text == cacheName)
+                    return false;
+            }
+
+            for (SyntaxNode node = assignment.Parent; node != null && node != methodSyntax; node = node.Parent)
+            {
+                if (node is IfStatementSyntax ifStatement &&
+                    ifStatement.Statement.Span.Contains(assignment.Span) &&
+                    TestsForMissing(ifStatement.Condition, cacheName))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Whether a condition asks "is this reference empty": 'name == null', '!name', or
+        /// '!Utilities.IsValid(name)'.
+        /// </summary>
+        private bool TestsForMissing(ExpressionSyntax condition, string name)
+        {
+            foreach (SyntaxNode node in condition.DescendantNodesAndSelf())
+            {
+                if (node is BinaryExpressionSyntax comparison && comparison.IsKind(SyntaxKind.EqualsExpression))
+                {
+                    if (GetSimpleName(comparison.Left) == name && comparison.Right.IsKind(SyntaxKind.NullLiteralExpression))
+                        return true;
+
+                    if (GetSimpleName(comparison.Right) == name && comparison.Left.IsKind(SyntaxKind.NullLiteralExpression))
+                        return true;
+                }
+
+                if (node is PrefixUnaryExpressionSyntax negation && negation.IsKind(SyntaxKind.LogicalNotExpression))
+                {
+                    if (GetSimpleName(negation.Operand) == name)
+                        return true;
+
+                    if (negation.Operand is InvocationExpressionSyntax validity &&
+                        GetMethodName(validity) == "IsValid" &&
+                        validity.ArgumentList.Arguments.Count == 1 &&
+                        GetSimpleName(validity.ArgumentList.Arguments[0].Expression) == name)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// The name an expression refers to when it is 'name' or 'this.name', otherwise null.
+        /// </summary>
+        private static string GetSimpleName(ExpressionSyntax expression)
+        {
+            switch (expression)
+            {
+                case IdentifierNameSyntax identifier:
+                    return identifier.Identifier.Text;
+
+                case MemberAccessExpressionSyntax memberAccess when memberAccess.Expression is ThisExpressionSyntax:
+                    return memberAccess.Name.Identifier.Text;
+
+                default:
+                    return null;
+            }
         }
 
         /// <summary>

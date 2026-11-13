@@ -2,6 +2,7 @@ using JetBrains.Annotations;
 using UdonSharp;
 using UdonSharp.CE.NetPhysics;
 using UnityEngine;
+using VRC.SDK3.UdonNetworkCalling;
 using VRC.SDKBase;
 using VRC.Udon.Common;
 
@@ -56,8 +57,11 @@ namespace RocketLeague
         [UdonSynced] private float _stateTimer;
         [UdonSynced] private int _lastScoringTeam;
 
-        private GameState _localState = GameState.Lobby;
-        private bool _initialized;
+        // What ApplyStateToHud last drew, so a call that changes nothing costs a few comparisons.
+        private int _hudState = -1;
+        private int _hudBlueScore = -1;
+        private int _hudOrangeScore = -1;
+        private int _hudSeconds = -1;
 
         public int BlueScore => _blueScore;
         public int OrangeScore => _orangeScore;
@@ -71,20 +75,23 @@ namespace RocketLeague
 
         private void Start()
         {
-            _initialized = true;
-
             if (BlueGoal != null) BlueGoal.Manager = this;
             if (OrangeGoal != null) OrangeGoal.Manager = this;
 
             // Only the owner may seed the match state. This previously ran on every client, so every
             // non-owner overwrote its local copy of synced fields with lobby defaults on join -- which
             // then flickered back as soon as the real state arrived.
-            if (!EnsureOwnership())
-                return;
+            if (EnsureOwnership())
+            {
+                _matchTimeRemaining = MatchDuration;
+                _state = (int)GameState.Lobby;
+                RequestMatchSerialization();
+            }
 
-            _matchTimeRemaining = MatchDuration;
-            _state = (int)GameState.Lobby;
-            RequestMatchSerialization();
+            // Everyone draws what they hold. Match state can be delivered before Start, and VRChat drops
+            // the OnDeserialization for a behaviour that has not started yet, so for a late joiner this
+            // is where the first picture of the match comes from.
+            ApplyStateToHud();
         }
 
         private void Update()
@@ -181,11 +188,16 @@ namespace RocketLeague
         /// Single funnel for every synced write in this behaviour. Stamping the clock here -- rather than
         /// only in Update -- means the event-driven paths (goal, countdown, kickoff, reset) count against
         /// the same budget instead of slipping past the rate gate that Update carefully respects.
+        ///
+        /// It is also where the owner draws its own HUD. OnDeserialization never runs on the client that
+        /// did the writing, so a HUD driven only from there left the owner looking at 0-0 and a frozen
+        /// clock for the whole match.
         /// </summary>
         private void RequestMatchSerialization()
         {
             _lastSerializeTime = Time.time;
             RequestSerialization();
+            ApplyStateToHud();
         }
 
         public override void OnPostSerialization(SerializationResult result)
@@ -253,10 +265,15 @@ namespace RocketLeague
             }
 
             RequestMatchSerialization();
-            SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget.All, nameof(OnGoalScoredRemote));
+
+            // The team rides on the event. The handler used to read _lastScoringTeam, which travels in
+            // the serialization above -- and that is not ordered against a network event, so a client
+            // that heard the event first celebrated whoever had scored the goal before this one.
+            SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget.All, nameof(OnGoalScoredRemote), scoringTeam);
         }
 
-        public void OnGoalScoredRemote()
+        [NetworkCallable]
+        public void OnGoalScoredRemote(int scoringTeam)
         {
             if (GoalHorn != null)
                 GoalHorn.Play();
@@ -273,7 +290,7 @@ namespace RocketLeague
             }
 
             if (HUD != null)
-                HUD.ShowGoalScored(_lastScoringTeam);
+                HUD.ShowGoalScored(scoringTeam);
         }
 
         private void BeginCountdown()
@@ -290,11 +307,9 @@ namespace RocketLeague
 
         public void OnCountdownStartRemote()
         {
+            // Sound only. What the HUD shows follows the synced state -- see ApplyStateToHud.
             if (CountdownBeep != null)
                 CountdownBeep.Play();
-
-            if (HUD != null)
-                HUD.ShowCountdown(CountdownDuration);
         }
 
         private void StartPlaying()
@@ -309,9 +324,6 @@ namespace RocketLeague
         {
             if (WhistleBlow != null)
                 WhistleBlow.Play();
-
-            if (HUD != null)
-                HUD.HideCountdown();
         }
 
         private void ResetForKickoff()
@@ -341,11 +353,11 @@ namespace RocketLeague
 
         public void OnMatchEndRemote()
         {
+            // The whistle for the end of regulation, whichever way it goes. This used to raise the Game
+            // Over panel as well, and it is sent for a tie going to overtime too -- so overtime was played
+            // under a panel announcing that orange had won.
             if (WhistleBlow != null)
                 WhistleBlow.Play();
-
-            if (HUD != null)
-                HUD.ShowGameOver(_blueScore > _orangeScore ? 1 : 0);
         }
 
         private void ResetBallPosition()
@@ -385,32 +397,64 @@ namespace RocketLeague
 
         public override void OnDeserialization()
         {
-            if (!_initialized)
-                return;
-
-            GameState newState = (GameState)_state;
-            if (newState != _localState)
-            {
-                _localState = newState;
-                OnStateChanged(newState);
-            }
-
-            if (HUD != null)
-            {
-                HUD.UpdateScores(_blueScore, _orangeScore);
-                HUD.UpdateTimer(_matchTimeRemaining);
-            }
+            ApplyStateToHud();
         }
 
-        private void OnStateChanged(GameState newState)
+        /// <summary>
+        /// Draws the synced match state on the local HUD. Every client comes through here -- remotes from
+        /// OnDeserialization, the owner from RequestMatchSerialization -- and it is the only thing that
+        /// decides which panels are up.
+        ///
+        /// The panels used to be raised by network events and never lowered: Game Over and Overtime
+        /// stayed on screen through the next match, a golden goal ended the game with no Game Over at
+        /// all, and a late joiner (who is never sent an event that has already fired) saw none of it.
+        /// State is synced, so drawing from state is right for all of them.
+        /// </summary>
+        private void ApplyStateToHud()
         {
-            switch (newState)
+            if (HUD == null)
+                return;
+
+            if (_blueScore != _hudBlueScore || _orangeScore != _hudOrangeScore)
             {
-                case GameState.Overtime:
-                    if (HUD != null)
-                        HUD.ShowOvertime();
-                    break;
+                _hudBlueScore = _blueScore;
+                _hudOrangeScore = _orangeScore;
+                HUD.UpdateScores(_blueScore, _orangeScore);
             }
+
+            bool stateChanged = _state != _hudState;
+
+            // The clock reads in whole seconds, so that is how often it needs redrawing. A state change
+            // redraws it too: entering overtime swaps the readout without the time moving.
+            int seconds = Mathf.FloorToInt(Mathf.Max(0f, _matchTimeRemaining));
+            if (stateChanged || seconds != _hudSeconds)
+            {
+                _hudSeconds = seconds;
+                HUD.UpdateTimer(_matchTimeRemaining);
+            }
+
+            if (!stateChanged)
+                return;
+
+            _hudState = _state;
+
+            // Scores arrive in the same serialization as the state, so the winner read here is the one
+            // that goes with this Game Over.
+            HUD.ApplyMatchState((GameState)_state, _stateTimer, _blueScore > _orangeScore ? 1 : 0);
+        }
+
+        /// <summary>
+        /// Redraws the HUD from nothing. The HUD asks for this from its own Start, which hides every
+        /// overlay and may well run after ours has drawn them.
+        /// </summary>
+        public void RefreshHud()
+        {
+            _hudState = -1;
+            _hudBlueScore = -1;
+            _hudOrangeScore = -1;
+            _hudSeconds = -1;
+
+            ApplyStateToHud();
         }
 
         /// <summary>

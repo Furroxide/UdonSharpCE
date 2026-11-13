@@ -8,8 +8,8 @@ namespace UdonSharp.CE.Async
     /// <summary>
     /// Represents an asynchronous operation that can be awaited in Udon.
     ///
-    /// At compile time, methods returning UdonTask are transformed into state machines
-    /// that use SendCustomEventDelayedSeconds/Frames for continuation.
+    /// At compile time, each method declared <c>async UdonTask</c> on an UdonSharpBehaviour is lowered
+    /// into a state machine that resumes itself with SendCustomEventDelayedSeconds/Frames.
     /// </summary>
     /// <remarks>
     /// UdonTask is fire-and-forget, not a handle. It is a value type with nowhere to register a
@@ -128,16 +128,15 @@ namespace UdonSharp.CE.Async
         /// Creates a task that completes after the specified time delay.
         /// </summary>
         /// <param name="seconds">The number of seconds to delay.</param>
-        /// <returns>A task that completes after the delay.</returns>
+        /// <returns>A marker task. Only an await of it waits.</returns>
         /// <remarks>
-        /// At compile time, await Delay() is transformed to:
-        /// SendCustomEventDelayedSeconds(nameof(__MoveNext), seconds)
+        /// <c>await UdonTask.Delay(seconds)</c> in an <c>async UdonTask</c> method is lowered to
+        /// <c>SendCustomEventDelayedSeconds("__Name_MoveNext", seconds, EventTiming.PostLateUpdate)</c>.
         /// </remarks>
         public static UdonTask Delay(float seconds)
         {
-            // This is a marker method - the actual delay is implemented by the compiler
-            // generating SendCustomEventDelayedSeconds calls.
-            // At runtime, this just returns a task that the compiler uses for tracking.
+            // A lowered await never calls this: CE replaces the whole await with the delayed event. This
+            // body only runs for a Delay that is not awaited, and then nothing waits for it.
             return new UdonTask
             {
                 _status = TaskStatus.WaitingForActivation
@@ -149,8 +148,9 @@ namespace UdonSharp.CE.Async
         /// </summary>
         /// <returns>A task that completes on the next frame.</returns>
         /// <remarks>
-        /// Equivalent to Delay(0) or DelayFrames(1).
-        /// Use this to prevent blocking the main thread in long operations.
+        /// Equivalent to DelayFrames(1): an awaited Yield is lowered to
+        /// <c>SendCustomEventDelayedFrames("__Name_MoveNext", 1, EventTiming.PostLateUpdate)</c>.
+        /// Use this to spread long work across frames.
         /// </remarks>
         public static UdonTask Yield()
         {
@@ -160,11 +160,12 @@ namespace UdonSharp.CE.Async
         /// <summary>
         /// Creates a task that completes after the specified number of frames.
         /// </summary>
-        /// <param name="frames">The number of frames to delay (minimum 1).</param>
-        /// <returns>A task that completes after the delay.</returns>
+        /// <param name="frames">The number of frames to delay. Pass 1 or more: an awaited DelayFrames hands
+        /// the value to SendCustomEventDelayedFrames as written, and the clamp below never runs for it.</param>
+        /// <returns>A marker task. Only an await of it waits.</returns>
         /// <remarks>
-        /// At compile time, await DelayFrames() is transformed to:
-        /// SendCustomEventDelayedFrames(nameof(__MoveNext), frames)
+        /// <c>await UdonTask.DelayFrames(frames)</c> in an <c>async UdonTask</c> method is lowered to
+        /// <c>SendCustomEventDelayedFrames("__Name_MoveNext", frames, EventTiming.PostLateUpdate)</c>.
         /// </remarks>
         public static UdonTask DelayFrames(int frames)
         {
@@ -176,13 +177,14 @@ namespace UdonSharp.CE.Async
         }
 
         /// <summary>
-        /// Creates a task that completes when all provided tasks have completed.
+        /// Combines the statuses of tasks that have already finished.
         /// </summary>
-        /// <param name="tasks">The tasks to wait for.</param>
-        /// <returns>A task that completes when all tasks are complete.</returns>
+        /// <param name="tasks">The tasks to combine.</param>
+        /// <returns>Faulted, canceled or completed when every input already is; otherwise a pending task.</returns>
         /// <remarks>
-        /// WhenAll checks task completion each frame until all are done.
-        /// Limited to 8 tasks due to VRChat parameter limits.
+        /// Not awaitable: <c>await UdonTask.WhenAll(...)</c> is CE0025, because nothing would ever resume
+        /// it. A UdonTask is a snapshot that never updates, so an input that is still pending here stays
+        /// pending, and so does the result. Use this to inspect stored task values, not to wait for them.
         /// </remarks>
         public static UdonTask WhenAll(params UdonTask[] tasks)
         {
@@ -223,19 +225,18 @@ namespace UdonSharp.CE.Async
                 return CompletedTask;
             }
 
-            // Return a pending task - compiler generates polling code
+            // Some input has not finished. No UdonTask ever updates, so this result never will either.
             return new UdonTask { _status = TaskStatus.WaitingForActivation };
         }
 
         /// <summary>
-        /// Creates a task that completes when any of the provided tasks has completed.
+        /// Returns the first of the given tasks that has already finished.
         /// </summary>
-        /// <param name="tasks">The tasks to wait for.</param>
-        /// <returns>A task that completes when any task is complete.</returns>
+        /// <param name="tasks">The tasks to look through.</param>
+        /// <returns>The first input whose status is final, or a pending task when none is.</returns>
         /// <remarks>
-        /// WhenAny returns as soon as the first task completes.
-        /// Other tasks continue running (cannot be canceled automatically).
-        /// Limited to 8 tasks due to VRChat parameter limits.
+        /// Not awaitable: <c>await UdonTask.WhenAny(...)</c> is CE0025, because nothing would ever resume
+        /// it. A UdonTask is a snapshot that never updates, so a pending result here stays pending.
         /// </remarks>
         public static UdonTask WhenAny(params UdonTask[] tasks)
         {
@@ -251,7 +252,7 @@ namespace UdonSharp.CE.Async
                 }
             }
 
-            // Return a pending task - compiler generates polling code
+            // None has finished. No UdonTask ever updates, so this result never will either.
             return new UdonTask { _status = TaskStatus.WaitingForActivation };
         }
 

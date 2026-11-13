@@ -18,7 +18,9 @@ namespace UdonSharp.CE.NetPhysics
     {
         [Header("Configuration")]
         public NetPhysicsWorld World;
-        [Tooltip("Input frames carried by each packet. Older frames overlap the previous packet so a single dropped packet does not leave a hole in the receiver's buffer.")]
+        [Tooltip("When off, the recorder keeps recording and publishing but reports neutral input, as if nothing were pressed. For a driver who should not be steering right now, e.g. one standing outside the arena.")]
+        public bool InputEnabled = true;
+        [Tooltip("Fewest input frames carried by each packet. A packet carries more than this whenever the send interval needs it: enough to repeat everything the previous packet held, so a single dropped packet does not leave a hole in the receiver's buffer.")]
         public int RedundantFrames = 10;
         [Tooltip("Upper bound on this recorder's publish rate in Hz. The effective rate is also limited by InputBytesPerSecondBudget.")]
         public float SendRate = 15f;
@@ -39,6 +41,7 @@ namespace UdonSharp.CE.NetPhysics
         private InputFrame[] _recentInputs;
         private int _head;
         private int _recordedCount;
+        private int _lastRecordedFrame;
         private float _lastSendTime;
         private int _lastProcessedSequence;
 
@@ -48,6 +51,11 @@ namespace UdonSharp.CE.NetPhysics
         // VRChat's own framing for the synced byte[] and the sequence int on top of the payload. Only
         // used to size the packet against the bandwidth budget, so an estimate is enough.
         private const int PacketOverheadBytes = 12;
+
+        // Frames kept for resending. A packet never carries more than it holds, and the count travels
+        // in a single byte, so this must stay at or below 255.
+        private const int RecentInputCapacity = 64;
+        private const int MaxPacketFrameCount = 255;
 
         // Latest values from VRChat's input callbacks. UnityEngine.Input, which this used to read,
         // returns nothing at all in VR, so VR players had no vehicle control whatsoever. These
@@ -98,7 +106,9 @@ namespace UdonSharp.CE.NetPhysics
         {
             _vehicle = GetComponent<NetVehicle>();
 
-            int size = Mathf.Max(1, RedundantFrames);
+            // Sized for the longest send interval, not for RedundantFrames: a ring that only held one
+            // packet's nominal worth had already overwritten the frames a slower send rate needed.
+            int size = Mathf.Clamp(RedundantFrames, RecentInputCapacity, MaxPacketFrameCount);
             _recentInputs = new InputFrame[size];
             for (int i = 0; i < _recentInputs.Length; i++)
                 _recentInputs[i] = new InputFrame();
@@ -167,6 +177,27 @@ namespace UdonSharp.CE.NetPhysics
                 return;
             }
 
+            ComposeInput(World.CurrentFrame, Time.time);
+        }
+
+        /// <summary>
+        /// Builds the current input frame from the latest input callbacks, stamped with the frame it is
+        /// for. Only reached on the client driving this car.
+        /// </summary>
+        private void ComposeInput(int frameNumber, float time)
+        {
+            // Switched off, the driver still has a car in the simulation and every other client is
+            // still predicting it from this stream, so the stream has to keep flowing: going quiet
+            // would leave the authority repeating whatever was held last. Neutral input is published
+            // instead, stamped like any other frame.
+            if (!InputEnabled)
+            {
+                ClearCurrentInput();
+                _currentInput.FrameNumber = frameNumber;
+                _currentInput.Timestamp = time;
+                return;
+            }
+
             float throttle = Mathf.Clamp(_moveVertical, -1f, 1f);
             float steering = Mathf.Clamp(_moveHorizontal, -1f, 1f);
 
@@ -205,8 +236,8 @@ namespace UdonSharp.CE.NetPhysics
                 buttons |= InputFrame.BUTTON_DODGE;
             }
 
-            _currentInput.FrameNumber = World.CurrentFrame;
-            _currentInput.Timestamp = Time.time;
+            _currentInput.FrameNumber = frameNumber;
+            _currentInput.Timestamp = time;
             _currentInput.Throttle = (sbyte)Mathf.RoundToInt(throttle * 127f);
             _currentInput.Steering = (sbyte)Mathf.RoundToInt(steering * 127f);
             _currentInput.Boost = boost;
@@ -230,10 +261,23 @@ namespace UdonSharp.CE.NetPhysics
             if (!IsLocalDriver)
                 return;
 
-            // Store into ring buffer.
-            _recentInputs[_head].CopyFrom(_currentInput);
-            _head = (_head + 1) % _recentInputs.Length;
-            _recordedCount = Mathf.Min(_recordedCount + 1, _recentInputs.Length);
+            // Store into ring buffer, one entry per simulation frame. The receiver files input by the
+            // frame it is stamped with and keeps one per frame, so a second sample carrying the same
+            // stamp -- two physics steps with no simulation tick or no rendered frame between them --
+            // replaces the first rather than spending a ring slot and ten bytes of every packet that
+            // repeats it on something the receiver throws away.
+            if (_recordedCount > 0 && _currentInput.FrameNumber == _lastRecordedFrame)
+            {
+                int newest = (_head - 1 + _recentInputs.Length) % _recentInputs.Length;
+                _recentInputs[newest].CopyFrom(_currentInput);
+            }
+            else
+            {
+                _recentInputs[_head].CopyFrom(_currentInput);
+                _head = (_head + 1) % _recentInputs.Length;
+                _recordedCount = Mathf.Min(_recordedCount + 1, _recentInputs.Length);
+                _lastRecordedFrame = _currentInput.FrameNumber;
+            }
 
             // Recording is local and free; publishing is neither. Ownership can lag the assignment by a
             // round trip, and a write from a client that does not own the object is dropped silently.
@@ -247,7 +291,7 @@ namespace UdonSharp.CE.NetPhysics
             if (Time.time - _lastSendTime < interval)
                 return;
 
-            SendInputPacket();
+            SendInputPacket(interval);
             _lastSendTime = Time.time;
         }
 
@@ -301,9 +345,83 @@ namespace UdonSharp.CE.NetPhysics
             _currentInput.DodgeY = 0;
         }
 
-        private void SendInputPacket()
+        /// <summary>
+        /// How many of the most recent input frames a packet has to carry.
+        /// </summary>
+        /// <remarks>
+        /// This used to be a fixed count, which only overlaps the previous packet while the send
+        /// interval stays short. The interval is not fixed: it stretches as more cars share the input
+        /// budget, and at the floor rate a fixed ten frames covered exactly what had been recorded
+        /// since the last send, so one dropped packet lost ten frames of input outright -- and a client
+        /// recording faster than that lost frames with nothing dropped at all. The count is therefore
+        /// derived from time.
+        ///
+        /// Everything recorded since the previous send is required: without it the receiver has a hole
+        /// on a perfect link. The same again is carried, so that any single lost packet is covered by
+        /// the next one. Neither part gives way to the byte budget. The budget has already set the
+        /// interval, and it is a share this world allots itself, not VRChat's own limit; trimming the
+        /// overlap to fit it would strip the redundancy from a busy instance, which is where
+        /// serializations start being superseded before they are sent and the overlap is what covers
+        /// the gap.
+        /// </remarks>
+        /// <param name="sendIntervalSeconds">Seconds between packets.</param>
+        /// <param name="recordIntervalSeconds">Shortest time between two recorded frames.</param>
+        /// <param name="minimumFrames">Fewest frames to carry however short the interval.</param>
+        /// <param name="capacity">Most frames available to send.</param>
+        public static int CalculatePacketFrameCount(float sendIntervalSeconds, float recordIntervalSeconds, int minimumFrames, int capacity)
         {
-            int count = Mathf.Min(Mathf.Max(1, RedundantFrames), _recordedCount);
+            if (recordIntervalSeconds <= 0f)
+                recordIntervalSeconds = 0.001f;
+            if (sendIntervalSeconds < 0f)
+                sendIntervalSeconds = 0f;
+
+            // The send test runs once per recorded frame, so a send can land one frame late: hence the
+            // extra one. The small bias keeps an interval that is an exact multiple of the record
+            // interval from rounding up a second time on float error.
+            float recordsPerSend = sendIntervalSeconds / recordIntervalSeconds;
+            if (recordsPerSend > capacity)
+                recordsPerSend = capacity;
+
+            int required = Mathf.CeilToInt(recordsPerSend - 0.001f) + 1;
+
+            int count = required * 2;
+            if (count < minimumFrames)
+                count = minimumFrames;
+            if (count > capacity)
+                count = capacity;
+
+            return count < 1 ? 1 : count;
+        }
+
+        /// <summary>
+        /// Frames the next packet should carry at the given send interval, before it is limited to what
+        /// has actually been recorded.
+        /// </summary>
+        private int GetPacketFrameCount(float interval)
+        {
+            int capacity = _recentInputs.Length;
+            if (capacity > MaxPacketFrameCount)
+                capacity = MaxPacketFrameCount;
+
+            // Frames are recorded once per physics step and at most once per simulation frame, so the
+            // slower of the two is how quickly they can accumulate.
+            float recordInterval = Time.fixedDeltaTime;
+            if (World != null && World.TickRate > 0)
+            {
+                float tickDelta = 1f / World.TickRate;
+                if (tickDelta > recordInterval)
+                    recordInterval = tickDelta;
+            }
+
+            return CalculatePacketFrameCount(interval, recordInterval, RedundantFrames, capacity);
+        }
+
+        private void SendInputPacket(float interval)
+        {
+            int count = Mathf.Min(GetPacketFrameCount(interval), _recordedCount);
+            if (count < 1)
+                count = 1;
+
             int totalBytes = 1 + count * InputFrame.NetworkSizeBytes;
 
             byte[] packet = new byte[totalBytes];
@@ -321,11 +439,16 @@ namespace UdonSharp.CE.NetPhysics
             _inputPacket = packet;
             _packetSequence++;
 
-            // Update local world immediately (owner doesn't receive OnDeserialization for its own serialization).
-            VRCPlayerApi local = Networking.LocalPlayer;
-            if (local != null && local.IsValid())
+            // The owner gets no OnDeserialization for its own serialization, so a recorder used on its own
+            // hands the packet to the local world directly. On a vehicle that would be wasted work: the
+            // world reads the local driver's input straight from this recorder every tick and never
+            // takes it from the buffer, so on the authority the looped-back frames filled the driver's
+            // buffer slot to the brim and were shuffled along one by one, forever, to be read by nobody.
+            if (_vehicle == null)
             {
-                World.ReceiveInput(local.playerId, packet);
+                VRCPlayerApi local = Networking.LocalPlayer;
+                if (local != null && local.IsValid())
+                    World.ReceiveInput(local.playerId, packet);
             }
 
             RequestSerialization();

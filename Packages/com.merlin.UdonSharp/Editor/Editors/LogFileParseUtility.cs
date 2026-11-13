@@ -59,7 +59,7 @@ namespace UdonSharpEditor
 
                     int endIdx = contents.IndexOf(" (", userIdx, StringComparison.Ordinal);
 
-                    username = contents.Substring(userIdx, endIdx - userIdx);
+                    username = contents.Substring(userIdx, (endIdx < 0 ? contents.Length : endIdx) - userIdx);
                 }
                 
                 RuntimeLogWatcher.ParseLogText(contents, username);

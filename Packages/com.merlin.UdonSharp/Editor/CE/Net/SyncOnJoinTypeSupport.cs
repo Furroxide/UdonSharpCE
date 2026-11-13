@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 
@@ -43,6 +44,27 @@ namespace UdonSharp.CE.Editor.Net
         public string TypeName { get; set; }
         public string PrimitiveReadExpression { get; set; }
         public SyncOnJoinPrimitiveEncoding PrimitiveEncoding { get; set; }
+
+        /// <summary>
+        /// Inclusive bounds, as C# double literals, a decoded JSON number has to sit inside before it is
+        /// converted to this integer or enum type. Null for everything else.
+        ///
+        /// Udon has no unchecked conversions: UdonSharp lowers <c>(byte)number</c> to
+        /// <c>System.Convert.ToByte</c>, which throws on a value that does not fit, and lowers a number
+        /// to an enum it does not compile itself into an array lookup. Either one, hit by a payload
+        /// written by another world version or a hostile owner, halts the behaviour inside
+        /// OnDeserialization for the rest of the session.
+        /// </summary>
+        public string NumberMinLiteral { get; set; }
+        public string NumberMaxLiteral { get; set; }
+
+        /// <summary>
+        /// <c>long</c> or <c>ulong</c> for an enum backed by one, null for every other enum. Those ride
+        /// as strings for the same reason a long field does: a JSON number is a double, so a flags value
+        /// with a bit above 2^53 set came back with its low bits rounded away.
+        /// </summary>
+        public string EnumWideUnderlyingTypeName { get; set; }
+
         public string[] ComponentNames { get; set; }
         public SyncOnJoinTypeSpec[] ComponentTypes { get; set; }
         public SyncOnJoinTypeSpec ElementType { get; set; }
@@ -281,15 +303,7 @@ namespace UdonSharp.CE.Editor.Net
                 return true;
 
             if (typeSymbol.TypeKind == TypeKind.Enum)
-            {
-                spec = new SyncOnJoinTypeSpec
-                {
-                    Kind = SyncOnJoinValueKind.Enum,
-                    TypeSymbol = typeSymbol,
-                    TypeName = GetTypeName(typeSymbol),
-                };
-                return true;
-            }
+                return TryCreateEnumSpec(typeSymbol, out spec, out reason);
 
             if (TryCreateUnityStructSpec(typeSymbol, out spec))
                 return true;
@@ -448,6 +462,10 @@ namespace UdonSharp.CE.Editor.Net
             if (readExpression == null)
                 return false;
 
+            // Null for bool, float and double, which is right: none of them is narrowed from the JSON
+            // number by a conversion that can throw.
+            TryGetIntegerRange(typeSymbol.SpecialType, out string minLiteral, out string maxLiteral);
+
             spec = new SyncOnJoinTypeSpec
             {
                 Kind = SyncOnJoinValueKind.Primitive,
@@ -455,7 +473,183 @@ namespace UdonSharp.CE.Editor.Net
                 TypeName = GetTypeName(typeSymbol),
                 PrimitiveReadExpression = readExpression,
                 PrimitiveEncoding = encoding,
+                NumberMinLiteral = minLiteral,
+                NumberMaxLiteral = maxLiteral,
             };
+            return true;
+        }
+
+        /// <summary>
+        /// The values a JSON number may hold and still convert to an integer type without
+        /// <c>System.Convert</c> throwing, written as double literals for the generated range check.
+        /// </summary>
+        /// <remarks>
+        /// long and ulong stop at 2^53 rather than at their own limits. They normally ride as strings,
+        /// so a number only reaches them from a payload written before that encoding or by hand, and
+        /// past 2^53 a double no longer holds every integer -- the value would already be rounded, so
+        /// accepting it would apply a number the sender never had.
+        /// </remarks>
+        private static bool TryGetIntegerRange(SpecialType type, out string minLiteral, out string maxLiteral)
+        {
+            switch (type)
+            {
+                case SpecialType.System_SByte:
+                    minLiteral = "-128d";
+                    maxLiteral = "127d";
+                    return true;
+                case SpecialType.System_Byte:
+                    minLiteral = "0d";
+                    maxLiteral = "255d";
+                    return true;
+                case SpecialType.System_Int16:
+                    minLiteral = "-32768d";
+                    maxLiteral = "32767d";
+                    return true;
+                case SpecialType.System_UInt16:
+                    minLiteral = "0d";
+                    maxLiteral = "65535d";
+                    return true;
+                case SpecialType.System_Int32:
+                    minLiteral = "-2147483648d";
+                    maxLiteral = "2147483647d";
+                    return true;
+                case SpecialType.System_UInt32:
+                    minLiteral = "0d";
+                    maxLiteral = "4294967295d";
+                    return true;
+                case SpecialType.System_Int64:
+                    minLiteral = "-9007199254740992d";
+                    maxLiteral = "9007199254740992d";
+                    return true;
+                case SpecialType.System_UInt64:
+                    minLiteral = "0d";
+                    maxLiteral = "9007199254740992d";
+                    return true;
+                default:
+                    minLiteral = null;
+                    maxLiteral = null;
+                    return false;
+            }
+        }
+
+        /// <summary>
+        /// Entries in the lookup table UdonSharp refuses to build past. Mirrors the limit in
+        /// <c>EmitContext.GetEnumArrayForType</c>.
+        /// </summary>
+        private const int ExternEnumTableLimit = 2048;
+
+        private static bool TryCreateEnumSpec(ITypeSymbol typeSymbol, out SyncOnJoinTypeSpec spec, out string reason)
+        {
+            spec = null;
+            reason = null;
+
+            SpecialType underlying = (typeSymbol as INamedTypeSymbol)?.EnumUnderlyingType?.SpecialType
+                                     ?? SpecialType.System_Int32;
+
+            string minLiteral;
+            string maxLiteral;
+
+            // An enum with no declaration in the compiled source is one UdonSharp does not compile itself
+            // (UnityEngine, VRChat, System), and it converts a number back into one of those very
+            // differently from an enum it does compile.
+            if (typeSymbol.DeclaringSyntaxReferences.Length == 0)
+            {
+                if (!TryGetExternEnumRange(typeSymbol, underlying, out minLiteral, out maxLiteral, out reason))
+                    return false;
+            }
+            else if (!TryGetIntegerRange(underlying, out minLiteral, out maxLiteral))
+            {
+                reason = $"'{GetTypeName(typeSymbol)}' is an enum with no integer underlying type";
+                return false;
+            }
+
+            spec = new SyncOnJoinTypeSpec
+            {
+                Kind = SyncOnJoinValueKind.Enum,
+                TypeSymbol = typeSymbol,
+                TypeName = GetTypeName(typeSymbol),
+                NumberMinLiteral = minLiteral,
+                NumberMaxLiteral = maxLiteral,
+                EnumWideUnderlyingTypeName = underlying == SpecialType.System_Int64 ? "long"
+                    : underlying == SpecialType.System_UInt64 ? "ulong"
+                    : null,
+            };
+            return true;
+        }
+
+        /// <summary>
+        /// The numbers that can be converted back into an enum UdonSharp does not compile itself.
+        /// </summary>
+        /// <remarks>
+        /// UdonSharp has no extern for that conversion, so <c>EmitContext.GetEnumArrayForType</c> bakes a
+        /// constant array of the enum's values and the cast becomes an index into it. That only works
+        /// for an int-backed enum (it unboxes every value as int, and anything else is an
+        /// InvalidCastException out of the compiler), only up to <see cref="ExternEnumTableLimit"/>
+        /// (past it the compiler throws NotSupportedException), and only for non-negative values (the
+        /// table starts at zero). Each of those surfaced as a raw compiler exception or as a behaviour
+        /// that halted the first time the field held the value, naming neither [SyncOnJoin] nor the
+        /// field. Rejecting the type here turns all three into CE0032 on the field.
+        ///
+        /// The table is not sized to the largest declared value: it is rounded up to cover combined
+        /// flags, so the bound is recomputed here the same way rather than assumed. An index past it
+        /// is an out-of-range array read, which halts the behaviour just as surely as a throwing
+        /// conversion.
+        /// </remarks>
+        private static bool TryGetExternEnumRange(
+            ITypeSymbol enumType,
+            SpecialType underlying,
+            out string minLiteral,
+            out string maxLiteral,
+            out string reason)
+        {
+            minLiteral = null;
+            maxLiteral = null;
+            reason = null;
+
+            string typeName = GetTypeName(enumType);
+
+            if (underlying != SpecialType.System_Int32)
+            {
+                reason = $"'{typeName}' is an enum UdonSharp does not compile itself and it is not backed by int, " +
+                         "so a number cannot be converted back into it";
+                return false;
+            }
+
+            int maxValue = 0;
+
+            foreach (IFieldSymbol member in enumType.GetMembers().OfType<IFieldSymbol>())
+            {
+                if (!member.HasConstantValue || !(member.ConstantValue is int value))
+                    continue;
+
+                if (value < 0)
+                {
+                    reason = $"'{typeName}' declares the negative value '{member.Name}', which the lookup table " +
+                             "UdonSharp converts numbers to such enums through cannot hold";
+                    return false;
+                }
+
+                if (value > maxValue)
+                    maxValue = value;
+            }
+
+            if (maxValue >= ExternEnumTableLimit)
+            {
+                reason = $"'{typeName}' has values up to {maxValue.ToString(CultureInfo.InvariantCulture)}, past the " +
+                         $"{ExternEnumTableLimit.ToString(CultureInfo.InvariantCulture)}-entry lookup table UdonSharp " +
+                         "converts numbers to such enums through";
+                return false;
+            }
+
+            int mostSignificantBit = 0;
+
+            for (int remaining = maxValue + 1; remaining > 0; remaining >>= 1)
+                mostSignificantBit++;
+
+            int tableLength = (1 << mostSignificantBit) - 1;
+
+            minLiteral = "0d";
+            maxLiteral = (tableLength - 1).ToString(CultureInfo.InvariantCulture) + "d";
             return true;
         }
 
@@ -531,20 +725,26 @@ namespace UdonSharp.CE.Editor.Net
             switch (typeName)
             {
                 case "int":
+                    TryGetIntegerRange(SpecialType.System_Int32, out string intMin, out string intMax);
                     return new SyncOnJoinTypeSpec
                     {
                         Kind = SyncOnJoinValueKind.Primitive,
                         TypeName = "int",
                         PrimitiveReadExpression = "(int){0}.Number",
-                        PrimitiveEncoding = SyncOnJoinPrimitiveEncoding.Number
+                        PrimitiveEncoding = SyncOnJoinPrimitiveEncoding.Number,
+                        NumberMinLiteral = intMin,
+                        NumberMaxLiteral = intMax
                     };
                 case "byte":
+                    TryGetIntegerRange(SpecialType.System_Byte, out string byteMin, out string byteMax);
                     return new SyncOnJoinTypeSpec
                     {
                         Kind = SyncOnJoinValueKind.Primitive,
                         TypeName = "byte",
                         PrimitiveReadExpression = "(byte){0}.Number",
-                        PrimitiveEncoding = SyncOnJoinPrimitiveEncoding.Number
+                        PrimitiveEncoding = SyncOnJoinPrimitiveEncoding.Number,
+                        NumberMinLiteral = byteMin,
+                        NumberMaxLiteral = byteMax
                     };
                 case "UnityEngine.Vector3":
                     return new SyncOnJoinTypeSpec
@@ -619,6 +819,19 @@ namespace UdonSharp.CE.Editor.Net
                     if (HasAttribute(field, "SerializeReference"))
                     {
                         reason = $"field '{field.Name}' uses [SerializeReference]";
+                        return false;
+                    }
+
+                    // The helpers are emitted onto this type, and a derived type cannot read a base's
+                    // private field. Emitting the read anyway is CS0122 in generated code, and because
+                    // helpers go onto every qualifying [Serializable] type whether or not anything syncs
+                    // it, that one pair of classes stopped the whole project compiling. Dropping the
+                    // field instead would publish a snapshot that silently lacks part of the model.
+                    if (field.DeclaredAccessibility == Accessibility.Private &&
+                        !SymbolEqualityComparer.Default.Equals(field.ContainingType, typeSymbol))
+                    {
+                        reason = $"field '{field.ContainingType?.Name}.{field.Name}' is private to a base class, so " +
+                                 $"generated code on '{GetTypeName(typeSymbol)}' cannot read it";
                         return false;
                     }
 

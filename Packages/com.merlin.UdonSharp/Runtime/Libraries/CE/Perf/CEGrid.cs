@@ -59,6 +59,16 @@ namespace UdonSharp.CE.Perf
     [PublicAPI]
     public class CEGrid
     {
+        #region Constants
+
+        /// <summary>
+        /// Ceiling applied to a query bound, in cells, before it is converted to an int. Far beyond any
+        /// grid that can be allocated and comfortably inside the range of int.
+        /// </summary>
+        private const float QueryCellLimit = 1073741824f;
+
+        #endregion
+
         #region Fields
 
         /// <summary>
@@ -219,15 +229,38 @@ namespace UdonSharp.CE.Perf
         /// </summary>
         /// <param name="position">World position.</param>
         /// <returns>Cell index, or -1 if out of bounds.</returns>
+        /// <remarks>
+        /// Both faces of the bounds are inside the grid. A coordinate exactly on the max face floors to
+        /// one past the last cell whenever the extent is a whole number of cells, and it used to be
+        /// rejected for that -- which dropped precisely the entities a caller had clamped to its arena
+        /// bounds (Mathf.Clamp(pos, min, max) lands on max exactly) out of every query, while the same
+        /// clamp on the min side worked. Such a coordinate belongs to the last cell.
+        /// </remarks>
         public int PositionToCellIndex(Vector3 position)
         {
             int x = PositionToCellX(position.x);
             int y = PositionToCellY(position.y);
             int z = PositionToCellZ(position.z);
 
-            if (x < 0 || x >= _cellsX) return -1;
-            if (y < 0 || y >= _cellsY) return -1;
-            if (z < 0 || z >= _cellsZ) return -1;
+            // The max-face test sits inside the out-of-range branch so that in-range positions, which
+            // are nearly all of them, pay nothing for it.
+            if (x < 0 || x >= _cellsX)
+            {
+                if (x != _cellsX || position.x > _boundsMax.x) return -1;
+                x = _cellsX - 1;
+            }
+
+            if (y < 0 || y >= _cellsY)
+            {
+                if (y != _cellsY || position.y > _boundsMax.y) return -1;
+                y = _cellsY - 1;
+            }
+
+            if (z < 0 || z >= _cellsZ)
+            {
+                if (z != _cellsZ || position.z > _boundsMax.z) return -1;
+                z = _cellsZ - 1;
+            }
 
             return CellCoordsToIndex(x, y, z);
         }
@@ -254,6 +287,38 @@ namespace UdonSharp.CE.Perf
         private int PositionToCellZ(float z)
         {
             return Mathf.FloorToInt((z - _boundsMin.z) * _invCellSize);
+        }
+
+        /// <summary>
+        /// Converts a world X coordinate to a cell X coordinate for a query range, saturating in float
+        /// space before the conversion. Anything below the grid comes back as -1.
+        /// </summary>
+        /// <remarks>
+        /// Query extents are caller input, and "everything, however far away" is a reasonable thing to
+        /// ask for. Converting a float that large to int is not a saturating operation: the result is
+        /// unspecified, and on x64 it is int.MinValue. As the upper end of a range that value then won
+        /// the Mathf.Min against the last cell and the cell loops ran zero times, so a query with an
+        /// infinite radius returned nothing at all instead of everything.
+        /// </remarks>
+        private int QueryCellX(float x)
+        {
+            return Mathf.FloorToInt(Mathf.Clamp((x - _boundsMin.x) * _invCellSize, -1f, QueryCellLimit));
+        }
+
+        /// <summary>
+        /// Y counterpart of <see cref="QueryCellX"/>.
+        /// </summary>
+        private int QueryCellY(float y)
+        {
+            return Mathf.FloorToInt(Mathf.Clamp((y - _boundsMin.y) * _invCellSize, -1f, QueryCellLimit));
+        }
+
+        /// <summary>
+        /// Z counterpart of <see cref="QueryCellX"/>.
+        /// </summary>
+        private int QueryCellZ(float z)
+        {
+            return Mathf.FloorToInt(Mathf.Clamp((z - _boundsMin.z) * _invCellSize, -1f, QueryCellLimit));
         }
 
         /// <summary>
@@ -404,12 +469,22 @@ namespace UdonSharp.CE.Perf
             if (result == null) return 0;
 
             // Calculate cell range to check
-            int minCellX = Mathf.Max(0, PositionToCellX(center.x - radius));
-            int maxCellX = Mathf.Min(_cellsX - 1, PositionToCellX(center.x + radius));
-            int minCellY = Mathf.Max(0, PositionToCellY(center.y - radius));
-            int maxCellY = Mathf.Min(_cellsY - 1, PositionToCellY(center.y + radius));
-            int minCellZ = Mathf.Max(0, PositionToCellZ(center.z - radius));
-            int maxCellZ = Mathf.Min(_cellsZ - 1, PositionToCellZ(center.z + radius));
+            float lowX = center.x - radius;
+            float lowY = center.y - radius;
+            float lowZ = center.z - radius;
+
+            int minCellX = Mathf.Max(0, QueryCellX(lowX));
+            int maxCellX = Mathf.Min(_cellsX - 1, QueryCellX(center.x + radius));
+            int minCellY = Mathf.Max(0, QueryCellY(lowY));
+            int maxCellY = Mathf.Min(_cellsY - 1, QueryCellY(center.y + radius));
+            int minCellZ = Mathf.Max(0, QueryCellZ(lowZ));
+            int maxCellZ = Mathf.Min(_cellsZ - 1, QueryCellZ(center.z + radius));
+
+            // A range that begins exactly on the max face still covers the entities stored on it,
+            // which PositionToCellIndex files under the last cell.
+            if (minCellX == _cellsX && lowX <= _boundsMax.x) minCellX = _cellsX - 1;
+            if (minCellY == _cellsY && lowY <= _boundsMax.y) minCellY = _cellsY - 1;
+            if (minCellZ == _cellsZ && lowZ <= _boundsMax.z) minCellZ = _cellsZ - 1;
 
             int resultCount = 0;
             int maxResults = result.Length;
@@ -448,12 +523,18 @@ namespace UdonSharp.CE.Perf
         {
             if (result == null) return 0;
 
-            int minCellX = Mathf.Max(0, PositionToCellX(min.x));
-            int maxCellX = Mathf.Min(_cellsX - 1, PositionToCellX(max.x));
-            int minCellY = Mathf.Max(0, PositionToCellY(min.y));
-            int maxCellY = Mathf.Min(_cellsY - 1, PositionToCellY(max.y));
-            int minCellZ = Mathf.Max(0, PositionToCellZ(min.z));
-            int maxCellZ = Mathf.Min(_cellsZ - 1, PositionToCellZ(max.z));
+            int minCellX = Mathf.Max(0, QueryCellX(min.x));
+            int maxCellX = Mathf.Min(_cellsX - 1, QueryCellX(max.x));
+            int minCellY = Mathf.Max(0, QueryCellY(min.y));
+            int maxCellY = Mathf.Min(_cellsY - 1, QueryCellY(max.y));
+            int minCellZ = Mathf.Max(0, QueryCellZ(min.z));
+            int maxCellZ = Mathf.Min(_cellsZ - 1, QueryCellZ(max.z));
+
+            // A box whose min corner sits exactly on the max face still covers the entities stored on
+            // it, which PositionToCellIndex files under the last cell.
+            if (minCellX == _cellsX && min.x <= _boundsMax.x) minCellX = _cellsX - 1;
+            if (minCellY == _cellsY && min.y <= _boundsMax.y) minCellY = _cellsY - 1;
+            if (minCellZ == _cellsZ && min.z <= _boundsMax.z) minCellZ = _cellsZ - 1;
 
             int resultCount = 0;
             int maxResults = result.Length;
@@ -532,6 +613,10 @@ namespace UdonSharp.CE.Perf
         /// <summary>
         /// Iterates over all non-empty cells.
         /// </summary>
+        /// <remarks>
+        /// Takes a delegate, so it is for editor and plain C# callers; Udon cannot represent one. From an
+        /// UdonSharpBehaviour, loop over <c>0..TotalCells</c> and test <see cref="GetCellCount"/>.
+        /// </remarks>
         /// <param name="action">Action called with (cellIndex, entityCount).</param>
         public void ForEachNonEmptyCell(Action<int, int> action)
         {

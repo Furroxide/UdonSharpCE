@@ -528,63 +528,118 @@ namespace UdonSharp.CE.Net
         #region Array Resolution
 
         /// <summary>
-        /// Resolves an integer array conflict using element-wise strategy.
+        /// Resolves an integer array conflict.
+        /// HigherWins, LowerWins and Additive merge element by element; every other strategy picks a
+        /// whole array, and without ownership context that is <paramref name="remote"/>, returned as-is.
         /// </summary>
+        /// <remarks>
+        /// When the two arrays differ in length, an element only one of them has is carried through
+        /// unchanged and the result is as long as the longer one. There is nothing on the other side to
+        /// merge it against.
+        ///
+        /// The shorter array used to be padded with zeros and the padding resolved like real data, which
+        /// invented values neither side ever held: LowerWins turned every positive element past the
+        /// shorter array's end into 0, HigherWins did the same to every negative one, and LastWriteWins
+        /// did not return the remote array at all but a copy stretched to the local length and filled out
+        /// with zeros.
+        /// </remarks>
         public static int[] ResolveIntArray(int[] local, int[] remote, MergeStrategy strategy)
         {
             if (local == null) return remote;
             if (remote == null) return local;
+
+            if (strategy != MergeStrategy.HigherWins &&
+                strategy != MergeStrategy.LowerWins &&
+                strategy != MergeStrategy.Additive)
+            {
+                return remote;
+            }
 
             int length = Mathf.Max(local.Length, remote.Length);
             int[] result = new int[length];
 
             for (int i = 0; i < length; i++)
             {
-                int localVal = i < local.Length ? local[i] : 0;
-                int remoteVal = i < remote.Length ? remote[i] : 0;
-                result[i] = ResolveInt(localVal, remoteVal, strategy);
+                if (i >= local.Length)
+                    result[i] = remote[i];
+                else if (i >= remote.Length)
+                    result[i] = local[i];
+                else
+                    result[i] = ResolveInt(local[i], remote[i], strategy);
             }
 
             return result;
         }
 
         /// <summary>
-        /// Resolves a float array conflict using element-wise strategy.
+        /// Resolves a float array conflict.
+        /// HigherWins, LowerWins and Additive merge element by element; every other strategy picks a
+        /// whole array, and without ownership context that is <paramref name="remote"/>, returned as-is.
         /// </summary>
+        /// <remarks>
+        /// An element only one array has is carried through unchanged, for the reason given on
+        /// <see cref="ResolveIntArray"/>: padding the shorter array with 0f and resolving the padding
+        /// fabricated values neither side held.
+        /// </remarks>
         public static float[] ResolveFloatArray(float[] local, float[] remote, MergeStrategy strategy)
         {
             if (local == null) return remote;
             if (remote == null) return local;
+
+            if (strategy != MergeStrategy.HigherWins &&
+                strategy != MergeStrategy.LowerWins &&
+                strategy != MergeStrategy.Additive)
+            {
+                return remote;
+            }
 
             int length = Mathf.Max(local.Length, remote.Length);
             float[] result = new float[length];
 
             for (int i = 0; i < length; i++)
             {
-                float localVal = i < local.Length ? local[i] : 0f;
-                float remoteVal = i < remote.Length ? remote[i] : 0f;
-                result[i] = ResolveFloat(localVal, remoteVal, strategy);
+                if (i >= local.Length)
+                    result[i] = remote[i];
+                else if (i >= remote.Length)
+                    result[i] = local[i];
+                else
+                    result[i] = ResolveFloat(local[i], remote[i], strategy);
             }
 
             return result;
         }
 
         /// <summary>
-        /// Resolves a boolean array conflict using element-wise strategy.
+        /// Resolves a boolean array conflict.
+        /// HigherWins (prefer true) and LowerWins (prefer false) merge element by element; every other
+        /// strategy picks a whole array, and without ownership context that is <paramref name="remote"/>,
+        /// returned as-is. Additive is one of those: <see cref="ResolveBool(bool, bool, MergeStrategy)"/>
+        /// has no additive meaning for a flag and answers with the remote value.
         /// </summary>
+        /// <remarks>
+        /// An element only one array has is carried through unchanged, for the reason given on
+        /// <see cref="ResolveIntArray"/>. Padding with false made LowerWins clear every flag past the
+        /// shorter array's end, whatever the longer array said.
+        /// </remarks>
         public static bool[] ResolveBoolArray(bool[] local, bool[] remote, MergeStrategy strategy)
         {
             if (local == null) return remote;
             if (remote == null) return local;
+
+            if (strategy != MergeStrategy.HigherWins && strategy != MergeStrategy.LowerWins)
+                return remote;
 
             int length = Mathf.Max(local.Length, remote.Length);
             bool[] result = new bool[length];
 
             for (int i = 0; i < length; i++)
             {
-                bool localVal = i < local.Length && local[i];
-                bool remoteVal = i < remote.Length && remote[i];
-                result[i] = ResolveBool(localVal, remoteVal, strategy);
+                if (i >= local.Length)
+                    result[i] = remote[i];
+                else if (i >= remote.Length)
+                    result[i] = local[i];
+                else
+                    result[i] = ResolveBool(local[i], remote[i], strategy);
             }
 
             return result;

@@ -8,6 +8,13 @@ namespace UdonSharp.CE.DevTools
     ///
     /// Logs are sent to Unity's Debug.Log system and optionally to registered
     /// CEDebugConsole instances for in-world display.
+    ///
+    /// Under Udon, read "registered" narrowly. Static fields are per UdonBehaviour, so each behaviour that
+    /// calls CELogger has its own MinLevel, OutputToUnityLog and console list, and a console registers only
+    /// in its own copy. A log written from any other behaviour never reaches a console through CELogger;
+    /// call the console's AddLog directly for that. Most calls are rewritten at compile time into the
+    /// matching Debug call anyway (see CELoggerTransformOptimizer); only calls with named arguments or a
+    /// non-constant level reach this class at runtime.
     /// </summary>
     /// <example>
     /// <code>

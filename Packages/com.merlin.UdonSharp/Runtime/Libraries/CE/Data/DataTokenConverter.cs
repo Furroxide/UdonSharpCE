@@ -31,17 +31,30 @@ namespace UdonSharp.CE.Data.Internal
 
         #region DataToken to Primitive
 
+        // The numeric conversions accept a token of ANY numeric type, not only the one that matches.
+        // VRCJson hands every JSON number back as a Double, so when these insisted on an exact match a
+        // CEList<int> or CEDictionary<string, int> came back from FromJson with every value silently 0
+        // -- the right count, the right keys, and no error anywhere. An exact match is still returned
+        // untouched, so a Long or ULong token keeps the bits a trip through double would round away.
+        //
+        // The fallback is clamped to the target's range before it is cast. In Udon a floating-point to
+        // integer cast is System.Convert, which throws on overflow, and an exception halts the
+        // behaviour: one oversized number in a JSON payload must not be able to do that.
+        //
+        // Boolean is deliberately not a number here. ToNumber maps it to 1/0 for callers that ask for
+        // that; a bool arriving where an int was expected is a wrong payload and reads as 0.
+
         public static bool ToBool(DataToken token) => token.TokenType == TokenType.Boolean ? token.Boolean : default;
-        public static sbyte ToSByte(DataToken token) => token.TokenType == TokenType.SByte ? token.SByte : default;
-        public static byte ToByte(DataToken token) => token.TokenType == TokenType.Byte ? token.Byte : default;
-        public static short ToShort(DataToken token) => token.TokenType == TokenType.Short ? token.Short : default;
-        public static ushort ToUShort(DataToken token) => token.TokenType == TokenType.UShort ? token.UShort : default;
-        public static int ToInt(DataToken token) => token.TokenType == TokenType.Int ? token.Int : default;
-        public static uint ToUInt(DataToken token) => token.TokenType == TokenType.UInt ? token.UInt : default;
-        public static long ToLong(DataToken token) => token.TokenType == TokenType.Long ? token.Long : default;
-        public static ulong ToULong(DataToken token) => token.TokenType == TokenType.ULong ? token.ULong : default;
-        public static float ToFloat(DataToken token) => token.TokenType == TokenType.Float ? token.Float : default;
-        public static double ToDouble(DataToken token) => token.TokenType == TokenType.Double ? token.Double : default;
+        public static sbyte ToSByte(DataToken token) => token.TokenType == TokenType.SByte ? token.SByte : (sbyte)ClampNumber(NumberOrZero(token), -128.0, 127.0);
+        public static byte ToByte(DataToken token) => token.TokenType == TokenType.Byte ? token.Byte : (byte)ClampNumber(NumberOrZero(token), 0.0, 255.0);
+        public static short ToShort(DataToken token) => token.TokenType == TokenType.Short ? token.Short : (short)ClampNumber(NumberOrZero(token), -32768.0, 32767.0);
+        public static ushort ToUShort(DataToken token) => token.TokenType == TokenType.UShort ? token.UShort : (ushort)ClampNumber(NumberOrZero(token), 0.0, 65535.0);
+        public static int ToInt(DataToken token) => token.TokenType == TokenType.Int ? token.Int : (int)ClampNumber(NumberOrZero(token), -2147483648.0, 2147483647.0);
+        public static uint ToUInt(DataToken token) => token.TokenType == TokenType.UInt ? token.UInt : (uint)ClampNumber(NumberOrZero(token), 0.0, 4294967295.0);
+        public static long ToLong(DataToken token) => token.TokenType == TokenType.Long ? token.Long : (long)ClampNumber(NumberOrZero(token), MinLongAsDouble, MaxLongAsDouble);
+        public static ulong ToULong(DataToken token) => token.TokenType == TokenType.ULong ? token.ULong : (ulong)ClampNumber(NumberOrZero(token), 0.0, MaxULongAsDouble);
+        public static float ToFloat(DataToken token) => token.TokenType == TokenType.Float ? token.Float : (float)NumberOrZero(token);
+        public static double ToDouble(DataToken token) => token.TokenType == TokenType.Double ? token.Double : NumberOrZero(token);
         public static string ToString(DataToken token) => token.TokenType == TokenType.String ? token.String : null;
         public static DataList ToDataList(DataToken token) => token.TokenType == TokenType.DataList ? token.DataList : null;
         public static DataDictionary ToDataDictionary(DataToken token) => token.TokenType == TokenType.DataDictionary ? token.DataDictionary : null;
@@ -78,7 +91,9 @@ namespace UdonSharp.CE.Data.Internal
 
         /// <summary>
         /// Converts a DataToken to type T.
-        /// Returns default(T) if conversion fails.
+        /// A numeric T accepts a token of any numeric type (JSON numbers arrive as Double), truncated
+        /// toward zero and clamped to T's range. Returns default(T) if conversion fails.
+        /// Use <see cref="TryFromToken{T}"/> when the token's type has to match T exactly.
         /// </summary>
         public static T FromToken<T>(DataToken token)
         {
@@ -171,6 +186,51 @@ namespace UdonSharp.CE.Data.Internal
 
         #region Number Coercion
 
+        // Bounds for the long/ulong clamps. They are not long.MaxValue and ulong.MaxValue: neither is
+        // representable as a double, both round UP to the next power of two, and that value is already
+        // out of range -- clamping to it would let through exactly the number that overflows the cast.
+        // These are the largest doubles strictly below 2^63 and 2^64.
+        private const double MinLongAsDouble = -9223372036854775808.0;
+        private const double MaxLongAsDouble = 9223372036854774784.0;
+        private const double MaxULongAsDouble = 18446744073709549568.0;
+
+        /// <summary>
+        /// The value of a numeric token as a double, or 0 for a token of any other type.
+        /// Boolean counts as "any other type" here; see the note above the typed conversions.
+        /// </summary>
+        private static double NumberOrZero(DataToken token)
+        {
+            TokenType tokenType = token.TokenType;
+
+            // Double first: it is what every number parsed from JSON arrives as.
+            if (tokenType == TokenType.Double) return token.Double;
+            if (tokenType == TokenType.Float) return token.Float;
+            if (tokenType == TokenType.Int) return token.Int;
+            if (tokenType == TokenType.Long) return token.Long;
+            if (tokenType == TokenType.UInt) return token.UInt;
+            if (tokenType == TokenType.ULong) return token.ULong;
+            if (tokenType == TokenType.Short) return token.Short;
+            if (tokenType == TokenType.UShort) return token.UShort;
+            if (tokenType == TokenType.SByte) return token.SByte;
+            if (tokenType == TokenType.Byte) return token.Byte;
+
+            return 0.0;
+        }
+
+        /// <summary>
+        /// Clamps a value into [min, max] so that the integer cast applied to the result cannot overflow.
+        /// NaN has no place in an integer and comes back as 0.
+        /// </summary>
+        private static double ClampNumber(double value, double min, double max)
+        {
+            if (value >= min && value <= max) return value;
+            if (value > max) return max;
+            if (value < min) return min;
+
+            // Every comparison above is false only for NaN
+            return 0.0;
+        }
+
         /// <summary>
         /// Converts a numeric DataToken to double, handling all numeric types.
         /// Useful for JSON deserialization where all numbers become doubles.
@@ -199,7 +259,7 @@ namespace UdonSharp.CE.Data.Internal
         /// </summary>
         public static int ToIntCoerced(DataToken token)
         {
-            return (int)ToNumber(token);
+            return (int)ClampNumber(ToNumber(token), -2147483648.0, 2147483647.0);
         }
 
         /// <summary>

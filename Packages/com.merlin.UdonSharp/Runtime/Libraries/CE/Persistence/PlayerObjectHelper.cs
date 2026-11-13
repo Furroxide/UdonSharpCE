@@ -12,6 +12,12 @@ namespace UdonSharp.CE.Persistence
     /// making it easier to associate persistent data with individual players.
     /// </summary>
     /// <remarks>
+    /// Slots are local and can differ between clients. Each client hands them out first-free in the order
+    /// it saw players join and reuses a slot as soon as its player leaves, so a late joiner numbers everyone
+    /// differently: indexing a synced array with these slots makes one client write its data where another
+    /// reads someone else's. Networked arrays need a synchronized owner-managed mapping from player IDs to
+    /// slots -- one owner assigns the slots and syncs the table -- or data keyed by player ID instead.
+    ///
     /// VRChat's PlayerObject system instantiates objects per-player for persistent synced state.
     /// This helper tracks which player is in which slot and provides utility methods for
     /// looking up players and their associated objects.
@@ -33,7 +39,7 @@ namespace UdonSharp.CE.Persistence
     ///     void Update()
     ///     {
     ///         int mySlot = playerHelper.GetLocalPlayerSlot();
-    ///         // Use slot to index into synced arrays
+    ///         // Use this local slot for local arrays only
     ///     }
     /// }
     /// </code>

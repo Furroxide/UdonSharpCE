@@ -22,23 +22,38 @@ namespace UdonSharp.CE.Perf
         public readonly T Object;
         
         /// <summary>
+        /// The slot's generation at the moment this handle was acquired.
+        /// </summary>
+        /// <remarks>
+        /// A slot's generation moves every time it is released, so a handle only releases the
+        /// acquisition it came from. Index alone could not tell them apart: slots are reused
+        /// last-in-first-out, so after Release(h) the very next acquire hands out h's index again, and a
+        /// second Release(h) -- a plain double release -- returned the new owner's object to the pool
+        /// while they were still using it.
+        /// </remarks>
+        public readonly int Generation;
+
+        /// <summary>
         /// Creates a new pool handle.
         /// </summary>
-        internal PoolHandle(int index, T obj)
+        internal PoolHandle(int index, T obj, int generation)
         {
             Index = index;
             Object = obj;
+            Generation = generation;
         }
         
         /// <summary>
         /// Whether this handle is valid (has a valid index).
+        /// It says nothing about whether the handle is still current; a handle that has already been
+        /// released keeps its index and is rejected by <see cref="CEPool{T}.Release(PoolHandle{T})"/>.
         /// </summary>
         public bool IsValid => Index >= 0;
         
         /// <summary>
         /// Returns an invalid pool handle.
         /// </summary>
-        public static PoolHandle<T> Invalid => new PoolHandle<T>(-1, null);
+        public static PoolHandle<T> Invalid => new PoolHandle<T>(-1, null, 0);
     }
 
     /// <summary>
@@ -58,25 +73,31 @@ namespace UdonSharp.CE.Perf
     ///
     /// The pool tracks active objects and provides callbacks for initialization
     /// and cleanup when objects are acquired or released.
+    ///
+    /// Those callbacks, and the factory, are delegates, and the pool stores and invokes them. Udon has
+    /// no way to represent a delegate, and CE inlines a lambda only where it is passed to
+    /// List&lt;T&gt;.ForEach or one of CEList's ForEach helpers, so this class is for editor and plain C#
+    /// code. An UdonSharpBehaviour
+    /// that needs pooling keeps its own free stack of indices, the way the showcase BulletPool does.
     /// </remarks>
     /// <example>
     /// <code>
-    /// public class BulletPool : UdonSharpBehaviour
+    /// // Editor / plain C# usage
+    /// public class BulletPool
     /// {
-    ///     [SerializeField] private GameObject bulletPrefab;
-    ///     [SerializeField] private int poolSize = 100;
+    ///     private readonly GameObject bulletPrefab;
+    ///     private readonly CEPool<GameObject> pool;
     ///
-    ///     private CEPool<GameObject> pool;
-    ///
-    ///     void Start()
+    ///     public BulletPool(GameObject prefab, int poolSize)
     ///     {
+    ///         bulletPrefab = prefab;
     ///         pool = new CEPool<GameObject>(poolSize);
     ///         pool.Initialize(CreateBullet, OnBulletAcquired, OnBulletReleased);
     ///     }
     ///
     ///     GameObject CreateBullet(int index)
     ///     {
-    ///         var bullet = Instantiate(bulletPrefab);
+    ///         var bullet = Object.Instantiate(bulletPrefab);
     ///         bullet.SetActive(false);
     ///         return bullet;
     ///     }
@@ -108,6 +129,12 @@ namespace UdonSharp.CE.Perf
         /// Whether each slot is currently in use.
         /// </summary>
         private readonly bool[] _inUse;
+
+        /// <summary>
+        /// Release count of each slot. Stamped into every <see cref="PoolHandle{T}"/> so that a handle
+        /// from an earlier acquisition of the same slot can be told apart from the current one.
+        /// </summary>
+        private readonly int[] _generations;
 
         /// <summary>
         /// Stack of available slot indices for O(1) acquire.
@@ -189,6 +216,7 @@ namespace UdonSharp.CE.Perf
             _capacity = capacity;
             _objects = new T[capacity];
             _inUse = new bool[capacity];
+            _generations = new int[capacity];
             _freeStack = new int[capacity];
             _freeCount = 0;
             _activeCount = 0;
@@ -383,7 +411,7 @@ namespace UdonSharp.CE.Perf
                 _onAcquire(obj);
             }
 
-            return new PoolHandle<T>(index, obj);
+            return new PoolHandle<T>(index, obj, _generations[index]);
         }
 
         /// <summary>
@@ -391,10 +419,16 @@ namespace UdonSharp.CE.Perf
         /// O(1) operation - much faster than Release(obj).
         /// </summary>
         /// <param name="handle">The handle returned from AcquireHandle().</param>
-        /// <returns>True if the object was released.</returns>
+        /// <returns>
+        /// True if the object was released. False for an invalid handle and for a stale one -- a handle
+        /// whose acquisition has already been released, whether or not the slot has been handed out
+        /// again since.
+        /// </returns>
         public bool Release(PoolHandle<T> handle)
         {
             if (!handle.IsValid) return false;
+            if (handle.Index >= _capacity) return false;
+            if (_generations[handle.Index] != handle.Generation) return false;
             return ReleaseByIndex(handle.Index);
         }
 
@@ -447,6 +481,7 @@ namespace UdonSharp.CE.Perf
             }
 
             _inUse[index] = false;
+            _generations[index]++;
             _activeCount--;
 
             // Push to free stack
@@ -473,6 +508,7 @@ namespace UdonSharp.CE.Perf
                     }
 
                     _inUse[i] = false;
+                    _generations[i]++;
                     _freeStack[_freeCount] = i;
                     _freeCount++;
                 }

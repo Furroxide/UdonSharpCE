@@ -103,6 +103,12 @@ namespace CEShowcase.Station5_Persistence
         private float _achievementPopupTimer;
         private const float ACHIEVEMENT_POPUP_DURATION = 3f;
         
+        // Popups waiting for the one on screen to finish. One slot per achievement, so even a pickup
+        // that unlocks everything at once cannot overflow it.
+        private string[] _achievementPopupQueue;
+        private int _achievementPopupQueueCount;
+        private const int ACHIEVEMENT_COUNT = 8;
+        
         // Persistence state
         private int _estimatedSize;
         private int _autoSaveCount;
@@ -203,14 +209,38 @@ namespace CEShowcase.Station5_Persistence
         {
             _playTime += Time.deltaTime;
             
-            // Update achievement popup timer
+            AdvanceAchievementPopup(Time.deltaTime);
+        }
+
+        /// <summary>
+        /// Runs the popup timer. When the popup on screen has had its time, the next queued one takes
+        /// over; only when nothing is waiting does the popup go away.
+        /// </summary>
+        private void AdvanceAchievementPopup(float deltaTime)
+        {
+            if (_achievementPopupTimer <= 0)
+                return;
+
+            _achievementPopupTimer -= deltaTime;
             if (_achievementPopupTimer > 0)
+                return;
+
+            if (_achievementPopupQueueCount > 0)
             {
-                _achievementPopupTimer -= Time.deltaTime;
-                if (_achievementPopupTimer <= 0 && _achievementPopup != null)
+                string next = _achievementPopupQueue[0];
+                for (int i = 1; i < _achievementPopupQueueCount; i++)
                 {
-                    _achievementPopup.SetActive(false);
+                    _achievementPopupQueue[i - 1] = _achievementPopupQueue[i];
                 }
+                _achievementPopupQueueCount--;
+
+                ShowAchievementPopup(next);
+                return;
+            }
+
+            if (_achievementPopup != null)
+            {
+                _achievementPopup.SetActive(false);
             }
         }
         
@@ -442,62 +472,94 @@ namespace CEShowcase.Station5_Persistence
         
         private void CheckAchievements()
         {
-            bool newAchievement = false;
-            string achievementName = "";
-            
+            // Every achievement is tested on its own. These were one else-if chain, so a pickup could
+            // grant at most one: a first pickup that was also a rare find earned "First Discovery", and
+            // "First Rare Find!" turned up on the next pickup, whatever that was -- or never, if the
+            // player stopped there, in which case it was never saved either.
             if (!_achieveFirstItem && _totalCollected >= 1)
             {
                 _achieveFirstItem = true;
-                achievementName = "<color=#FFD700>[TROPHY]</color> First Discovery!";
-                newAchievement = true;
+                UnlockAchievement("<color=#FFD700>[TROPHY]</color> First Discovery!");
             }
-            else if (!_achieveTenItems && _totalCollected >= 10)
+
+            if (!_achieveTenItems && _totalCollected >= 10)
             {
                 _achieveTenItems = true;
-                achievementName = "<color=#FFD700>[TROPHY]</color> Novice Collector (10 items)";
-                newAchievement = true;
+                UnlockAchievement("<color=#FFD700>[TROPHY]</color> Novice Collector (10 items)");
             }
-            else if (!_achieveHundredItems && _totalCollected >= 100)
+
+            if (!_achieveHundredItems && _totalCollected >= 100)
             {
                 _achieveHundredItems = true;
-                achievementName = "<color=#FFD700>[TROPHY]</color> Master Collector (100 items)";
-                newAchievement = true;
+                UnlockAchievement("<color=#FFD700>[TROPHY]</color> Master Collector (100 items)");
             }
-            else if (!_achieveFirstRare && _rareCount >= 1)
+
+            if (!_achieveFirstRare && _rareCount >= 1)
             {
                 _achieveFirstRare = true;
-                achievementName = "<color=#3399FF>[GEM]</color> First Rare Find!";
-                newAchievement = true;
+                UnlockAchievement("<color=#3399FF>[GEM]</color> First Rare Find!");
             }
-            else if (!_achieveFirstLegendary && _legendaryCount >= 1)
+
+            if (!_achieveFirstLegendary && _legendaryCount >= 1)
             {
                 _achieveFirstLegendary = true;
-                achievementName = "<color=#FFD700>[STAR]</color> Legendary Discovery!";
-                newAchievement = true;
+                UnlockAchievement("<color=#FFD700>[STAR]</color> Legendary Discovery!");
             }
-            else if (!_achieve1000Points && _totalScore >= 1000)
+
+            if (!_achieve1000Points && _totalScore >= 1000)
             {
                 _achieve1000Points = true;
-                achievementName = "<color=#FFD700>[GOLD]</color> Treasure Hunter (1000 pts)";
-                newAchievement = true;
+                UnlockAchievement("<color=#FFD700>[GOLD]</color> Treasure Hunter (1000 pts)");
             }
-            else if (!_achieve5000Points && _totalScore >= 5000)
+
+            if (!_achieve5000Points && _totalScore >= 5000)
             {
                 _achieve5000Points = true;
-                achievementName = "<color=#FFD700>[CROWN]</color> Treasure Master (5000 pts)";
-                newAchievement = true;
+                UnlockAchievement("<color=#FFD700>[CROWN]</color> Treasure Master (5000 pts)");
             }
-            else if (!_achieveAllTypes && _itemNames != null && _uniqueItemCount >= _itemNames.Length)
+
+            if (!_achieveAllTypes && _itemNames != null && _uniqueItemCount >= _itemNames.Length)
             {
                 _achieveAllTypes = true;
-                achievementName = "<color=#00FFFF>[STAR]</color> Complete Collection!";
-                newAchievement = true;
+                UnlockAchievement("<color=#00FFFF>[STAR]</color> Complete Collection!");
+            }
+        }
+
+        /// <summary>
+        /// Records a newly earned achievement and gets it in front of the player. There is one popup, so
+        /// an achievement earned while another is still on screen waits its turn instead of replacing it.
+        /// </summary>
+        private void UnlockAchievement(string achievementName)
+        {
+            AddRecentActivity($"<color=#FFD700>{achievementName}</color>");
+            CELogger.Info("Inventory", $"Achievement unlocked: {achievementName}");
+
+            if (_achievementPopup == null)
+            {
+                // No popup to wait behind, so the chime is the whole announcement.
+                if (_achievementSound != null)
+                {
+                    _achievementSound.Play();
+                }
+                return;
             }
             
-            if (newAchievement)
+            if (_achievementPopupTimer > 0)
             {
-                ShowAchievementPopup(achievementName);
+                if (_achievementPopupQueue == null)
+                {
+                    _achievementPopupQueue = new string[ACHIEVEMENT_COUNT];
+                }
+
+                if (_achievementPopupQueueCount < _achievementPopupQueue.Length)
+                {
+                    _achievementPopupQueue[_achievementPopupQueueCount] = achievementName;
+                    _achievementPopupQueueCount++;
+                }
+                return;
             }
+
+            ShowAchievementPopup(achievementName);
         }
         
         private void ShowAchievementPopup(string achievementName)
@@ -517,9 +579,6 @@ namespace CEShowcase.Station5_Persistence
             {
                 _achievementSound.Play();
             }
-            
-            AddRecentActivity($"<color=#FFD700>{achievementName}</color>");
-            CELogger.Info("Inventory", $"Achievement unlocked: {achievementName}");
         }
         
         private int CountAchievements()
@@ -1082,6 +1141,9 @@ namespace CEShowcase.Station5_Persistence
             _achieve1000Points = false;
             _achieve5000Points = false;
             
+            // Popups still waiting belong to achievements that no longer exist
+            _achievementPopupQueueCount = 0;
+
             _estimatedSize = 0;
             _autoSaveCount = 0;
             

@@ -1,9 +1,10 @@
 using JetBrains.Annotations;
+using UnityEngine;
 
 namespace UdonSharp.CE.NetPhysics
 {
     /// <summary>
-    /// Ring buffer storing snapshots and local inputs for rollback.
+    /// Ring buffer of recent simulation frames: this client's predicted state and local input for each.
     /// Intended to be allocation-free during gameplay.
     /// </summary>
     [PublicAPI]
@@ -46,11 +47,27 @@ namespace UdonSharp.CE.NetPhysics
 
         public void Record(int frame, PhysicsSnapshot state, InputFrame input)
         {
+            // A frame the window already holds is replaced in place. It used to fall through to the
+            // append bookkeeping below, so every re-recorded frame grew the count or pushed the oldest
+            // frame forward although no new frame had arrived. A handful of re-recorded runs slid the
+            // window into the future, after which no incoming packet named a frame it would admit to
+            // holding and every one of them was treated as having no history at all.
+            bool rewrite = _count > 0 && frame >= _oldestFrame && frame <= NewestFrame;
+
+            // A frame that neither rewrites nor directly extends the window breaks the run. Slots are
+            // addressed by frame number, so keeping the old bounds across a gap would leave the window
+            // claiming frames whose slots still hold data from a whole lap earlier.
+            if (!rewrite && _count > 0 && frame != NewestFrame + 1)
+                _count = 0;
+
             int index = Mod(frame, _capacity);
 
             _snapshots[index].CopyFrom(state);
             _snapshots[index].Frame = frame;
             _inputs[index].CopyFrom(input);
+
+            if (rewrite)
+                return;
 
             if (_count == 0)
             {
@@ -109,6 +126,42 @@ namespace UdonSharp.CE.NetPhysics
             }
 
             return written;
+        }
+
+        /// <summary>
+        /// Shifts one entity's recorded state in every held frame from <paramref name="fromFrame"/> on,
+        /// and returns how many frames were touched.
+        /// </summary>
+        /// <remarks>
+        /// A correction measured against frame F is applied to the entity as it stands now. The frames
+        /// recorded between F and now still describe the uncorrected prediction, and the next packet is
+        /// compared against one of them: left alone, it would measure the same error again and the
+        /// correction would be applied a second time, then a third, once per packet until the packets
+        /// caught up with the present. Moving the recorded frames by the same amount is what makes one
+        /// error cost exactly one correction.
+        /// </remarks>
+        public int OffsetEntity(int entityId, int fromFrame, Vector3 positionDelta, Quaternion rotationDelta, Vector3 velocityDelta, Vector3 angularVelocityDelta)
+        {
+            if (_count == 0)
+                return 0;
+
+            int newest = NewestFrame;
+            int start = fromFrame > _oldestFrame ? fromFrame : _oldestFrame;
+            int shifted = 0;
+
+            for (int f = start; f <= newest; f++)
+            {
+                PhysicsSnapshot snapshot = _snapshots[Mod(f, _capacity)];
+
+                int index = snapshot.IndexOfEntity(entityId);
+                if (index < 0)
+                    continue;
+
+                snapshot.OffsetEntity(index, positionDelta, rotationDelta, velocityDelta, angularVelocityDelta);
+                shifted++;
+            }
+
+            return shifted;
         }
 
         private bool ContainsFrame(int frame)

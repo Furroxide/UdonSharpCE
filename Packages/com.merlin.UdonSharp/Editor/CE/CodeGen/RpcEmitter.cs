@@ -24,9 +24,11 @@ namespace UdonSharp.CE.Editor.CodeGen
     ///     local call and is allowed.
     ///  2. Rewrite call sites into SendCustomNetworkEvent with the declared target.
     ///
-    /// The two halves have different reach, which is why the per-file gate in <see cref="Optimize"/> is
-    /// two separate tests: a declaration is always in a file that spells the attribute, a call site
-    /// usually is not.
+    /// The two halves have different reach -- a call site is usually in a file that never spells the
+    /// attribute, and a declaration can avoid spelling it too, through an alias or a derived attribute
+    /// type -- which is why the per-file gate in <see cref="Optimize"/> is the set of [Rpc] method names
+    /// rather than anything about how the attribute is written, and why both halves recognise an [Rpc]
+    /// through the bound attribute type before falling back to the written name.
     ///
     /// A generated sender method is deliberately NOT emitted. CE transforms only rewrite the trees inside
     /// UdonSharp's private compilation while Unity compiles the original source, so a generated member
@@ -36,7 +38,26 @@ namespace UdonSharp.CE.Editor.CodeGen
     /// </summary>
     internal class RpcEmitter : ICompileTimeOptimizer
     {
-        public string OptimizerId => "CEGEN009";
+        /// <summary>
+        /// The one spelling of this emitter's id. The runner matches a discharged obligation to its
+        /// generator by this string, so a second literal that drifted from <see cref="OptimizerId"/> would
+        /// not fail anything visibly -- the discharge would simply never be counted and USCE0001 would
+        /// start failing correct projects.
+        /// </summary>
+        private const string GeneratorId = "CEGEN009";
+
+        /// <summary>
+        /// The exact spelling of the [NetworkCallable] this emitter adds to an [Rpc] that has none.
+        /// </summary>
+        /// <remarks>
+        /// RpcMethodAnalyzer runs over the rewritten trees and reports an [Rpc] whose RateLimit disagrees
+        /// with a [NetworkCallable] the author wrote by hand. The one this emitter adds holds the rate it
+        /// derived from RateLimit itself, so the analyzer has to be able to tell the two apart, and this
+        /// spelling is how: one constant, so the injection and the check cannot drift apart.
+        /// </remarks>
+        internal const string InjectedNetworkCallableName = "global::VRC.SDK3.UdonNetworkCalling.NetworkCallable";
+
+        public string OptimizerId => GeneratorId;
         public string OptimizerName => "Rpc Network Event Emitter";
         public string Description => "Marks [Rpc] methods [NetworkCallable] and rewrites call sites into network events.";
         public bool IsEnabledByDefault => true;
@@ -46,7 +67,8 @@ namespace UdonSharp.CE.Editor.CodeGen
         /// The [Rpc] method names declared anywhere in a compilation, keyed by that compilation.
         /// </summary>
         /// <remarks>
-        /// The call-site half of this pass has to run on files that never mention "Rpc", so it needs a gate
+        /// This pass has to run on files that never mention "Rpc" -- every cross-file call site, and any
+        /// declaration whose attribute is spelled through an alias or a derived type -- so it needs a gate
         /// the file's own text cannot provide. Collecting the declared names once per compilation keeps
         /// that gate a substring test rather than a symbol lookup on every invocation in the project.
         ///
@@ -65,19 +87,22 @@ namespace UdonSharp.CE.Editor.CodeGen
             SyntaxNode root = tree.GetRoot();
             string sourceText = root.ToFullString();
 
-            // A DECLARATION is only ever in a file that spells the attribute, so the substring still
-            // decides that half.
-            bool mayDeclare = sourceText.IndexOf("Rpc", StringComparison.Ordinal) >= 0;
-
-            // A CALL SITE normally is not: '[Rpc] public void StartGame()' lives in A.cs while
-            // 'manager.StartGame()' lives in B.cs, and B.cs need not contain the substring "Rpc" anywhere.
-            // Gating the whole pass on that substring skipped B.cs outright, so the receiver was marked
-            // [NetworkCallable] while the call stayed a plain local call -- the cross-file case, which is
-            // the normal one, silently did not send. Gate the call rewrite on the [Rpc] method names
-            // instead, collected once for the whole compilation.
-            bool mayCall = MentionsRpcMethodName(semanticModel.Compilation, sourceText);
-
-            if (!mayDeclare && !mayCall)
+            // One gate decides both halves: the [Rpc] method names declared anywhere in this compilation.
+            //
+            // A CALL SITE is why the names exist at all: '[Rpc] public void StartGame()' lives in A.cs
+            // while 'manager.StartGame()' lives in B.cs, and B.cs need not contain the substring "Rpc"
+            // anywhere. Gating the whole pass on that substring skipped B.cs outright, so the receiver was
+            // marked [NetworkCallable] while the call stayed a plain local call -- the cross-file case,
+            // which is the normal one, silently did not send.
+            //
+            // A DECLARATION used to keep the substring test, on the reasoning that it is only ever in a
+            // file that spells the attribute. It is not: 'using NetCall = UdonSharp.CE.Net.RpcAttribute;'
+            // and an attribute type deriving from RpcAttribute both declare an [Rpc] without the letters
+            // "Rpc" appearing at the method, or in the second case anywhere in the file. Such a file was
+            // never walked, so the method got no [NetworkCallable], no owner guard and no error. A file
+            // that declares an [Rpc] necessarily contains that method's own name, so the name table covers
+            // declarations too and the substring test is gone.
+            if (!MentionsRpcMethodName(semanticModel.Compilation, sourceText))
                 return tree;
 
             var rewriter = new Rewriter(semanticModel, context);
@@ -112,9 +137,18 @@ namespace UdonSharp.CE.Editor.CodeGen
         /// Every method name in the compilation that carries an [Rpc]-family attribute.
         /// </summary>
         /// <remarks>
-        /// Names rather than symbols: this only has to decide whether a file is worth walking, and a name
-        /// comparison needs no semantic model. A name that collides with an unrelated method costs that
-        /// file one walk, where the per-invocation symbol check rejects it.
+        /// Names rather than symbols are what the gate compares: it only has to decide whether a file is
+        /// worth walking. A name that collides with an unrelated method costs that file one walk, where
+        /// the per-invocation symbol check rejects it.
+        ///
+        /// Deciding which methods ARE [Rpc] declarations is a different question, and the written name
+        /// alone gets it wrong. '[NetCall]' under 'using NetCall = UdonSharp.CE.Net.RpcAttribute;', or an
+        /// attribute class deriving from RpcAttribute, is an [Rpc] to every call site -- those resolve the
+        /// bound attribute type -- but was not one here. The declaration was then never marked
+        /// [NetworkCallable] and never given its owner guard, while calls to it in the same file were
+        /// still rewritten into sends to a receiver that could not accept them. So a method whose
+        /// attributes do not spell an [Rpc] is asked through its symbol. Only methods that carry an
+        /// attribute list at all get that far, which keeps the semantic model out of the common case.
         ///
         /// Only source declarations are collected, which is the whole reachable set: CE marks a receiver
         /// [NetworkCallable] by rewriting its tree, so an [Rpc] that is not in this compilation was never
@@ -126,6 +160,9 @@ namespace UdonSharp.CE.Editor.CodeGen
 
             foreach (SyntaxTree candidate in compilation.SyntaxTrees)
             {
+                // Created on first use: most trees have no method that needs its symbol looked at.
+                SemanticModel model = null;
+
                 // Method bodies cannot hold an [Rpc] declaration, so they are not descended into. On a
                 // project-sized tree set that is the difference between walking declarations and walking
                 // every expression in the project once per compile.
@@ -135,10 +172,19 @@ namespace UdonSharp.CE.Editor.CodeGen
 
                 foreach (SyntaxNode node in declarations)
                 {
-                    if (!(node is MethodDeclarationSyntax method))
+                    if (!(node is MethodDeclarationSyntax method) || method.AttributeLists.Count == 0)
                         continue;
 
                     if (FindRpcAttribute(method.AttributeLists, out _) != null)
+                    {
+                        names.Add(method.Identifier.Text);
+                        continue;
+                    }
+
+                    if (model == null)
+                        model = compilation.GetSemanticModel(candidate);
+
+                    if (model.GetDeclaredSymbol(method) is IMethodSymbol symbol && HasBoundRpcAttribute(symbol))
                         names.Add(method.Identifier.Text);
                 }
             }
@@ -152,9 +198,58 @@ namespace UdonSharp.CE.Editor.CodeGen
         }
 
         /// <summary>
+        /// Whether a method symbol carries an attribute the compiler bound to RpcAttribute or a type
+        /// deriving from it, however that attribute was spelled at the declaration.
+        /// </summary>
+        private static bool HasBoundRpcAttribute(IMethodSymbol method)
+        {
+            foreach (AttributeData attribute in method.GetAttributes())
+            {
+                if (IsRpcAttribute(attribute.AttributeClass, out _))
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Whether this bound attribute class is an [Rpc], and whether it is the RpcOwnerOnly shorthand.
+        /// </summary>
+        /// <remarks>
+        /// The shorthand sets OwnerOnly in its own constructor, so the value never reaches metadata and
+        /// cannot be read from NamedArguments -- the class identity is the only evidence there is.
+        ///
+        /// An attribute the compiler could not bind is never a match, whatever the error symbol happens
+        /// to be called: it carries no constructor or named arguments, so accepting it would read every
+        /// option as its default -- OwnerOnly included -- instead of sending the caller on to the written
+        /// tokens, which is the only place an unbound attribute's values still exist.
+        /// </remarks>
+        private static bool IsRpcAttribute(INamedTypeSymbol attributeClass, out bool ownerOnlyShorthand)
+        {
+            ownerOnlyShorthand = false;
+
+            if (attributeClass == null || attributeClass.TypeKind == TypeKind.Error)
+                return false;
+
+            for (INamedTypeSymbol type = attributeClass; type != null; type = type.BaseType)
+            {
+                if (type.Name == "RpcOwnerOnlyAttribute")
+                    ownerOnlyShorthand = true;
+
+                if (type.Name == "RpcAttribute")
+                    return true;
+            }
+
+            ownerOnlyShorthand = false;
+            return false;
+        }
+
+        /// <summary>
         /// The [Rpc]-family attribute written on a declaration, if any, along with its short name as
         /// written. Purely syntactic: it answers "did the author ask for an RPC here", which has to be
-        /// answerable even when the semantic model cannot bind the attribute type.
+        /// answerable even when the semantic model cannot bind the attribute type. It is the fallback, not
+        /// the test -- an alias or a derived attribute type is invisible to it, so wherever a symbol is
+        /// available the bound attribute class is asked first (<see cref="IsRpcAttribute"/>).
         /// </summary>
         private static AttributeSyntax FindRpcAttribute(SyntaxList<AttributeListSyntax> attributeLists, out string shortName)
         {
@@ -190,6 +285,18 @@ namespace UdonSharp.CE.Editor.CodeGen
             private readonly SemanticModel _semanticModel;
             private readonly OptimizationContext _context;
 
+            /// <summary>
+            /// The [Rpc] declaration whose body is being visited, or null outside one.
+            /// </summary>
+            /// <remarks>
+            /// Recorded by the declaration visit rather than re-derived at each call site. Re-deriving it
+            /// meant asking the enclosing method's written attribute names again, which is the purely
+            /// syntactic test that cannot see an aliased or derived [Rpc] -- so a call made from inside
+            /// such a method slipped past CE0045 and was rewritten into the re-broadcast that check
+            /// exists to refuse. Methods do not nest, so one slot is enough.
+            /// </remarks>
+            private MethodDeclarationSyntax _enclosingRpc;
+
             public bool ChangesMade { get; private set; }
 
             public Rewriter(SemanticModel semanticModel, OptimizationContext context)
@@ -203,6 +310,26 @@ namespace UdonSharp.CE.Editor.CodeGen
                 RpcSpec spec = ReadRpcSpec(node);
                 if (spec == null)
                     return base.VisitMethodDeclaration(node);
+
+                // UdonSharp never exports a static method as an event and builds no network metadata for
+                // one, so a static [Rpc] compiled cleanly and then did nothing at all: the call site was
+                // still rewritten into a send naming an event no program has, VRChat logged that it does
+                // not exist, and the body ran on no client -- including the caller's, which had run it
+                // before the rewrite.
+                foreach (SyntaxToken modifier in node.Modifiers)
+                {
+                    if (modifier.IsKind(SyntaxKind.StaticKeyword))
+                    {
+                        throw new CodeGenerationException(
+                            "CE0011",
+                            node.Identifier.GetLocation(),
+                            "[Rpc] method '" + node.Identifier.Text + "' is static. A network event is " +
+                            "delivered to a behaviour instance, and UdonSharp does not export static methods " +
+                            "as events, so no client could ever receive this one: the send would name an " +
+                            "event that does not exist and the method body would never run. Make it an " +
+                            "instance method.");
+                    }
+                }
 
                 if (!node.ReturnType.ToString().Equals("void", StringComparison.Ordinal))
                 {
@@ -224,16 +351,25 @@ namespace UdonSharp.CE.Editor.CodeGen
 
                 ValidateParameterList(node);
 
+                MethodDeclarationSyntax outerRpc = _enclosingRpc;
+                _enclosingRpc = node;
+
                 var visited = (MethodDeclarationSyntax)base.VisitMethodDeclaration(node);
+
+                _enclosingRpc = outerRpc;
+
+                // Kept to tell, further down, whether THIS declaration needed anything added. ChangesMade
+                // cannot answer that: it is per file, and a rewritten call elsewhere in the file sets it too.
+                MethodDeclarationSyntax asWritten = visited;
 
                 if (!HasAttribute(visited.AttributeLists, "NetworkCallable"))
                 {
-                    int maxEventsPerSecond = ResolveRateLimit(spec, visited.ParameterList.Parameters.Count, node);
+                    int maxEventsPerSecond = ResolveRateLimit(spec, node);
 
                     AttributeListSyntax networkCallable = SyntaxFactory.AttributeList(
                         SyntaxFactory.SingletonSeparatedList(
                             SyntaxFactory.Attribute(
-                                SyntaxFactory.ParseName("global::VRC.SDK3.UdonNetworkCalling.NetworkCallable"),
+                                SyntaxFactory.ParseName(InjectedNetworkCallableName),
                                 SyntaxFactory.AttributeArgumentList(
                                     SyntaxFactory.SingletonSeparatedList(
                                         SyntaxFactory.AttributeArgument(
@@ -280,8 +416,18 @@ namespace UdonSharp.CE.Editor.CodeGen
                     }
                 }
 
+                // An [Rpc] the author already completed by hand -- [NetworkCallable] written next to it, no
+                // owner guard owed or one already in the body -- is recognised here and correctly left
+                // alone. A project whose every [Rpc] is like that, sent through CENet.Rpc or a hand-written
+                // SendCustomNetworkEvent, changes no tree at all, and the USCE0001 tripwire reads "wrote
+                // [Rpc], nothing transformed" as this emitter having silently stopped working. Saying so
+                // here is what keeps that compile from failing. It is said only for a declaration this
+                // method positively identified, never as a blanket "the pass ran".
+                if (ReferenceEquals(visited, asWritten))
+                    _context.RecordObligationDischarged(GeneratorId);
+
                 _context.RecordOptimization(
-                    optimizerId: "CEGEN009",
+                    optimizerId: GeneratorId,
                     description: "[Rpc] '" + node.Identifier.Text + "' is now a real network event (target " + spec.Target + ").",
                     location: node.GetLocation(),
                     originalCode: node.Identifier.Text,
@@ -402,10 +548,14 @@ namespace UdonSharp.CE.Editor.CodeGen
 
             private static StatementSyntax BuildOwnerGuard(string methodName)
             {
+                // 'this.gameObject', not a bare 'gameObject': the guard is spliced into the author's own
+                // method body, so a parameter or local that happens to be called gameObject would capture
+                // the bare name -- the ownership check then tests the wrong object, or the injected
+                // statement stops compiling with an error pointing at code the author never wrote.
                 string guard =
                     "{ global::VRC.SDKBase.VRCPlayerApi __ce_rpcCaller = " +
                     "global::VRC.SDK3.UdonNetworkCalling.NetworkCalling.CallingPlayer; " +
-                    "if (__ce_rpcCaller != null && !global::VRC.SDKBase.Networking.IsOwner(__ce_rpcCaller, gameObject)) " +
+                    "if (__ce_rpcCaller != null && !global::VRC.SDKBase.Networking.IsOwner(__ce_rpcCaller, this.gameObject)) " +
                     "{ global::UnityEngine.Debug.LogWarning(\"[CE.Rpc] Dropped a non-owner call to " + methodName + ".\"); " +
                     "return; } }";
 
@@ -447,10 +597,9 @@ namespace UdonSharp.CE.Editor.CodeGen
                 if (invoked != null && !SymbolEqualityComparer.Default.Equals(invoked, target))
                     return visited;
 
-                MethodDeclarationSyntax enclosing = node.FirstAncestorOrSelf<MethodDeclarationSyntax>();
-                bool insideRpc = enclosing != null && FindRpcAttribute(enclosing.AttributeLists, out _) != null;
+                MethodDeclarationSyntax enclosing = _enclosingRpc;
 
-                if (insideRpc)
+                if (enclosing != null)
                 {
                     // Direct recursion on this same behaviour is left as a plain local call. The receiving
                     // client is already running the body, so rewriting it would make that client re-broadcast
@@ -493,7 +642,7 @@ namespace UdonSharp.CE.Editor.CodeGen
                 // network callable but not which of the author's calls now cost bandwidth -- which is the
                 // question the report exists to answer.
                 _context.RecordOptimization(
-                    optimizerId: "CEGEN009",
+                    optimizerId: GeneratorId,
                     description: "Call to [Rpc] '" + target.Name + "' now sends a network event to " + spec.Target + ".",
                     location: node.GetLocation(),
                     originalCode: node.ToString(),
@@ -511,8 +660,13 @@ namespace UdonSharp.CE.Editor.CodeGen
             /// which does not compile, meaning a legal C# call broke the build of the whole project.
             /// SendCustomNetworkEvent takes a 'params object[]', so only the expression may be forwarded,
             /// and it has to be forwarded in the receiver's parameter order rather than the written order.
+            ///
+            /// <paramref name="argumentList"/> is the REWRITTEN list, because that is the text to forward;
+            /// <paramref name="node"/> still carries the original one, which is the only one the semantic
+            /// model can answer type questions about. Visiting never adds or removes an argument, so the
+            /// two are read in step by position.
             /// </remarks>
-            private static List<string> BuildForwardedArguments(
+            private List<string> BuildForwardedArguments(
                 InvocationExpressionSyntax node,
                 ArgumentListSyntax argumentList,
                 IMethodSymbol target)
@@ -521,8 +675,12 @@ namespace UdonSharp.CE.Editor.CodeGen
                 bool reordered = false;
                 int previousIndex = -1;
 
-                foreach (ArgumentSyntax argument in argumentList.Arguments)
+                SeparatedSyntaxList<ArgumentSyntax> writtenArguments = node.ArgumentList.Arguments;
+
+                for (int argumentIndex = 0; argumentIndex < argumentList.Arguments.Count; argumentIndex++)
                 {
+                    ArgumentSyntax argument = argumentList.Arguments[argumentIndex];
+
                     // Unreachable through a declaration this pass has seen -- ValidateParameterList refuses
                     // by-reference parameters -- but an [Rpc] resolved from outside this compilation has
                     // been through no such check, and 'ref x' inside a params object[] does not compile.
@@ -567,7 +725,15 @@ namespace UdonSharp.CE.Editor.CodeGen
                     if (parameterIndex < previousIndex)
                         reordered = true;
 
-                    forwarded[parameterIndex] = argument.Expression.ToString();
+                    ExpressionSyntax written = argumentIndex < writtenArguments.Count
+                        ? writtenArguments[argumentIndex].Expression
+                        : null;
+
+                    forwarded[parameterIndex] = ForwardAsParameterType(
+                        argument.Expression.ToString(),
+                        written,
+                        target.Parameters[parameterIndex]);
+
                     previousIndex = parameterIndex;
                 }
 
@@ -606,6 +772,75 @@ namespace UdonSharp.CE.Editor.CodeGen
                 }
 
                 return forwarded.ToList();
+            }
+
+            /// <summary>
+            /// The text to forward for one argument, converted to the declared parameter type whenever the
+            /// written expression is not already of that type.
+            /// </summary>
+            /// <remarks>
+            /// A direct call converts its arguments: 'SetVolume(1)' against 'void SetVolume(float v)' passes
+            /// 1f. The send does not, because every SendCustomNetworkEvent parameter is 'object' -- the same
+            /// text boxes an Int32. VRChat checks each argument's runtime type against the entry point's
+            /// parameter and refuses the event when they differ, so an ordinary call relying on an implicit
+            /// conversion (int to float, int to long, a constant to byte, Vector2 to Vector3) compiled
+            /// cleanly and then never ran; under ClientSim the refusal is an exception inside the extern,
+            /// which halts the calling behaviour as well. Spelling the conversion as a cast restores what
+            /// the direct call did.
+            ///
+            /// An expression whose type comes from where it is written needs the same treatment for a
+            /// different reason. 'default', 'new(1, 2, 3)' and a conditional with no type of its own
+            /// ('flag ? default : default') are given the parameter's type by the direct call -- Roslyn
+            /// even reports that type as theirs -- but moved into an 'object' slot they are retyped by it:
+            /// 'default' becomes null, 'new()' becomes 'new object()', and 'new(1, 2, 3)' stops compiling,
+            /// with the error pointing at code the author never wrote. So a target-typed argument is cast
+            /// whatever type the model reports for it, which hands it back the target the call gave it.
+            ///
+            /// Nothing is added when the types already agree, for a 'null' literal (null is the same value
+            /// in any slot, and the right thing to send for a reference parameter), or when the model
+            /// could not bind the argument: an invented cast would turn a gap in the model into a compile
+            /// error in code the author never wrote.
+            /// </remarks>
+            private string ForwardAsParameterType(string forwardedText, ExpressionSyntax written, IParameterSymbol parameter)
+            {
+                ITypeSymbol parameterType = parameter.Type;
+
+                if (written == null || parameterType == null || parameterType.TypeKind == TypeKind.Error)
+                    return forwardedText;
+
+                ExpressionSyntax unwrapped = written;
+                while (unwrapped is ParenthesizedExpressionSyntax parenthesized)
+                    unwrapped = parenthesized.Expression;
+
+                if (unwrapped.IsKind(SyntaxKind.NullLiteralExpression))
+                    return forwardedText;
+
+                string parameterTypeName = parameterType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+
+                if (unwrapped.IsKind(SyntaxKind.DefaultLiteralExpression))
+                    return "default(" + parameterTypeName + ")";
+
+                TypeInfo typeInfo = _semanticModel.GetTypeInfo(written);
+
+                // The second arm is an expression with no natural type that the call converted to this
+                // parameter's type -- 'flag ? default : default'.
+                bool targetTyped =
+                    unwrapped is ImplicitObjectCreationExpressionSyntax ||
+                    (typeInfo.Type == null &&
+                     SymbolEqualityComparer.Default.Equals(typeInfo.ConvertedType, parameterType));
+
+                if (!targetTyped)
+                {
+                    ITypeSymbol argumentType = typeInfo.Type;
+
+                    if (argumentType == null || argumentType.TypeKind == TypeKind.Error)
+                        return forwardedText;
+
+                    if (SymbolEqualityComparer.Default.Equals(argumentType, parameterType))
+                        return forwardedText;
+                }
+
+                return "(" + parameterTypeName + ")(" + forwardedText + ")";
             }
 
             private static int IndexOfParameter(IMethodSymbol target, string name)
@@ -729,14 +964,21 @@ namespace UdonSharp.CE.Editor.CodeGen
             }
 
             /// <summary>
-            /// VRChat clamps a parameterized network event to 1..100 events/second and defaults to 5.
-            /// Parameterless events are unthrottled (0).
+            /// The whole number of events per second to hand [NetworkCallable]: the declared rate held to
+            /// 1..100, or the SDK's own default of 5 when none was declared.
             /// </summary>
-            private int ResolveRateLimit(RpcSpec spec, int parameterCount, MethodDeclarationSyntax node)
+            /// <remarks>
+            /// [NetworkCallable] has no "unthrottled". The SDK validates every network-callable entry point
+            /// when it builds the method's metadata and throws for a rate below 1 or above 100, with or
+            /// without parameters. A parameterless [Rpc] with no RateLimit used to be emitted as
+            /// [NetworkCallable(0)], on the belief that parameterless events are unthrottled -- true of a
+            /// legacy event, which has no [NetworkCallable] at all, and never of one that carries the
+            /// attribute -- so the most ordinary declaration there is, '[Rpc] public void StartGame()',
+            /// failed the compile with "Rate limit cannot be lower than 1". No declared rate now means the
+            /// same thing for every [Rpc]: what a bare [NetworkCallable] would get.
+            /// </remarks>
+            private int ResolveRateLimit(RpcSpec spec, MethodDeclarationSyntax node)
             {
-                if (parameterCount == 0 && spec.RateLimit <= 0f)
-                    return 0;
-
                 if (spec.RateLimit <= 0f)
                     return 5;
 
@@ -777,7 +1019,7 @@ namespace UdonSharp.CE.Editor.CodeGen
                 UnityEngine.Debug.LogWarning(message);
 
                 _context.RecordOptimization(
-                    optimizerId: "CEGEN009",
+                    optimizerId: GeneratorId,
                     description: "[Rpc] '" + node.Identifier.Text + "' rate limit " + declaredText +
                                  "/s is not expressible; VRChat will enforce " + applied + "/s.",
                     location: node.Identifier.GetLocation(),
@@ -785,12 +1027,24 @@ namespace UdonSharp.CE.Editor.CodeGen
                     optimizedCode: "NetworkCallable(" + applied + ")");
             }
 
+            /// <summary>
+            /// Whether an attribute with this short name is written on the declaration, with or without the
+            /// 'Attribute' suffix.
+            /// </summary>
+            /// <remarks>
+            /// Both spellings name the same type. Matching only the short one read
+            /// '[NetworkCallableAttribute(10)]' as absent and added a second [NetworkCallable] beside it,
+            /// which is CS0579 on a method that was already complete.
+            /// </remarks>
             private static bool HasAttribute(SyntaxList<AttributeListSyntax> attributeLists, string shortName)
             {
+                string longName = shortName + "Attribute";
+
                 return attributeLists
                     .SelectMany(list => list.Attributes)
                     .Select(attribute => attribute.Name.ToString())
-                    .Any(name => name.Substring(name.LastIndexOf('.') + 1) == shortName);
+                    .Select(name => name.Substring(name.LastIndexOf('.') + 1))
+                    .Any(name => name == shortName || name == longName);
             }
 
             /// <summary>
@@ -802,11 +1056,19 @@ namespace UdonSharp.CE.Editor.CodeGen
             /// OwnerOnly = false and the method shipped with no owner guard at all while its author
             /// believed it was protected. AttributeData folds constants, which is the only way to see
             /// through '[Rpc(OwnerOnly = Config.OwnerOnly)]'.
+            ///
+            /// The symbol is also asked BEFORE the written name, not only after it matched. Asking the
+            /// name first made this return "not an [Rpc]" for '[NetCall]' under
+            /// 'using NetCall = UdonSharp.CE.Net.RpcAttribute;' and for any attribute type deriving from
+            /// RpcAttribute, while the call-site half, which only ever had the symbol, went on treating the
+            /// same method as one: calls were rewritten into sends, and the receiver was left without
+            /// [NetworkCallable], without its rate limit and without its owner guard.
             /// </remarks>
             private RpcSpec ReadRpcSpec(MethodDeclarationSyntax node)
             {
-                AttributeSyntax written = FindRpcAttribute(node.AttributeLists, out string shortName);
-                if (written == null)
+                // No attribute list, no [Rpc] -- and no symbol lookup for the overwhelming majority of
+                // methods this is asked about.
+                if (node.AttributeLists.Count == 0)
                     return null;
 
                 if (_semanticModel.GetDeclaredSymbol(node) is IMethodSymbol symbol)
@@ -815,6 +1077,10 @@ namespace UdonSharp.CE.Editor.CodeGen
                     if (bound != null)
                         return bound;
                 }
+
+                AttributeSyntax written = FindRpcAttribute(node.AttributeLists, out string shortName);
+                if (written == null)
+                    return null;
 
                 // The attribute is written but the model did not bind it -- an unresolved reference
                 // somewhere in the file, or an alias this pass's compilation cannot see. The declaration
@@ -902,30 +1168,6 @@ namespace UdonSharp.CE.Editor.CodeGen
                 }
 
                 return null;
-            }
-
-            /// <summary>
-            /// Whether this attribute is an [Rpc], and whether it is the RpcOwnerOnly shorthand.
-            /// </summary>
-            /// <remarks>
-            /// The shorthand sets OwnerOnly in its own constructor, so the value never reaches metadata and
-            /// cannot be read from NamedArguments -- the class identity is the only evidence there is.
-            /// </remarks>
-            private static bool IsRpcAttribute(INamedTypeSymbol attributeClass, out bool ownerOnlyShorthand)
-            {
-                ownerOnlyShorthand = false;
-
-                for (INamedTypeSymbol type = attributeClass; type != null; type = type.BaseType)
-                {
-                    if (type.Name == "RpcOwnerOnlyAttribute")
-                        ownerOnlyShorthand = true;
-
-                    if (type.Name == "RpcAttribute")
-                        return true;
-                }
-
-                ownerOnlyShorthand = false;
-                return false;
             }
 
             private static string ReadTarget(TypedConstant constant, string argumentName, Location location, string memberName)

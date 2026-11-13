@@ -30,8 +30,17 @@ namespace CEShowcase.Station1_BulletHell
         private int _acquireCount;
         private int _releaseCount;
         
-        void Start()
+        // The pool is built by the first AcquireBullet, not in Start. The showcase scene carries this
+        // component and nothing in it ever acquires from it -- BulletHellDemo keeps its own transforms --
+        // so building eagerly instantiated 2,500 bullets nobody would see, on every client, at world
+        // load. A pool that is used still pays the whole cost in one go, on its first acquire.
+        private bool _poolBuilt;
+
+        private void EnsurePool()
         {
+            if (_poolBuilt) return;
+
+            _poolBuilt = true;
             InitializePool();
         }
         
@@ -43,18 +52,25 @@ namespace CEShowcase.Station1_BulletHell
             _bulletTransforms = new Transform[_poolSize];
             _bulletActive = new bool[_poolSize];
             _freeStack = new int[_poolSize];
-            _freeCount = _poolSize;
+            _freeCount = 0;
             
-            // Initialize all pool objects upfront (avoid runtime Instantiate)
+            if (_bulletPrefab == null)
+            {
+                // Leave the pool empty rather than carry on: with nothing to instantiate every slot
+                // would hold a null transform, and the first acquire would halt this behaviour on it.
+                CELogger.Error("BulletPool", "Bullet prefab is required! GameObject.CreatePrimitive is not exposed to Udon.");
+                return;
+            }
+
+            // Create every pool object in one pass (no Instantiate after this)
             for (int i = 0; i < _poolSize; i++)
             {
-                Transform bullet = CreateBullet(i);
-                _bulletTransforms[i] = bullet;
+                _bulletTransforms[i] = CreateBullet(i);
                 _bulletActive[i] = false;
-                bullet.gameObject.SetActive(false);
                 
                 // All indices start free
-                _freeStack[i] = i;
+                _freeStack[_freeCount] = i;
+                _freeCount++;
             }
             
             CELogger.Info("BulletPool", "Pool initialization complete");
@@ -62,12 +78,6 @@ namespace CEShowcase.Station1_BulletHell
         
         private Transform CreateBullet(int index)
         {
-            if (_bulletPrefab == null)
-            {
-                CELogger.Error("BulletPool", "Bullet prefab is required! GameObject.CreatePrimitive is not exposed to Udon.");
-                return null;
-            }
-            
             GameObject bullet = Instantiate(_bulletPrefab, transform);
             bullet.name = "Bullet_" + index;
             bullet.SetActive(false);
@@ -81,6 +91,8 @@ namespace CEShowcase.Station1_BulletHell
         /// </summary>
         public int AcquireBullet(Vector3 position)
         {
+            EnsurePool();
+
             if (_freeCount <= 0)
             {
                 // Pool exhausted
@@ -103,6 +115,7 @@ namespace CEShowcase.Station1_BulletHell
         /// </summary>
         public void ReleaseBullet(int index)
         {
+            if (!_poolBuilt) return;
             if (index < 0 || index >= _poolSize) return;
             if (!_bulletActive[index]) return;
             
@@ -120,6 +133,7 @@ namespace CEShowcase.Station1_BulletHell
         /// </summary>
         public void UpdateBulletPosition(int index, Vector3 position)
         {
+            if (!_poolBuilt) return;
             if (index < 0 || index >= _poolSize) return;
             if (!_bulletActive[index]) return;
             
@@ -131,10 +145,16 @@ namespace CEShowcase.Station1_BulletHell
         /// </summary>
         public void ReleaseAll()
         {
+            // Nothing has been handed out by a pool that was never built
+            if (!_poolBuilt) return;
+
             _freeCount = 0;
             
             for (int i = 0; i < _poolSize; i++)
             {
+                // A pool built without a prefab has no bullets to offer
+                if (_bulletTransforms[i] == null) continue;
+
                 if (_bulletActive[i])
                 {
                     _bulletActive[i] = false;
@@ -152,7 +172,9 @@ namespace CEShowcase.Station1_BulletHell
         
         // ============ Stats ============
         
-        public int GetActiveCount() { return _poolSize - _freeCount; }
+        // Counted from what was handed out, not from the free stack: the stack is empty until the pool
+        // is built, which would report an untouched pool as fully in use.
+        public int GetActiveCount() { return _acquireCount - _releaseCount; }
         public int GetCapacity() { return _poolSize; }
         public int GetAcquireCount() { return _acquireCount; }
         public int GetReleaseCount() { return _releaseCount; }
@@ -162,7 +184,9 @@ namespace CEShowcase.Station1_BulletHell
         /// </summary>
         public float GetUtilization()
         {
-            return ((_poolSize - _freeCount) / (float)_poolSize) * 100f;
+            if (_poolSize <= 0) return 0f;
+
+            return (GetActiveCount() / (float)_poolSize) * 100f;
         }
     }
 }

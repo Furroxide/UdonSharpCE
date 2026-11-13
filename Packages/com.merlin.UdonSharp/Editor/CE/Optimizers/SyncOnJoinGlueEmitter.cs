@@ -19,11 +19,12 @@ namespace UdonSharp.CE.Editor.Optimizers
 
         // Base names for the generated transport. A behaviour emits one COMPLETE set of these per
         // distinct SyncOnJoinAttribute.Group, each suffixed with that group's sanitised identifier, so
-        // changing a field in one group re-sends only that group's payload. The default (unnamed) group
+        // group capture/decode guards track changes independently; transport still serializes the behaviour. The default (unnamed) group
         // keeps the bare names, which is what a behaviour that never mentions Group has always emitted --
         // and what SendCustomEvent("_CE_SyncOnJoin_RequestCapture") and existing tests address.
         private const string PayloadFieldName = "_CE_SyncOnJoinPayload";
         private const string AppliedFieldName = "_CE_SyncOnJoinApplied";
+        private const string OversizeLoggedFieldName = "_CE_SyncOnJoinOversizeLogged";
         private const string SerializeMethodName = "_CE_SyncOnJoin_Serialize";
         private const string DeserializeMethodName = "_CE_SyncOnJoin_Deserialize_Trigger";
         private const string ApplyMethodName = "_CE_SyncOnJoin_Apply";
@@ -34,6 +35,15 @@ namespace UdonSharp.CE.Editor.Optimizers
         /// each group's own change check still decides whether anything is sent at all.
         /// </summary>
         private const string RequestCaptureMethodName = "_CE_SyncOnJoin_RequestCapture";
+
+        /// <summary>
+        /// The one restore entry point, covering every group in the hierarchy the same way
+        /// <see cref="RequestCaptureMethodName"/> covers capture. Start calls it, and Start can only be
+        /// declared once per hierarchy (UdonSharp rejects a second one as hiding the first), so a derived
+        /// behaviour that introduces a group has to reach the base's Start through an override of this
+        /// rather than through a Start of its own.
+        /// </summary>
+        private const string ApplyAllMethodName = "_CE_SyncOnJoin_ApplyAll";
 
         private const string ToDataMethodName = "_CE_SyncOnJoin_ToData";
         private const string FromDataMethodName = "_CE_SyncOnJoin_FromData";
@@ -46,6 +56,11 @@ namespace UdonSharp.CE.Editor.Optimizers
         private const string NaNSentinel = "NaN";
         private const string PositiveInfinitySentinel = "Infinity";
         private const string NegativeInfinitySentinel = "-Infinity";
+
+        // How a long, a ulong, or an enum backed by one is written to text and read back. Both halves name
+        // the invariant culture so the text means the same thing on every client, whatever its locale.
+        private const string InvariantCulture = "global::System.Globalization.CultureInfo.InvariantCulture";
+        private const string IntegerNumberStyle = "global::System.Globalization.NumberStyles.Integer";
 
         public string OptimizerId => GeneratorId;
         public string OptimizerName => "SyncOnJoin Glue Emitter";
@@ -104,21 +119,56 @@ namespace UdonSharp.CE.Editor.Optimizers
                 }
 
                 bool isCarrier = false;
+                bool inheritsGlue = false;
                 bool ownsAnyGroup = false;
                 IReadOnlyList<SyncGroup> groups = EmptyGroups;
+                bool declaresFields = DeclaresSyncOnJoinFields(declaredType);
 
                 if (IsUdonSharpBehaviour(declaredType))
-                    isCarrier = DeclaresSyncOnJoinFields(declaredType);
+                {
+                    isCarrier = declaresFields;
 
-                if (isCarrier)
+                    // A behaviour that declares no [SyncOnJoin] field of its own still runs the glue its
+                    // base carries -- through event handlers the base's author never wrote and cannot
+                    // see. An override of one of those events that does not call base (and the base's
+                    // handler is generated, so nothing in the source says it should) silently replaced
+                    // the capture or the restore for every instance of the derived behaviour.
+                    inheritsGlue = !isCarrier && InheritsSyncOnJoinFields(declaredType);
+                }
+                else if (declaresFields && PartDeclaresSyncOnJoinField(declaredType, node))
+                {
+                    // [SyncOnJoin] on a plain class has nothing to ride on: only a behaviour can carry
+                    // the synced payload. Seen and deliberately left alone, which the generator
+                    // tripwire has to be told or it reads the untouched file as a failed generator.
+                    _context.RecordObligationDischarged(GeneratorId);
+                }
+
+                if (isCarrier || inheritsGlue)
                 {
                     groups = CollectSyncOnJoinGroups(declaredType);
+
+                    // None of the fields this behaviour declares made it into a payload (unsupported type,
+                    // static or const -- each reported on its own as CE0032). That is a decision, not a
+                    // generator that stopped working, and without saying so the tripwire failed the whole
+                    // compile for a project whose only [SyncOnJoin] field needed a [SyncSerializer] --
+                    // before the analyzer that explains exactly that had a chance to run. Only the part
+                    // that actually spells one of those fields says it, so the tripwire stays blind to
+                    // nothing else.
+                    if (isCarrier &&
+                        !groups.Any(group => group.DeclaredByVisitedType) &&
+                        PartDeclaresSyncOnJoinField(declaredType, node))
+                    {
+                        _context.RecordObligationDischarged(GeneratorId);
+                    }
 
                     // Nothing survived type support (every declared field was rejected, each already reported
                     // as CE0032). Emitting the transport anyway would give this behaviour a synced payload
                     // that can only ever carry "{}", which reads as working and delivers nothing.
                     if (groups.Count == 0)
+                    {
                         isCarrier = false;
+                        inheritsGlue = false;
+                    }
                 }
 
                 if (isCarrier)
@@ -134,17 +184,24 @@ namespace UdonSharp.CE.Editor.Optimizers
                     {
                         Location transportLocation = node.Identifier.GetLocation();
 
+                        // A sealed type cannot declare a new virtual member (CS0549), and nothing can
+                        // derive from it to need one.
+                        bool isSealed = declaredType.IsSealed;
+
                         foreach (SyncGroup group in groups)
                         {
                             bool ownsGroup = group.IsOwnedBy(declaredType);
 
                             if (ownsGroup)
                             {
-                                if (!DeclaresField(declaredType, group.PayloadField))
-                                    membersToAdd.Add(ParseMember(BuildPayloadField(group)));
+                                if (!HasGeneratedField(declaredType, group.PayloadField))
+                                    membersToAdd.Add(ParseMember(BuildPayloadField(group, isSealed)));
 
-                                if (!DeclaresField(declaredType, group.AppliedField))
-                                    membersToAdd.Add(ParseMember(BuildAppliedField(group)));
+                                if (!HasGeneratedField(declaredType, group.AppliedField))
+                                    membersToAdd.Add(ParseMember(BuildAppliedField(group, isSealed)));
+
+                                if (!HasGeneratedField(declaredType, group.OversizeLoggedField))
+                                    membersToAdd.Add(ParseMember(BuildOversizeLoggedField(group, isSealed)));
 
                                 if (!DeclaresMethod(declaredType, group.ApplyMethod))
                                     membersToAdd.Add(ParseMember(BuildApplyMethod(group)));
@@ -157,20 +214,27 @@ namespace UdonSharp.CE.Editor.Optimizers
                                 continue;
 
                             if (!DeclaresMethod(declaredType, group.SerializeMethod))
-                                membersToAdd.Add(ParseMember(BuildSerializeMethod(declaredType.Name, group, !ownsGroup, transportLocation)));
+                                membersToAdd.Add(ParseMember(BuildSerializeMethod(declaredType.Name, group, !ownsGroup, isSealed, transportLocation)));
 
                             if (!DeclaresMethod(declaredType, group.DeserializeMethod))
-                                membersToAdd.Add(ParseMember(BuildDeserializeMethod(declaredType.Name, group, !ownsGroup, transportLocation)));
+                                membersToAdd.Add(ParseMember(BuildDeserializeMethod(declaredType.Name, group, !ownsGroup, isSealed, transportLocation)));
                         }
 
-                        // Capture covers every group in the hierarchy, so a type that introduces one
-                        // overrides the base's rather than adding a second entry point the author would
-                        // have to know to call.
+                        // Capture and restore-everything each cover every group in the hierarchy, so a
+                        // type that introduces one overrides the base's rather than adding a second entry
+                        // point the author would have to know to call.
+                        bool overridesBase = groups.Any(group => !group.IsOwnedBy(declaredType));
+
                         if (ownsAnyGroup && !DeclaresMethod(declaredType, RequestCaptureMethodName))
                         {
-                            bool overridesCapture = groups.Any(group => !group.IsOwnedBy(declaredType));
                             membersToAdd.Add(ParseMember(
-                                BuildRequestCaptureMethod(groups, overridesCapture, node.Identifier.GetLocation())));
+                                BuildRequestCaptureMethod(groups, overridesBase, isSealed, node.Identifier.GetLocation())));
+                        }
+
+                        if (ownsAnyGroup && !DeclaresMethod(declaredType, ApplyAllMethodName))
+                        {
+                            membersToAdd.Add(ParseMember(
+                                BuildApplyAllMethod(groups, overridesBase, isSealed, node.Identifier.GetLocation())));
                         }
                     }
                 }
@@ -180,8 +244,8 @@ namespace UdonSharp.CE.Editor.Optimizers
                 if (membersToAdd.Count > 0)
                     result = result.AddMembers(membersToAdd.ToArray());
 
-                if (isCarrier)
-                    result = WeaveSerializationEvents(result, declaredType, groups, isCanonicalPart && ownsAnyGroup);
+                if (isCarrier || inheritsGlue)
+                    result = WeaveSerializationEvents(result, declaredType, groups, isCanonicalPart, isCanonicalPart && ownsAnyGroup);
 
                 if (ReferenceEquals(result, visited))
                     return visited;
@@ -203,6 +267,11 @@ namespace UdonSharp.CE.Editor.Optimizers
             {
                 StructDeclarationSyntax visited = (StructDeclarationSyntax)base.VisitStructDeclaration(node);
                 INamedTypeSymbol declaredType = _semanticModel?.GetDeclaredSymbol(node);
+
+                // A struct can no more carry the synced payload than a plain class can; see the same
+                // call in VisitClassDeclaration.
+                if (declaredType != null && PartDeclaresSyncOnJoinField(declaredType, node))
+                    _context.RecordObligationDischarged(GeneratorId);
 
                 if (!TryCreateCustomHelperSpec(declaredType, out SyncOnJoinTypeSpec helperSpec) ||
                     !IsCanonicalDeclarationPart(declaredType, node) ||
@@ -339,9 +408,9 @@ namespace UdonSharp.CE.Editor.Optimizers
             /// <c>SyncOnJoinAttribute.Group</c>, and orders each bucket by <c>SyncOnJoinAttribute.Priority</c>.
             ///
             /// Group decides which synced payload a field rides in. Each group gets its own
-            /// <c>[UdonSynced]</c> string, its own applied-guard, and its own serialize/apply pair, so a
-            /// behaviour that mixes a large cold snapshot with a small hot field stops re-sending the cold
-            /// one every time the hot one moves. Fields that name no group share the default payload.
+            /// <c>[UdonSynced]</c> string, its own applied-guard, and its own serialize/apply pair.
+            /// Serialization remains per behaviour; group guards do not guarantee omission of unchanged
+            /// strings from the packet. Fields that name no group share the default payload.
             ///
             /// Priority controls the order fields are written into their group's payload *and* the order
             /// decoded values are committed back, so a field that depends on another can be given a higher
@@ -361,6 +430,7 @@ namespace UdonSharp.CE.Editor.Optimizers
                 var ownersById = new Dictionary<string, INamedTypeSymbol>(StringComparer.Ordinal);
                 var declaredByOwner = new HashSet<string>(StringComparer.Ordinal);
                 var keys = new Dictionary<string, FieldSpec>(StringComparer.Ordinal);
+                var unreadableById = new Dictionary<string, (string DeclaringTypeName, string FieldName, Location Location)>(StringComparer.Ordinal);
 
                 foreach (INamedTypeSymbol declaringType in GetBehaviourHierarchy(owner))
                 {
@@ -382,17 +452,6 @@ namespace UdonSharp.CE.Editor.Optimizers
                         // emitter.
                         if (field.IsStatic || field.IsConst)
                             continue;
-
-                        if (!isOwnType && field.DeclaredAccessibility == Accessibility.Private)
-                        {
-                            throw new CodeGenerationException(
-                                GeneratorId,
-                                fieldLocation,
-                                $"'{owner.Name}' inherits the private [SyncOnJoin] field '{declaringType.Name}.{field.Name}'. " +
-                                "The late-join payload for a derived behaviour is written by generated code on the derived " +
-                                "type, which cannot read a private base field, so that state would silently never be sent. " +
-                                "Fix: make the field protected or public, or move every [SyncOnJoin] field onto one type.");
-                        }
 
                         FieldSpec spec = CreateFieldSpec(field, syncOnJoin, fieldLocation, out _);
                         if (spec == null)
@@ -445,8 +504,40 @@ namespace UdonSharp.CE.Editor.Optimizers
                         fieldsById[groupId].Add(spec);
 
                         if (isOwnType)
+                        {
                             declaredByOwner.Add(groupId);
+                        }
+                        else if (field.DeclaredAccessibility == Accessibility.Private &&
+                                 !unreadableById.ContainsKey(groupId))
+                        {
+                            unreadableById.Add(groupId, (declaringType.Name, field.Name, fieldLocation));
+                        }
                     }
+                }
+
+                // A private base field is only a problem for a group this behaviour re-emits: the override
+                // of that group's serialize/deserialize pair is generated code on the derived type, and it
+                // cannot read the field. A group the behaviour adds nothing to keeps the base's own pair,
+                // which reads the field from where it is private. Throwing for those too failed every
+                // derived behaviour of a base with a private [SyncOnJoin] field -- the usual way to
+                // declare one -- including one whose own state rides in a separate Group, and one that
+                // declares no [SyncOnJoin] field at all.
+                foreach (string groupId in order)
+                {
+                    if (!declaredByOwner.Contains(groupId) ||
+                        !unreadableById.TryGetValue(groupId, out var unreadable))
+                    {
+                        continue;
+                    }
+
+                    throw new CodeGenerationException(
+                        GeneratorId,
+                        unreadable.Location,
+                        $"'{owner.Name}' inherits the private [SyncOnJoin] field '{unreadable.DeclaringTypeName}.{unreadable.FieldName}'. " +
+                        "The late-join payload for a derived behaviour is written by generated code on the derived " +
+                        "type, which cannot read a private base field, so that state would silently never be sent. " +
+                        "Fix: make the field protected or public, move every [SyncOnJoin] field onto one type, or " +
+                        "give this behaviour's own fields a Group the base does not use.");
                 }
 
                 // When every field this behaviour declared was rejected, the collection keeps whatever the
@@ -727,6 +818,44 @@ namespace UdonSharp.CE.Editor.Optimizers
                                   SyncOnJoinTypeSupport.FindAttribute(field, "SyncOnJoinAttribute") != null);
             }
 
+            /// <summary>Whether a base behaviour of this type declares a [SyncOnJoin] field.</summary>
+            private static bool InheritsSyncOnJoinFields(INamedTypeSymbol type)
+            {
+                for (INamedTypeSymbol current = type.BaseType;
+                     current != null && current.Name != "UdonSharpBehaviour";
+                     current = current.BaseType)
+                {
+                    if (DeclaresSyncOnJoinFields(current))
+                        return true;
+                }
+
+                return false;
+            }
+
+            /// <summary>
+            /// Whether THIS declaration part spells out a [SyncOnJoin] field. A partial type has one
+            /// symbol for every part, so the symbol alone cannot say which file the field is in.
+            /// </summary>
+            private static bool PartDeclaresSyncOnJoinField(INamedTypeSymbol type, TypeDeclarationSyntax node)
+            {
+                foreach (IFieldSymbol field in type.GetMembers().OfType<IFieldSymbol>())
+                {
+                    if (field.IsImplicitlyDeclared ||
+                        SyncOnJoinTypeSupport.FindAttribute(field, "SyncOnJoinAttribute") == null)
+                    {
+                        continue;
+                    }
+
+                    foreach (SyntaxReference reference in field.DeclaringSyntaxReferences)
+                    {
+                        if (reference.SyntaxTree == node.SyntaxTree && node.Span.Contains(reference.Span))
+                            return true;
+                    }
+                }
+
+                return false;
+            }
+
             /// <summary>Base-most user behaviour first, so base fields keep a stable position in the payload.</summary>
             private static IEnumerable<INamedTypeSymbol> GetBehaviourHierarchy(INamedTypeSymbol type)
             {
@@ -761,39 +890,76 @@ namespace UdonSharp.CE.Editor.Optimizers
             /// travel together.
             ///
             /// It is protected rather than private so a derived behaviour that adds fields to this group
-            /// writes the same single synced variable instead of shadowing it.
+            /// writes the same single synced variable instead of shadowing it. A sealed behaviour has no
+            /// derived behaviour to share it with, and a protected member there only earns CS0628.
             /// </summary>
-            private static string BuildPayloadField(SyncGroup group)
+            private static string BuildPayloadField(SyncGroup group, bool isSealed)
             {
                 return $@"
 [global::UdonSharp.CE.Net.SyncOnJoinGenerated]
 [global::UnityEngine.HideInInspector]
 [global::UdonSharp.UdonSynced]
-protected string {group.PayloadField} = """";
+{InheritableAccessibility(isSealed)} string {group.PayloadField} = """";
 ";
             }
 
             /// <summary>
-            /// Guards against re-applying an unchanged payload. OnDeserialization fires for any synced
-            /// variable change on the behaviour, not just this one -- with groups that now includes every
-            /// OTHER group's payload -- and the same snapshot is delivered again whenever the owner
-            /// re-serializes for an unrelated reason.
+            /// The payload this behaviour's fields currently reflect, so an unchanged payload is not
+            /// applied again. OnDeserialization fires for any synced variable change on the behaviour, not
+            /// just this one -- with groups that now includes every OTHER group's payload -- and the same
+            /// snapshot is delivered again whenever the owner re-serializes for an unrelated reason.
+            ///
+            /// Both directions set it: decoding a payload, and serializing one (see BuildSerializeMethod).
             /// </summary>
-            private static string BuildAppliedField(SyncGroup group)
+            private static string BuildAppliedField(SyncGroup group, bool isSealed)
             {
                 return $@"
 [global::UdonSharp.CE.Net.SyncOnJoinGenerated]
 [global::UnityEngine.HideInInspector]
-protected string {group.AppliedField} = null;
+{InheritableAccessibility(isSealed)} string {group.AppliedField} = null;
 ";
+            }
+
+            /// <summary>
+            /// Remembers that this group's oversize payload has already been reported, so the report is
+            /// made once per time the payload goes over the limit rather than on every capture.
+            /// </summary>
+            private static string BuildOversizeLoggedField(SyncGroup group, bool isSealed)
+            {
+                return $@"
+[global::UdonSharp.CE.Net.SyncOnJoinGenerated]
+[global::UnityEngine.HideInInspector]
+{InheritableAccessibility(isSealed)} bool {group.OversizeLoggedField} = false;
+";
+            }
+
+            private static string InheritableAccessibility(bool isSealed)
+            {
+                return isSealed ? "private" : "protected";
+            }
+
+            /// <summary>
+            /// "virtual " on the type that introduces a generated member and "override " below it -- except
+            /// on a sealed type, where a new virtual member is CS0549 and the whole behaviour stopped
+            /// compiling over a modifier nothing could ever have used.
+            /// </summary>
+            private static string VirtualModifier(bool isOverride, bool isSealed)
+            {
+                if (isOverride)
+                    return "override ";
+
+                return isSealed ? string.Empty : "virtual ";
             }
 
             /// <summary>
             /// The receive path for one group.
             ///
-            /// Safe to run before Start: it reads nothing that Start initialises, and the initial late-join
-            /// delivery routinely arrives before the behaviour's own Start. Re-delivering the same payload is
-            /// a no-op because the guard is compared before decoding, and decoding twice is idempotent anyway.
+            /// It reads nothing that Start initialises, which matters because it runs from two places:
+            /// OnDeserialization, and Start itself (see BuildApplyAllMethod) for a payload that reached the
+            /// heap before the behaviour had started. Re-delivering the same payload is a no-op because the
+            /// guard is compared before decoding, and an empty payload -- every behaviour's state until its
+            /// owner first captures -- returns without a word, so the owner's own Start at world load logs
+            /// nothing.
             ///
             /// Each group carries its own guard, so a delivery that changed only group A does not re-decode
             /// group B.
@@ -828,7 +994,7 @@ public void {group.ApplyMethod}()
             /// late-join snapshot has to be current, and no cost whatsoever in between. There is no Update and
             /// no polling loop. RequestSerialization is only called when SOME group's freshly serialized JSON
             /// differs from what is already in that group's synced variable, so an unchanged world never spends
-            /// bandwidth, and a world where only one group moved re-sends only that group's string.
+            /// bandwidth through this capture path. Serialization can still include unchanged groups.
             ///
             /// Authors who mutate [SyncOnJoin] state and want it published immediately can drive the same path
             /// with <c>SendCustomEvent("_CE_SyncOnJoin_RequestCapture")</c> -- generated members are invisible
@@ -839,11 +1005,12 @@ public void {group.ApplyMethod}()
             private static string BuildRequestCaptureMethod(
                 IReadOnlyList<SyncGroup> groups,
                 bool isOverride,
+                bool isSealed,
                 Location location)
             {
                 var code = new CodeWriter(location);
                 code.Line("[global::UdonSharp.CE.Net.SyncOnJoinGenerated]");
-                code.Line($"public {(isOverride ? "override" : "virtual")} void {RequestCaptureMethodName}()");
+                code.Line($"public {VirtualModifier(isOverride, isSealed)}void {RequestCaptureMethodName}()");
                 code.OpenBlock();
                 code.Line("if (!global::VRC.SDKBase.Networking.IsOwner(global::VRC.SDKBase.Networking.LocalPlayer, gameObject))");
                 code.OpenBlock();
@@ -877,12 +1044,49 @@ public void {group.ApplyMethod}()
             }
 
             /// <summary>
+            /// Applies every group whose payload is waiting. This is what Start runs.
+            ///
+            /// VRChat does not deliver OnDeserialization to a behaviour that has not started:
+            /// UdonBehaviour.OnDeserialization goes through RunEvent, which returns early until Start has
+            /// run. The synced payload is already in the heap by then, but the only thing that decoded it
+            /// was the event that never fired. That is the normal case for an object that is inactive when
+            /// a late joiner receives state, and such a behaviour kept its scene defaults until the owner
+            /// next changed something -- which for late-join state can be never.
+            ///
+            /// One virtual method covering every group, for the reason capture is one: Start cannot be
+            /// declared twice in a hierarchy, so a derived behaviour that introduces a group reaches the
+            /// base's Start by overriding this. Each per-group apply already returns silently for a payload
+            /// that is empty or already applied, so this costs a few string compares where there is
+            /// nothing to do.
+            /// </summary>
+            private static string BuildApplyAllMethod(
+                IReadOnlyList<SyncGroup> groups,
+                bool isOverride,
+                bool isSealed,
+                Location location)
+            {
+                var code = new CodeWriter(location);
+                code.Line("[global::UdonSharp.CE.Net.SyncOnJoinGenerated]");
+                code.Line($"public {VirtualModifier(isOverride, isSealed)}void {ApplyAllMethodName}()");
+                code.OpenBlock();
+
+                // Like capture, an override lists every group in the hierarchy instead of chaining to base.
+                foreach (SyncGroup group in groups)
+                    code.Line($"{group.ApplyMethod}();");
+
+                code.CloseBlock();
+                return code.ToString();
+            }
+
+            /// <summary>
             /// Wires the generated glue into Udon's events, preserving any handler the author already wrote.
             ///
             /// Capture runs LAST in OnPreSerialization so a user who mutates [SyncOnJoin] fields in their own
             /// handler still gets captured. Apply runs FIRST in OnDeserialization so user code observes
             /// already-restored state. Capture also runs in OnPlayerJoined, which is what actually makes the
-            /// owner call RequestSerialization.
+            /// owner call RequestSerialization. Apply runs FIRST in Start as well, for the payload that
+            /// arrived before the behaviour started and whose OnDeserialization VRChat therefore dropped
+            /// (see BuildApplyAllMethod).
             ///
             /// Note both OnDeserialization overloads map to the same Udon event, so declaring both would
             /// collide -- only ever inject into whichever exists, and synthesize just one when neither does.
@@ -892,14 +1096,15 @@ public void {group.ApplyMethod}()
             ///
             /// Which groups get woven in depends on how the handler is reached. A handler the author wrote
             /// gets EVERY group in the hierarchy, because that handler may never call base and would
-            /// otherwise strand the base's groups. A synthesized handler always opens with the base call, so
-            /// it only needs the groups this type owns -- listing the rest would serialize them twice per
-            /// event for the whole depth of the hierarchy.
+            /// otherwise strand the base's groups. A synthesized handler always calls base, so it only needs
+            /// the groups this type owns -- listing the rest would serialize them twice per event for the
+            /// whole depth of the hierarchy.
             /// </summary>
-            private static ClassDeclarationSyntax WeaveSerializationEvents(
+            private ClassDeclarationSyntax WeaveSerializationEvents(
                 ClassDeclarationSyntax node,
                 INamedTypeSymbol type,
                 IReadOnlyList<SyncGroup> groups,
+                bool isCanonicalPart,
                 bool synthesizeMissingHandlers)
             {
                 IReadOnlyList<SyncGroup> owned = groups.Where(group => group.IsOwnedBy(type)).ToList();
@@ -944,7 +1149,106 @@ public void {group.ApplyMethod}()
                     synthesizedSignature: "public override void OnPlayerJoined(global::VRC.SDKBase.VRCPlayerApi player)",
                     baseCall: "base.OnPlayerJoined(player);");
 
-                return node;
+                return WeaveStart(node, type, isCanonicalPart);
+            }
+
+            /// <summary>
+            /// Puts the restore into Start, which needs rules of its own because UdonSharpBehaviour does
+            /// not declare it: there is no base handler to chain to, and UdonSharp rejects a Start on one
+            /// behaviour and another on a behaviour derived from it unless the second overrides the first
+            /// ("does not yet support hiding base methods").
+            /// </summary>
+            /// <remarks>
+            /// A Start the author wrote gets the restore prepended, so their Start reads restored state. A
+            /// behaviour with none gets one synthesized -- but only where no other Start can collide with it
+            /// and none it inherits already restores:
+            ///
+            /// - Not when any behaviour derived from it declares Start: that declaration would then hide
+            ///   this one and a project that compiled would stop compiling. The derived Start gets the
+            ///   restore woven in when its own behaviour is visited.
+            /// - Not when a base already provides one. A base in this [SyncOnJoin] hierarchy restores in the
+            ///   Start it declares or was given, and the restore is one virtual method, so it covers every
+            ///   group this behaviour adds. A Start on a base outside the hierarchy is overridden where it
+            ///   is virtual and cannot be added to where it is not.
+            ///
+            /// The second rule only defers to a base that does end up with a Start. Deciding it from "some
+            /// base owns a group" left a behaviour without any whenever a sibling declared its own Start:
+            /// the base had to stay without one, and the behaviour next to that sibling, deferring to the
+            /// base, never got one either.
+            /// </remarks>
+            private ClassDeclarationSyntax WeaveStart(ClassDeclarationSyntax node, INamedTypeSymbol type, bool isCanonicalPart)
+            {
+                string[] applyAll = { $"{ApplyAllMethodName}();" };
+
+                MethodDeclarationSyntax existing = node.Members
+                    .OfType<MethodDeclarationSyntax>()
+                    .FirstOrDefault(method => method.Identifier.Text == "Start" && method.ParameterList.Parameters.Count == 0);
+
+                if (existing != null)
+                    return InjectIntoHandler(node, existing, applyAll, prepend: true);
+
+                // Another part of this same type declares Start and gets the call when it is visited.
+                if (!isCanonicalPart || DeclaresParameterlessMethod(type, "Start"))
+                    return node;
+
+                IMethodSymbol inherited = FindInheritedHandler(type, "Start", parameterlessOnly: true);
+
+                if (inherited != null)
+                {
+                    // Declared on a base in this hierarchy: that Start was given the restore when its own
+                    // behaviour was visited. Declared outside it: the base-most behaviour of the hierarchy
+                    // overrides it, and every behaviour below inherits that override.
+                    if (CarriesSyncOnJoinGlue(inherited.ContainingType) || HasBaseCarryingSyncOnJoinGlue(type))
+                        return node;
+
+                    if (!TryMirrorInheritedHandler(inherited, out string signature, out string baseCall))
+                        return node;
+
+                    return AddSynthesizedHandler(node, signature, applyAll, baseCall, prepend: true);
+                }
+
+                if (IsDeclaredByDerivedBehaviour(type, "Start"))
+                    return node;
+
+                for (INamedTypeSymbol current = type.BaseType;
+                     current != null && current.Name != "UdonSharpBehaviour";
+                     current = current.BaseType)
+                {
+                    // That base's subtree declares no Start, so it was given one, and this behaviour
+                    // inherits it.
+                    if (CarriesSyncOnJoinGlue(current) && !IsDeclaredByDerivedBehaviour(current, "Start"))
+                        return node;
+                }
+
+                return AddSynthesizedHandler(node, "private void Start()", applyAll, baseCall: null, prepend: true);
+            }
+
+            /// <summary>
+            /// Whether a behaviour ends up carrying [SyncOnJoin] glue: it declares or inherits a field that
+            /// made it into a payload.
+            /// </summary>
+            private bool CarriesSyncOnJoinGlue(INamedTypeSymbol type)
+            {
+                if (type == null || !IsUdonSharpBehaviour(type))
+                    return false;
+
+                if (!DeclaresSyncOnJoinFields(type) && !InheritsSyncOnJoinFields(type))
+                    return false;
+
+                return CollectSyncOnJoinGroups(type).Count > 0;
+            }
+
+            private bool HasBaseCarryingSyncOnJoinGlue(INamedTypeSymbol type)
+            {
+                for (INamedTypeSymbol current = type.BaseType;
+                     current != null && current.Name != "UdonSharpBehaviour";
+                     current = current.BaseType)
+                {
+                    if (CarriesSyncOnJoinGlue(current))
+                        return true;
+                }
+
+                return false;
             }
 
             private static IReadOnlyList<string> CallsTo(IReadOnlyList<SyncGroup> groups, Func<SyncGroup, string> methodName)
@@ -952,7 +1256,11 @@ public void {group.ApplyMethod}()
                 return groups.Select(group => methodName(group) + "();").ToList();
             }
 
-            private static ClassDeclarationSyntax WeaveEvent(
+            /// <summary>
+            /// Weaves the glue into one of the events UdonSharpBehaviour declares as a virtual: injected into
+            /// the handler the author wrote, or a handler synthesized when there is none.
+            /// </summary>
+            private ClassDeclarationSyntax WeaveEvent(
                 ClassDeclarationSyntax node,
                 INamedTypeSymbol type,
                 string eventName,
@@ -975,22 +1283,246 @@ public void {group.ApplyMethod}()
                 if (!synthesizeMissingHandlers || synthesizedStatements.Count == 0 || DeclaresMethod(type, eventName))
                     return node;
 
-                // The base call runs first so a handler the author wrote on a base behaviour is not silently
-                // replaced by the synthesized override, and so a base group's glue still runs when this type
-                // only introduced a group of its own. Base calls into UdonSharpBehaviour's own events compile
-                // to a no-op, so this is safe even when nothing overrides it.
-                var body = new System.Text.StringBuilder();
-                body.Append("    ").AppendLine(baseCall);
+                // Both OnDeserialization overloads map to the one Udon event '_onDeserialization', and
+                // UdonSharp rejects a program that exports it twice -- as "Network callable methods cannot be
+                // overloaded", naming neither [SyncOnJoin] nor the real cause. So the synthesized handler has
+                // to be the overload the rest of the hierarchy uses: whatever a base's author wrote, and
+                // failing that whatever a derived behaviour's author wrote.
+                IMethodSymbol inherited = FindInheritedHandler(type, eventName);
+                IMethodSymbol mirrored = inherited ?? FindOverloadDerivedBehavioursOverride(type, eventName);
 
-                foreach (string statement in synthesizedStatements)
+                if (mirrored != null)
+                {
+                    // An override of THAT declaration, with its parameters, calling it as base. With the fixed
+                    // signature instead, 'OnDeserialization()' next to an inherited or derived
+                    // 'OnDeserialization(DeserializationResult)' was the double export above, and where the
+                    // base's handler was the one the author wrote, 'base.OnDeserialization()' also bound to
+                    // UdonSharpBehaviour's empty overload and skipped it.
+                    //
+                    // A base declaration that cannot be overridden at all (a sealed override) leaves nothing
+                    // safe to emit: a second declaration under it is the "does not yet support hiding base
+                    // methods" error.
+                    if (!TryMirrorInheritedHandler(mirrored, out synthesizedSignature, out baseCall))
+                        return node;
+
+                    // An abstract declaration has no body to chain to, so this handler is the first one that
+                    // runs at all and has to carry every group, not just the ones this type owns.
+                    if (baseCall == null)
+                        synthesizedStatements = injectedStatements;
+                }
+
+                return AddSynthesizedHandler(node, synthesizedSignature, synthesizedStatements, baseCall, prepend);
+            }
+
+            /// <summary>
+            /// Adds a synthesized handler: the glue plus the call that keeps any handler above it running.
+            /// </summary>
+            /// <remarks>
+            /// Glue that runs LAST, capture, comes after the base call, so a handler the author wrote on a
+            /// base behaviour still runs and can still change the state that is captured. Glue that runs
+            /// FIRST, restore, comes before it, for the reason the restore is prepended to a handler the
+            /// author wrote: their code -- here, a base behaviour's handler -- reads restored state rather
+            /// than the snapshot before it. Base calls into UdonSharpBehaviour's own events compile to a
+            /// no-op, so the call is safe even when nothing overrides it.
+            /// </remarks>
+            /// <param name="baseCall">
+            /// Null when there is nothing to chain to: Start, which UdonSharpBehaviour does not declare, or
+            /// an abstract declaration.
+            /// </param>
+            private static ClassDeclarationSyntax AddSynthesizedHandler(
+                ClassDeclarationSyntax node,
+                string signature,
+                IReadOnlyList<string> statements,
+                string baseCall,
+                bool prepend)
+            {
+                var body = new System.Text.StringBuilder();
+
+                if (baseCall != null && !prepend)
+                    body.Append("    ").AppendLine(baseCall);
+
+                foreach (string statement in statements)
                     body.Append("    ").AppendLine(statement);
+
+                if (baseCall != null && prepend)
+                    body.Append("    ").AppendLine(baseCall);
 
                 return node.AddMembers(ParseMember($@"
 [global::UdonSharp.CE.Net.SyncOnJoinGenerated]
-{synthesizedSignature}
+{signature}
 {{
 {body}}}
 "));
+            }
+
+            /// <summary>
+            /// The nearest declaration of an event handler on a base behaviour the author wrote, or null
+            /// when only UdonSharpBehaviour (or nothing) declares it.
+            /// </summary>
+            /// <remarks>
+            /// Only declarations in source are visible here: a handler this same pass synthesizes onto a
+            /// base behaviour is not in the semantic model yet. That is why the mirrored signature is
+            /// derived from the author's declaration rather than from whatever the base "has" -- every
+            /// behaviour between that declaration and this one resolves the same answer independently, so
+            /// the chain of synthesized overrides agrees with itself.
+            /// </remarks>
+            private static IMethodSymbol FindInheritedHandler(INamedTypeSymbol type, string eventName, bool parameterlessOnly = false)
+            {
+                for (INamedTypeSymbol current = type.BaseType;
+                     current != null && current.Name != "UdonSharpBehaviour";
+                     current = current.BaseType)
+                {
+                    foreach (IMethodSymbol method in current.GetMembers(eventName).OfType<IMethodSymbol>())
+                    {
+                        if (method.IsImplicitlyDeclared || method.IsStatic || method.MethodKind != MethodKind.Ordinary)
+                            continue;
+
+                        if (parameterlessOnly && method.Parameters.Length != 0)
+                            continue;
+
+                        return method;
+                    }
+                }
+
+                return null;
+            }
+
+            /// <summary>
+            /// The UdonSharpBehaviour overload of an event that behaviours derived from
+            /// <paramref name="type"/> override, or null when none does, or when they disagree.
+            /// </summary>
+            /// <remarks>
+            /// Asked only where nothing above <paramref name="type"/> declares the handler, so every such
+            /// override chains straight to UdonSharpBehaviour's declaration and the handler synthesized here
+            /// sits between the two. Behaviours that override different overloads cannot all be satisfied by
+            /// one handler, and the fixed signature is kept for them.
+            /// </remarks>
+            private IMethodSymbol FindOverloadDerivedBehavioursOverride(INamedTypeSymbol type, string eventName)
+            {
+                Compilation compilation = _semanticModel?.Compilation;
+                if (compilation == null)
+                    return null;
+
+                IMethodSymbol found = null;
+
+                foreach (ISymbol symbol in compilation.GetSymbolsWithName(name => name == eventName, SymbolFilter.Member))
+                {
+                    if (!(symbol is IMethodSymbol method) || method.IsStatic || method.IsImplicitlyDeclared || !method.IsOverride)
+                        continue;
+
+                    if (!DerivesFrom(method.ContainingType, type))
+                        continue;
+
+                    IMethodSymbol root = method;
+                    while (root.OverriddenMethod != null)
+                        root = root.OverriddenMethod;
+
+                    if (root.ContainingType?.ToDisplayString() != "UdonSharp.UdonSharpBehaviour")
+                        continue;
+
+                    if (found != null && !SymbolEqualityComparer.Default.Equals(found.OriginalDefinition, root.OriginalDefinition))
+                        return null;
+
+                    found = root;
+                }
+
+                return found;
+            }
+
+            private static bool DerivesFrom(INamedTypeSymbol candidate, INamedTypeSymbol type)
+            {
+                for (INamedTypeSymbol current = candidate?.BaseType; current != null; current = current.BaseType)
+                {
+                    if (SymbolEqualityComparer.Default.Equals(current.OriginalDefinition, type.OriginalDefinition))
+                        return true;
+                }
+
+                return false;
+            }
+
+            /// <summary>
+            /// Builds the signature and base call of an override of <paramref name="inherited"/>. False when
+            /// the declaration cannot be overridden, or is not a shape a handler has.
+            /// </summary>
+            private static bool TryMirrorInheritedHandler(IMethodSymbol inherited, out string signature, out string baseCall)
+            {
+                signature = null;
+                baseCall = null;
+
+                bool overridable = (inherited.IsVirtual || inherited.IsOverride || inherited.IsAbstract) && !inherited.IsSealed;
+                if (!overridable || !inherited.ReturnsVoid)
+                    return false;
+
+                string accessibility;
+                switch (inherited.DeclaredAccessibility)
+                {
+                    case Accessibility.Public:
+                        accessibility = "public";
+                        break;
+                    case Accessibility.Protected:
+                        accessibility = "protected";
+                        break;
+                    case Accessibility.Internal:
+                        accessibility = "internal";
+                        break;
+                    case Accessibility.ProtectedOrInternal:
+                        accessibility = "protected internal";
+                        break;
+                    default:
+                        return false;
+                }
+
+                var parameters = new List<string>();
+                var arguments = new List<string>();
+
+                foreach (IParameterSymbol parameter in inherited.Parameters)
+                {
+                    if (parameter.RefKind != RefKind.None)
+                        return false;
+
+                    string parameterName = EscapeIdentifier(parameter.Name);
+                    parameters.Add($"{parameter.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {parameterName}");
+                    arguments.Add(parameterName);
+                }
+
+                signature = $"{accessibility} override void {inherited.Name}({string.Join(", ", parameters)})";
+
+                // An abstract declaration has no body to chain to.
+                baseCall = inherited.IsAbstract ? null : $"base.{inherited.Name}({string.Join(", ", arguments)});";
+                return true;
+            }
+
+            /// <summary>
+            /// Whether any behaviour deriving from <paramref name="type"/> declares a parameterless method
+            /// with this name.
+            /// </summary>
+            /// <remarks>
+            /// UdonSharp rejects a method that repeats a base behaviour's name and parameters unless it is
+            /// an override ("does not yet support hiding base methods"). So before this emitter adds a
+            /// brand new declaration to a behaviour it has to know nothing below already uses the name,
+            /// and only the compilation can answer that: a base cannot see its derived types.
+            /// </remarks>
+            private bool IsDeclaredByDerivedBehaviour(INamedTypeSymbol type, string methodName)
+            {
+                Compilation compilation = _semanticModel?.Compilation;
+                if (compilation == null)
+                    return false;
+
+                foreach (ISymbol symbol in compilation.GetSymbolsWithName(name => name == methodName, SymbolFilter.Member))
+                {
+                    if (!(symbol is IMethodSymbol method) ||
+                        method.IsStatic ||
+                        method.IsImplicitlyDeclared ||
+                        method.Parameters.Length != 0)
+                    {
+                        continue;
+                    }
+
+                    if (DerivesFrom(method.ContainingType, type))
+                        return true;
+                }
+
+                return false;
             }
 
             /// <summary>
@@ -1009,6 +1541,12 @@ public void {group.ApplyMethod}()
             /// the handler, so nothing was synthesized and nothing failed to compile, and the author's body
             /// still ran -- while the late-join payload was never applied on any client. The whole feature
             /// was inert on that behaviour with no diagnostic anywhere.
+            ///
+            /// Calls that run LAST are also placed in front of every <c>return</c>, not just after the final
+            /// statement. Appended only at the end, they were skipped by any early exit -- and the guard
+            /// every OnPlayerJoined seems to open with, 'if (!player.isLocal) return;', is one. On the owner
+            /// that left capture running for its own join and for no later one, so every late joiner was
+            /// handed the world-load snapshot however far the world had moved on.
             /// </remarks>
             private static ClassDeclarationSyntax InjectIntoHandler(
                 ClassDeclarationSyntax node,
@@ -1052,10 +1590,37 @@ public void {group.ApplyMethod}()
                 if (calls.Count == 0)
                     return node;
 
-                BlockSyntax newBody = body.WithStatements(
-                    prepend ? body.Statements.InsertRange(0, calls) : body.Statements.AddRange(calls));
+                BlockSyntax newBody;
+
+                if (prepend)
+                {
+                    newBody = body.WithStatements(body.Statements.InsertRange(0, calls));
+                }
+                else
+                {
+                    // Decided on the ORIGINAL body, before the injector rewrites the very statement the
+                    // question is about.
+                    bool alreadyExits = EndsWithExit(body);
+
+                    newBody = (BlockSyntax)new ReturnInjector(calls).Visit(body);
+
+                    // A body that already ends by leaving has had the calls placed in front of that exit;
+                    // a second copy after it would be unreachable.
+                    if (!alreadyExits)
+                        newBody = newBody.WithStatements(newBody.Statements.AddRange(calls));
+                }
 
                 return node.ReplaceNode(existing, rewritten.WithBody(newBody));
+            }
+
+            private static bool EndsWithExit(BlockSyntax body)
+            {
+                StatementSyntax last = body.Statements.LastOrDefault();
+
+                if (last is BlockSyntax nested)
+                    return EndsWithExit(nested);
+
+                return last is ReturnStatementSyntax || last is ThrowStatementSyntax;
             }
 
             /// <summary>
@@ -1101,13 +1666,14 @@ public void {group.ApplyMethod}()
                 string className,
                 SyncGroup group,
                 bool isOverride,
+                bool isSealed,
                 Location location)
             {
                 IReadOnlyList<FieldSpec> fields = group.Fields;
                 string subject = DescribeSubject(className, group);
                 var code = new CodeWriter(location);
                 code.Line("[global::UdonSharp.CE.Net.SyncOnJoinGenerated]");
-                code.Line($"public {(isOverride ? "override" : "virtual")} void {group.SerializeMethod}()");
+                code.Line($"public {VirtualModifier(isOverride, isSealed)}void {group.SerializeMethod}()");
                 code.OpenBlock();
                 code.Line("global::VRC.SDK3.Data.DataDictionary __ce_dict = new global::VRC.SDK3.Data.DataDictionary();");
 
@@ -1117,11 +1683,11 @@ public void {group.ApplyMethod}()
                     code.Line($"global::VRC.SDK3.Data.DataToken {tokenName};");
                     if (field.CustomSerializer != null)
                     {
-                        code.Line($"{tokenName} = new global::VRC.SDK3.Data.DataToken({field.CustomSerializer.SerializeMethod}());");
+                        code.Line($"{tokenName} = new global::VRC.SDK3.Data.DataToken({EscapeIdentifier(field.CustomSerializer.SerializeMethod)}());");
                     }
                     else
                     {
-                        EmitSerializeToExistingToken(code, field.Type, field.FieldName, tokenName);
+                        EmitSerializeToExistingToken(code, field.Type, EscapeIdentifier(field.FieldName), tokenName);
                     }
 
                     code.Line($"__ce_dict.Add(new global::VRC.SDK3.Data.DataToken(\"{EscapeString(field.Key)}\"), {tokenName});");
@@ -1137,6 +1703,44 @@ public void {group.ApplyMethod}()
                 code.CloseBlock();
                 code.Line();
                 code.Line($"{group.PayloadField} = __ce_jsonToken.String;");
+
+                // This behaviour's fields ARE what the payload now encodes, so it counts as applied here
+                // too. Only decoding used to set the marker, which left it permanently behind on whoever
+                // serializes -- and the apply call sits at the top of the author's own OnDeserialization.
+                // The usual Manual-sync idiom, 'RequestSerialization(); OnDeserialization();' to refresh
+                // the owner the way remotes are refreshed, therefore decoded the PREVIOUS snapshot over
+                // the change the owner had just made, and then captured that. Every other change was
+                // silently reverted for everyone.
+                code.Line($"{group.AppliedField} = {group.PayloadField};");
+                code.Line();
+
+                // VRChat does not send a Manual serialization larger than this, and it does not say so
+                // either: the owner keeps the state, every late joiner keeps the previous snapshot, and
+                // the change check in capture then sees an unchanged payload and never asks again --
+                // nothing retries. Both numbers are read from NetworkLimits here and emitted as literals,
+                // so the generated code does not depend on that class compiling under Udon. The size is
+                // the same per-character estimate the rest of CE uses; the exact encoding is VRChat's.
+                //
+                // One group is checked at a time, so this catches a group that cannot be sent on its own.
+                // The limit is per serialization of the whole behaviour, and every group on a behaviour
+                // is sent in the same serialization, so the advice is never "move it to another Group".
+                int bytesPerCharacter = global::UdonSharp.CE.Net.NetworkLimits.SyncedStringBytesPerCharacter;
+                int maxBytes = global::UdonSharp.CE.Net.NetworkLimits.ManualSyncMaxBytes;
+                string bytesPerCharacterText = bytesPerCharacter.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                string maxBytesText = maxBytes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+                code.Line($"if ({group.PayloadField}.Length * {bytesPerCharacterText} > {maxBytesText})");
+                code.OpenBlock();
+                code.Line($"if (!{group.OversizeLoggedField})");
+                code.OpenBlock();
+                code.Line($"{group.OversizeLoggedField} = true;");
+                code.Line($"global::UnityEngine.Debug.LogError(\"[SyncOnJoin] {subject} payload is larger than the {maxBytesText} bytes VRChat sends in one Manual serialization of a behaviour (estimated at {bytesPerCharacterText} bytes per character), so it is not delivered and late joiners keep the previous snapshot. Nothing retries it. Fix: sync less state, or move part of it onto another behaviour -- a Group does not help, because every group on a behaviour is sent in the same serialization.\");");
+                code.CloseBlock();
+                code.CloseBlock();
+                code.Line("else");
+                code.OpenBlock();
+                code.Line($"{group.OversizeLoggedField} = false;");
+                code.CloseBlock();
                 code.CloseBlock();
                 return code.ToString();
             }
@@ -1153,13 +1757,14 @@ public void {group.ApplyMethod}()
                 string className,
                 SyncGroup group,
                 bool isOverride,
+                bool isSealed,
                 Location location)
             {
                 IReadOnlyList<FieldSpec> fields = group.Fields;
                 string subject = DescribeSubject(className, group);
                 var code = new CodeWriter(location);
                 code.Line("[global::UdonSharp.CE.Net.SyncOnJoinGenerated]");
-                code.Line($"public {(isOverride ? "override" : "virtual")} void {group.DeserializeMethod}()");
+                code.Line($"public {VirtualModifier(isOverride, isSealed)}void {group.DeserializeMethod}()");
                 code.OpenBlock();
                 code.Line("global::VRC.SDK3.Data.DataToken __ce_root;");
                 code.Line($"if (!global::VRC.SDK3.Data.VRCJson.TryDeserializeFromJson({group.PayloadField}, out __ce_root))");
@@ -1212,9 +1817,9 @@ public void {group.ApplyMethod}()
                 {
                     FieldSpec field = fields[i];
                     if (field.CustomSerializer != null)
-                        code.Line($"{field.CustomSerializer.DeserializeMethod}({locals[i]});");
+                        code.Line($"{EscapeIdentifier(field.CustomSerializer.DeserializeMethod)}({locals[i]});");
                     else
-                        code.Line($"{field.FieldName} = {locals[i]};");
+                        code.Line($"{EscapeIdentifier(field.FieldName)} = {locals[i]};");
                 }
 
                 code.Line($"{group.AppliedField} = {group.PayloadField};");
@@ -1245,7 +1850,7 @@ public void {group.ApplyMethod}()
                 {
                     string tokenName = code.Temp("__ce_token");
                     code.Line($"global::VRC.SDK3.Data.DataToken {tokenName};");
-                    EmitSerializeToExistingToken(code, member.Type, member.FieldName, tokenName);
+                    EmitSerializeToExistingToken(code, member.Type, EscapeIdentifier(member.FieldName), tokenName);
                     code.Line($"__ce_dict.Add(new global::VRC.SDK3.Data.DataToken(\"{EscapeString(member.Key)}\"), {tokenName});");
                 }
 
@@ -1276,7 +1881,7 @@ public void {group.ApplyMethod}()
                 {
                     code.Line($"if (__ce_dict.TryGetValue(new global::VRC.SDK3.Data.DataToken(\"{EscapeString(member.Key)}\"), out __ce_value))");
                     code.OpenBlock();
-                    EmitDeserializeFromToken(code, member.Type, member.FieldName, "__ce_value", "__ce_ok");
+                    EmitDeserializeFromToken(code, member.Type, EscapeIdentifier(member.FieldName), "__ce_value", "__ce_ok");
                     code.CloseBlock();
                     code.Line("else");
                     code.OpenBlock();
@@ -1302,6 +1907,16 @@ public void {group.ApplyMethod}()
                         EmitSerializePrimitive(code, spec, valueExpression, tokenName);
                         return;
                     case SyncOnJoinValueKind.Enum:
+                        if (spec.EnumWideUnderlyingTypeName != null)
+                        {
+                            // A long- or ulong-backed enum rides as text, exactly as a long field does. Cast
+                            // to long and written as a number, a flags value with a high bit set came back
+                            // with its low bits rounded off, and a ulong value past long.MaxValue threw in
+                            // the conversion -- on the owner, inside the capture.
+                            code.Line($"{tokenName} = new global::VRC.SDK3.Data.DataToken((({spec.EnumWideUnderlyingTypeName}){valueExpression}).ToString({InvariantCulture}));");
+                            return;
+                        }
+
                         code.Line($"{tokenName} = new global::VRC.SDK3.Data.DataToken((long){valueExpression});");
                         return;
                     case SyncOnJoinValueKind.String:
@@ -1348,7 +1963,11 @@ public void {group.ApplyMethod}()
                 switch (spec.PrimitiveEncoding)
                 {
                     case SyncOnJoinPrimitiveEncoding.BigInteger:
-                        code.Line($"{tokenName} = new global::VRC.SDK3.Data.DataToken({valueExpression}.ToString());");
+                        // Invariant, and parsed back invariant. ToString() and TryParse() each use the culture
+                        // of the client they run on, and the negative sign is culture data: an owner whose
+                        // locale writes it as U+2212 produced text no other client's TryParse accepted, and
+                        // one unreadable field rejects the whole group.
+                        code.Line($"{tokenName} = new global::VRC.SDK3.Data.DataToken({valueExpression}.ToString({InvariantCulture}));");
                         return;
                     case SyncOnJoinPrimitiveEncoding.Floating:
                         code.Line($"if ({spec.TypeName}.IsNaN({valueExpression}))");
@@ -1484,14 +2103,7 @@ public void {group.ApplyMethod}()
                         EmitDeserializePrimitive(code, spec, targetExpression, tokenName, okFlag);
                         return;
                     case SyncOnJoinValueKind.Enum:
-                        code.Line($"if ({tokenName}.IsNumber)");
-                        code.OpenBlock();
-                        code.Line($"{targetExpression} = ({spec.TypeName})(long){tokenName}.Number;");
-                        code.CloseBlock();
-                        code.Line("else");
-                        code.OpenBlock();
-                        code.Line($"{okFlag} = false;");
-                        code.CloseBlock();
+                        EmitDeserializeEnum(code, spec, targetExpression, tokenName, okFlag);
                         return;
                     case SyncOnJoinValueKind.String:
                         EmitDeserializeStringToken(code, targetExpression, tokenName, okFlag);
@@ -1547,7 +2159,7 @@ public void {group.ApplyMethod}()
                     case SyncOnJoinPrimitiveEncoding.BigInteger:
                         string parsed = code.Temp("__ce_parsed");
                         code.Line($"{spec.TypeName} {parsed} = default({spec.TypeName});");
-                        code.Line($"if ({tokenName}.TokenType == global::VRC.SDK3.Data.TokenType.String && {spec.TypeName}.TryParse({tokenName}.String, out {parsed}))");
+                        code.Line($"if ({tokenName}.TokenType == global::VRC.SDK3.Data.TokenType.String && {spec.TypeName}.TryParse({tokenName}.String, {IntegerNumberStyle}, {InvariantCulture}, out {parsed}))");
                         code.OpenBlock();
                         code.Line($"{targetExpression} = {parsed};");
                         code.CloseBlock();
@@ -1555,7 +2167,7 @@ public void {group.ApplyMethod}()
                         // hand, still loads for values inside the double-exact range.
                         code.Line($"else if ({tokenName}.IsNumber)");
                         code.OpenBlock();
-                        code.Line($"{targetExpression} = ({spec.TypeName}){tokenName}.Number;");
+                        EmitRangeCheckedNumber(code, spec, targetExpression, $"({spec.TypeName})", tokenName, okFlag);
                         code.CloseBlock();
                         code.Line("else");
                         code.OpenBlock();
@@ -1589,7 +2201,7 @@ public void {group.ApplyMethod}()
                     default:
                         code.Line($"if ({tokenName}.IsNumber)");
                         code.OpenBlock();
-                        code.Line($"{targetExpression} = {string.Format(spec.PrimitiveReadExpression, tokenName)};");
+                        EmitRangeCheckedNumber(code, spec, targetExpression, $"({spec.TypeName})", tokenName, okFlag);
                         code.CloseBlock();
                         code.Line("else");
                         code.OpenBlock();
@@ -1597,6 +2209,90 @@ public void {group.ApplyMethod}()
                         code.CloseBlock();
                         return;
                 }
+            }
+
+            /// <summary>
+            /// Converts a decoded JSON number to an integer or enum type, but only once it is known to fit.
+            /// </summary>
+            /// <remarks>
+            /// Checking the token's type was not enough to keep a bad payload from halting the behaviour.
+            /// Udon has no unchecked conversions: UdonSharp lowers '(byte)number' to System.Convert.ToByte,
+            /// which throws on 300, and lowers a number to a UnityEngine or VRChat enum into an array read,
+            /// which is out of range for a value the enum does not have. Neither needs a hostile sender --
+            /// a field narrowed from int to byte while an instance is still running the previous world
+            /// version is enough. A value that does not fit now fails the decode like any other malformed
+            /// entry, so nothing is applied and nothing stops.
+            ///
+            /// NaN fails both comparisons, so it is rejected here too.
+            /// </remarks>
+            private static void EmitRangeCheckedNumber(
+                CodeWriter code,
+                SyncOnJoinTypeSpec spec,
+                string targetExpression,
+                string conversion,
+                string tokenName,
+                string okFlag)
+            {
+                if (spec.NumberMinLiteral == null || spec.NumberMaxLiteral == null)
+                {
+                    throw new CodeGenerationException(
+                        GeneratorId,
+                        code.Location,
+                        $"CE has no numeric range for the SyncOnJoin type '{spec.TypeName}', so it cannot emit a safe " +
+                        "conversion for it. This is a CE bug: report the field type. " +
+                        "Workaround: add [SyncSerializer(nameof(Serialize), nameof(Deserialize))] to the field.");
+                }
+
+                string number = code.Temp("__ce_number");
+                code.Line($"double {number} = {tokenName}.Number;");
+                code.Line($"if ({number} >= {spec.NumberMinLiteral} && {number} <= {spec.NumberMaxLiteral})");
+                code.OpenBlock();
+                code.Line($"{targetExpression} = {conversion}{number};");
+                code.CloseBlock();
+                code.Line("else");
+                code.OpenBlock();
+                code.Line($"{okFlag} = false;");
+                code.CloseBlock();
+            }
+
+            private static void EmitDeserializeEnum(
+                CodeWriter code,
+                SyncOnJoinTypeSpec spec,
+                string targetExpression,
+                string tokenName,
+                string okFlag)
+            {
+                string wide = spec.EnumWideUnderlyingTypeName;
+
+                if (wide == null)
+                {
+                    code.Line($"if ({tokenName}.IsNumber)");
+                    code.OpenBlock();
+                    EmitRangeCheckedNumber(code, spec, targetExpression, $"({spec.TypeName})(long)", tokenName, okFlag);
+                    code.CloseBlock();
+                    code.Line("else");
+                    code.OpenBlock();
+                    code.Line($"{okFlag} = false;");
+                    code.CloseBlock();
+                    return;
+                }
+
+                // The text form written by EmitSerializeToExistingToken. A number is still accepted, inside
+                // the range a double holds exactly, so a payload from before that encoding still loads.
+                string parsed = code.Temp("__ce_parsed");
+                code.Line($"{wide} {parsed} = default({wide});");
+                code.Line($"if ({tokenName}.TokenType == global::VRC.SDK3.Data.TokenType.String && {wide}.TryParse({tokenName}.String, {IntegerNumberStyle}, {InvariantCulture}, out {parsed}))");
+                code.OpenBlock();
+                code.Line($"{targetExpression} = ({spec.TypeName}){parsed};");
+                code.CloseBlock();
+                code.Line($"else if ({tokenName}.IsNumber)");
+                code.OpenBlock();
+                EmitRangeCheckedNumber(code, spec, targetExpression, $"({spec.TypeName})({wide})", tokenName, okFlag);
+                code.CloseBlock();
+                code.Line("else");
+                code.OpenBlock();
+                code.Line($"{okFlag} = false;");
+                code.CloseBlock();
             }
 
             private static void EmitDeserializeStringToken(
@@ -1818,9 +2514,32 @@ public void {group.ApplyMethod}()
                 return canonical.SyntaxTree == node.SyntaxTree && canonical.Span == node.Span;
             }
 
-            private static bool DeclaresField(INamedTypeSymbol type, string fieldName)
+            /// <summary>
+            /// Whether the type already carries this generated field. One of that name the author declared
+            /// is refused rather than taken over.
+            /// </summary>
+            /// <remarks>
+            /// Taking it over is what this used to do, whatever its type and whatever its attributes. A
+            /// '_CE_SyncOnJoinPayload' that is not [UdonSynced] then became the group's transport, and the
+            /// state in it never reached a late joiner -- with nothing anywhere to say why. Only a field
+            /// carrying [SyncOnJoinGenerated] is accepted as already generated.
+            /// </remarks>
+            private static bool HasGeneratedField(INamedTypeSymbol type, string fieldName)
             {
-                return type.GetMembers(fieldName).OfType<IFieldSymbol>().Any();
+                IFieldSymbol field = type.GetMembers(fieldName).OfType<IFieldSymbol>().FirstOrDefault();
+                if (field == null)
+                    return false;
+
+                if (SyncOnJoinTypeSupport.FindAttribute(field, "SyncOnJoinGenerated") != null)
+                    return true;
+
+                throw new CodeGenerationException(
+                    GeneratorId,
+                    GetSymbolLocation(field, type),
+                    $"'{type.Name}' declares a field named '{fieldName}', a name CE reserves for the late-join " +
+                    "transport it generates for [SyncOnJoin]. CE cannot generate that member alongside it, and " +
+                    "using the field as the transport would sync whatever it happens to be, or nothing. " +
+                    "Fix: rename the field.");
             }
 
             private static bool DeclaresMethod(INamedTypeSymbol type, string methodName)
@@ -1828,6 +2547,13 @@ public void {group.ApplyMethod}()
                 return type != null && type.GetMembers(methodName)
                     .OfType<IMethodSymbol>()
                     .Any(method => !method.IsImplicitlyDeclared);
+            }
+
+            private static bool DeclaresParameterlessMethod(INamedTypeSymbol type, string methodName)
+            {
+                return type != null && type.GetMembers(methodName)
+                    .OfType<IMethodSymbol>()
+                    .Any(method => !method.IsImplicitlyDeclared && method.Parameters.Length == 0);
             }
 
             /// <summary>
@@ -1880,6 +2606,19 @@ public void {group.ApplyMethod}()
             private static string EscapeString(string value)
             {
                 return value?.Replace("\\", "\\\\").Replace("\"", "\\\"") ?? string.Empty;
+            }
+
+            /// <summary>
+            /// A member name as it has to be written in code. A symbol's name carries no '@', so a field
+            /// declared as '@event' came through here as 'event' and was emitted as a keyword, which does
+            /// not parse.
+            /// </summary>
+            private static string EscapeIdentifier(string name)
+            {
+                if (string.IsNullOrEmpty(name))
+                    return name;
+
+                return SyntaxFacts.GetKeywordKind(name) != SyntaxKind.None ? "@" + name : name;
             }
         }
 
@@ -1935,6 +2674,7 @@ public void {group.ApplyMethod}()
 
             public string PayloadField => Suffixed(PayloadFieldName);
             public string AppliedField => Suffixed(AppliedFieldName);
+            public string OversizeLoggedField => Suffixed(OversizeLoggedFieldName);
             public string SerializeMethod => Suffixed(SerializeMethodName);
             public string DeserializeMethod => Suffixed(DeserializeMethodName);
             public string ApplyMethod => Suffixed(ApplyMethodName);
@@ -1986,6 +2726,52 @@ public void {group.ApplyMethod}()
 
             public string SerializeMethod { get; }
             public string DeserializeMethod { get; }
+        }
+
+        /// <summary>
+        /// Puts the glue calls in front of every <c>return</c> in a handler the author wrote, so an early
+        /// exit leaves through them instead of around them.
+        /// </summary>
+        private sealed class ReturnInjector : CSharpSyntaxRewriter
+        {
+            private readonly IReadOnlyList<StatementSyntax> _calls;
+
+            public ReturnInjector(IReadOnlyList<StatementSyntax> calls)
+            {
+                _calls = calls;
+            }
+
+            public override SyntaxNode VisitReturnStatement(ReturnStatementSyntax node)
+            {
+                var statements = new List<StatementSyntax>(_calls.Count + 1);
+
+                foreach (StatementSyntax call in _calls)
+                    statements.Add(call.WithoutTrivia().WithTrailingTrivia(SyntaxFactory.Space));
+
+                statements.Add(node.WithoutTrivia().WithTrailingTrivia(SyntaxFactory.Space));
+
+                // The block stays on the return's own line and takes over its trivia, so no line of the
+                // author's file moves and every later diagnostic still points where they wrote it.
+                return SyntaxFactory.Block(
+                    SyntaxFactory.Token(SyntaxKind.OpenBraceToken)
+                        .WithLeadingTrivia(node.GetLeadingTrivia())
+                        .WithTrailingTrivia(SyntaxFactory.Space),
+                    SyntaxFactory.List(statements),
+                    SyntaxFactory.Token(SyntaxKind.CloseBraceToken)
+                        .WithLeadingTrivia(SyntaxFactory.TriviaList())
+                        .WithTrailingTrivia(node.GetTrailingTrivia()));
+            }
+
+            // A return inside a lambda, an anonymous method or a local function leaves that body, not the
+            // handler. Rewriting those would run the glue every time the callback fired and still leave
+            // the handler's own exits uncovered.
+            public override SyntaxNode VisitParenthesizedLambdaExpression(ParenthesizedLambdaExpressionSyntax node) => node;
+
+            public override SyntaxNode VisitSimpleLambdaExpression(SimpleLambdaExpressionSyntax node) => node;
+
+            public override SyntaxNode VisitAnonymousMethodExpression(AnonymousMethodExpressionSyntax node) => node;
+
+            public override SyntaxNode VisitLocalFunctionStatement(LocalFunctionStatementSyntax node) => node;
         }
 
         private sealed class CodeWriter

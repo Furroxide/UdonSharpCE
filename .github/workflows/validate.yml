@@ -6,7 +6,7 @@ name: Validate
 # than a formality -- docusaurus.config.js sets onBrokenLinks: 'throw', so a broken internal link
 # fails the job.
 #
-# The suite that exercises the compiler is CEShowcase.Tests (edit mode, ~107 tests) and must be run
+# The suite that exercises the compiler is CEShowcase.Tests (edit mode, 553 tests) and must be run
 # locally in Unity; see CONTRIBUTING.md.
 
 on:
@@ -49,7 +49,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          node Tools/vpm/build-listing.mjs "$RUNNER_TEMP/vpm"
+          node --test Tools/vpm/build-listing.test.mjs
+          # --allow-unreachable: this job checks that generation works, and nothing here is deployed,
+          # so a GitHub API blip should not fail an unrelated pull request.
+          node Tools/vpm/build-listing.mjs "$RUNNER_TEMP/vpm" --allow-unreachable
           node -e "JSON.parse(require('fs').readFileSync(process.env.RUNNER_TEMP+'/vpm/index.json','utf8'))"
 
       - name: Build docs site

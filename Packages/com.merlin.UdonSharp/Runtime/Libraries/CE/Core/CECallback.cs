@@ -59,10 +59,13 @@ namespace UdonSharp.CE.Core
         /// Does nothing if the callback is invalid.
         /// </summary>
         /// <remarks>
-        /// <see cref="MethodName"/> has to name a <b>public, parameterless, instance</b> method on
-        /// <see cref="Target"/>. U# only exports those under their written name -- anything else is either
-        /// left out of the program entirely or exported under a mangled one, and SendCustomEvent then finds
-        /// no entry point and returns without raising anything.
+        /// <see cref="MethodName"/> has to be a name U# exports from <see cref="Target"/>'s program. A
+        /// <b>public, parameterless, instance</b> method is exported under its written name. A built-in Udon
+        /// event is exported under its Udon name instead -- <c>Interact</c> as <c>"_interact"</c>,
+        /// <c>Start</c> as <c>"_start"</c> -- whatever its accessibility, which is the name the CE Action
+        /// transformer emits for one. Anything else is either left out of the program entirely or exported
+        /// under a mangled name, and SendCustomEvent then finds no entry point and returns without raising
+        /// anything.
         /// </remarks>
         public void Invoke()
         {

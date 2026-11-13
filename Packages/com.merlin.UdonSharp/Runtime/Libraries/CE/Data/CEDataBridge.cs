@@ -25,6 +25,13 @@ namespace UdonSharp.CE.Data
     /// In Phase 1, models must be manually registered using Register{T}().
     /// Future phases will support automatic registration via source generation.
     /// </summary>
+    /// <remarks>
+    /// Registration stores two converter delegates and every conversion calls one of them. Udon has no
+    /// way to represent a delegate, and CE inlines a lambda only where it is passed to
+    /// List&lt;T&gt;.ForEach or one of CEList's ForEach helpers, so the bridge is for editor and plain C#
+    /// code. An UdonSharpBehaviour
+    /// converts its model by hand, field by field, into a DataDictionary.
+    /// </remarks>
     /// <example>
     /// <code>
     /// // Define your model
@@ -35,8 +42,8 @@ namespace UdonSharp.CE.Data
     ///     [DataField("score")] public int score;
     /// }
     ///
-    /// // Register in Start() or Awake()
-    /// void Start()
+    /// // Register once, before the first ToData/FromData (editor or plain C# code)
+    /// void RegisterModels()
     /// {
     ///     CEDataBridge.Register<PlayerData>(
     ///         toData: p => {
@@ -47,7 +54,9 @@ namespace UdonSharp.CE.Data
     ///         },
     ///         fromData: d => new PlayerData {
     ///             playerName = d["name"].String,
-    ///             score = (int)d["score"].Double  // JSON numbers are doubles
+    ///             // .Number, not .Double: the token is a Double after a JSON round trip but still
+    ///             // the Int that toData wrote when FromData is handed that dictionary directly.
+    ///             score = (int)d["score"].Number
     ///         }
     ///     );
     /// }
@@ -70,7 +79,7 @@ namespace UdonSharp.CE.Data
 
         /// <summary>
         /// Registers converter functions for a data model type.
-        /// Call this in Start() or Awake() before using ToData/FromData.
+        /// Call this once before using ToData/FromData.
         /// </summary>
         /// <typeparam name="T">The data model type</typeparam>
         /// <param name="toData">Function to convert T to DataDictionary</param>

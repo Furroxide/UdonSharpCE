@@ -33,15 +33,15 @@ public class CEQuickStart : UdonSharpBehaviour
 | CE.Net | Sync/RPC annotations, analysis helpers, rate limiting | [CE Net](ce-net) |
 | CE.Persistence | Player data models, validation, size estimation | [CE Persistence](ce-persistence) |
 | CE.DevTools | Runtime logger, debug console, profiler | [CE DevTools](ce-devtools) |
-| CE.Perf | ECS-lite world, pooling, grids, LOD, batching | [CE Perf](ce-perf) |
+| CE.Perf | ECS-lite world, grids, LOD; delegate-based pooling and batching (editor/plain C# only) | [CE Perf](ce-perf) |
 | CE.Procgen | Deterministic RNG, noise, dungeon and WFC tools | [CE Procgen](ce-procgen) |
 | CE.GraphBridge | Attributes and generators for graph nodes | [CE GraphBridge](ce-graphbridge) |
 | CE.NetPhysics | Networked physics framework | [CE NetPhysics](ce-netphysics) |
-| Editor Tools | Analyzers, optimizers, inspector, menu tools | [CE Editor Tools](ce-editor-tools) |
+| Editor Tools | Analyzers, code generators, inspector, menu tools | [CE Editor Tools](ce-editor-tools) |
 
 ## Feature Status Notes
 
-- Async transformation currently supports `await UdonTask.Delay`, `DelayFrames`, and `Yield`. Awaiting tasks that return values or `WhenAll/WhenAny` is not yet implemented.
+- Async transformation currently supports `await UdonTask.Delay`, `DelayFrames`, `Yield`, and same-class async UdonTask child methods. Awaiting tasks that return values or `WhenAll/WhenAny` is not yet implemented.
 - `UdonTask<T>` exists, but awaited result assignment is not wired in the current transformer.
 - `[Sync]` participates in UdonSharp's normal synced-variable pipeline by inheriting `UdonSyncedAttribute`. Do not combine `[Sync]` and `[UdonSynced]` on the same field.
 - `[Sync]` now requires an `Authority` as its first positional argument: `[Sync(Authority.Owner)]` for state one client decides and the rest are told about, `[Sync(Authority.Predicted)]` for state every client simulates locally and the owner's packet corrects. This is a breaking change — bare `[Sync]` and `[Sync(InterpolationMode.X)]` no longer compile, and `Authority.Owner` is the behaviour-preserving migration for both. Interpolation is now the second positional argument or a named one. See [CE Net](ce-net#sync-authority).
@@ -51,7 +51,7 @@ public class CEQuickStart : UdonSharpBehaviour
 - `DeltaEncode` is advisory only; use manual sync plus a custom payload for true delta-style updates.
 - The optimizer opt-out attributes (`[CENoOptimize]`, `[CENoInline]`, `[CEInline]`, `[CENoUnroll]`, `[CEUnroll]`, `[CEConst]`, `[CEDebugOnly]`) are now `[Obsolete(error: true)]`. The syntactic optimizers they exempted from are all disabled by default — each was found able to change or delete program behaviour — so there is nothing left to opt out of, and an attribute that silently does nothing is the failure class this fork removes. `[CEPreserveAction]` is still active and still read.
 - `[CEComponent]` and `[CESystem]` are metadata only; CEWorld does not auto-register them yet.
-- `CELogger` calls are transformed to `Debug.Log` in Udon compilation; in-world console integration requires manual wiring.
+- A `CELogger` call with a constant level is rewritten to the matching `Debug.Log`/`LogWarning`/`LogError` at compile time (severity and tag kept, `MinLevel` and the in-world console bypassed); a call with named arguments or a non-constant level stays a real `CELogger` call. See [CE DevTools](ce-devtools).
 
 ## UdonSharp Subset Reminders
 

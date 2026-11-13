@@ -22,8 +22,13 @@ namespace UdonSharp.CE.Net
     /// - Represents world state rather than player state
     ///
     /// Priority orders fields within one payload. Group splits a behaviour's
-    /// state across several payloads so unrelated state stops travelling
-    /// together.
+    /// state across several payloads, each restored only when it changed.
+    ///
+    /// The payload is restored in OnDeserialization, and in Start as well:
+    /// VRChat drops an OnDeserialization that arrives before the behaviour has
+    /// started -- the usual case for an object that is inactive when a player
+    /// joins -- so a payload already in place by then is restored when Start
+    /// runs. That restore runs before your own Start body.
     /// </remarks>
     /// <example>
     /// <code>
@@ -35,7 +40,7 @@ namespace UdonSharp.CE.Net
     ///     [SyncOnJoin(Priority = 1)]
     ///     public bool[] completedObjectives;
     ///
-    ///     // Its own payload: rewriting the history no longer re-sends the phase.
+    ///     // Its own payload: a change to the history does not re-apply the phase.
     ///     [SyncOnJoin(Group = "history")]
     ///     public int[] worldEventHistory;
     /// }
@@ -82,24 +87,23 @@ namespace UdonSharp.CE.Net
         /// fields naming no group share the default one.
         /// </summary>
         /// <remarks>
-        /// Group exists to stop unrelated state travelling together. Without it a behaviour has exactly one
-        /// payload, so touching any [SyncOnJoin] field re-serializes and re-sends all of them. A Manual
-        /// payload may be <see cref="NetworkLimits.ManualSyncMaxBytes"/> while the whole instance shares
-        /// <see cref="NetworkLimits.NetworkBudgetBytesPerSecond"/> per second, and VRChat's rate limiting is
-        /// size-proportional -- so a behaviour mixing a large cold snapshot with a small hot field starves
-        /// the instance AND throttles the hot field, precisely because the two are bundled.
+        /// Each group gets its own synced string, its own capture, and its own restore. A client decodes
+        /// only the groups whose string changed, and capture only asks VRChat to serialize when some
+        /// group's string actually changed.
         ///
-        /// Each group gets its own synced string, its own capture, and its own restore, and capture only
-        /// asks VRChat to serialize when some group's payload actually changed. Splitting the two above puts
-        /// the cold snapshot on the wire when it changes, and never because the hot field moved.
+        /// Group does not change what one serialization sends. VRChat serializes all of a behaviour's
+        /// synced variables together, so every group's string is in every serialization of the behaviour,
+        /// changed or not, and the whole serialization has to fit in
+        /// <see cref="NetworkLimits.ManualSyncMaxBytes"/>. State that should go on the wire less often
+        /// than the rest belongs on a separate behaviour, which serializes on its own.
         ///
         /// The name is yours; it never appears on the wire. It is used to name generated members, so
         /// characters outside a-z, A-Z, 0-9 and _ become underscores -- two names that differ only in
         /// punctuation are a compile error rather than a silent merge back into one payload.
         ///
-        /// Grouping is per behaviour. Grouping alone does not need a second GameObject, which the previous
-        /// "split it onto another behaviour" workaround did: VRChat requires every synced UdonBehaviour on
-        /// one GameObject to share a sync method.
+        /// Grouping is per behaviour. A separate behaviour on the same GameObject works as long as it is
+        /// Manual as well: VRChat requires every synced UdonBehaviour on one GameObject to share a sync
+        /// method, and [SyncOnJoin] makes a behaviour Manual.
         /// </remarks>
         /// <example>
         /// <code>
@@ -107,7 +111,7 @@ namespace UdonSharp.CE.Net
         /// [SyncOnJoin(Group = "terrain")]
         /// public int[] heightmap;
         ///
-        /// // Small, changes constantly -- and no longer drags the heightmap along.
+        /// // Small, changes constantly -- and no longer makes every client re-decode the heightmap.
         /// [SyncOnJoin(Group = "score")]
         /// public int score;
         /// </code>
@@ -119,12 +123,17 @@ namespace UdonSharp.CE.Net
         /// </summary>
         /// <remarks>
         /// There is no per-variable acknowledgement in Udon: <c>SerializationResult</c> is reported per
-        /// behaviour, not per field, so "confirmed delivery" for one field cannot be observed. Retry on a
-        /// failed serialization is unconditional instead, which makes the flag redundant as well as inert.
+        /// behaviour, not per field, so "confirmed delivery" for one field cannot be observed.
+        ///
+        /// Nothing retries a failed serialization either. Capture asks VRChat to serialize only when a
+        /// payload changed, so a serialization VRChat did not deliver -- one larger than
+        /// <see cref="NetworkLimits.ManualSyncMaxBytes"/>, which the generated glue logs as an error --
+        /// is sent again only once the state changes, and late joiners keep the previous snapshot until
+        /// then.
         /// </remarks>
         [Obsolete("SyncOnJoin.Critical is not implementable: VRChat reports serialization success per " +
                   "behaviour, not per variable, so a single field's delivery cannot be acknowledged. " +
-                  "Retry on failure is already unconditional.", true)]
+                  "A failed serialization is not retried; the payload is sent again when the state next changes.", true)]
         public bool Critical { get; set; } = false;
     }
 

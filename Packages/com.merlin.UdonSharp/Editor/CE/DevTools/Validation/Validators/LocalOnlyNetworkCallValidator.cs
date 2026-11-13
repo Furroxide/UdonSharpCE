@@ -25,33 +25,114 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
             foreach (var type in context.BehaviourTypes)
             {
                 // Get all [LocalOnly] methods in this type
-                var localOnlyMethods = GetLocalOnlyMethods(type);
-                if (localOnlyMethods.Count == 0)
+                if (GetLocalOnlyMethods(type).Count == 0)
                     continue;
 
-                // Find all SendCustomNetworkEvent calls
-                var networkCalls = FindNetworkEventCalls(type);
+                string sourceFile = FindSourceFile(type);
+                if (string.IsNullOrEmpty(sourceFile) || !System.IO.File.Exists(sourceFile))
+                    continue;
 
-                foreach (var call in networkCalls)
+                string sourceCode;
+
+                try
                 {
-                    if (localOnlyMethods.Contains(call.EventName))
+                    sourceCode = System.IO.File.ReadAllText(sourceFile);
+                }
+                catch
+                {
+                    // An unreadable file is the same as no file: nothing to report on.
+                    continue;
+                }
+
+                issues.AddRange(ValidateSource(type, sourceCode, context.GetSourceFile(type)));
+            }
+
+            return issues;
+        }
+
+        /// <summary>
+        /// Checks one behaviour type against its source text. Separate from <see cref="Validate"/> so the
+        /// call matching can be exercised without a script asset on disk.
+        /// </summary>
+        public List<ValidationIssue> ValidateSource(Type type, string sourceCode, string filePath = null)
+        {
+            var issues = new List<ValidationIssue>();
+
+            if (type == null || string.IsNullOrEmpty(sourceCode))
+                return issues;
+
+            var localOnlyMethods = GetLocalOnlyMethods(type);
+            if (localOnlyMethods.Count == 0)
+                return issues;
+
+            // Find all SendCustomNetworkEvent calls this behaviour makes on itself
+            foreach (var call in FindNetworkEventCalls(sourceCode))
+            {
+                if (localOnlyMethods.Contains(call.EventName))
+                {
+                    issues.Add(new ValidationIssue
                     {
-                        issues.Add(new ValidationIssue
-                        {
-                            Severity = ValidationSeverity.Error,
-                            ValidatorName = Name,
-                            Message = $"SendCustomNetworkEvent targets [LocalOnly] method '{call.EventName}'",
-                            Details = "Methods marked [LocalOnly] are not meant to be called over the network. " +
-                                     "Either remove [LocalOnly] from the method, or use SendCustomEvent for local calls.",
-                            RelatedType = type,
-                            FilePath = context.GetSourceFile(type),
-                            LineNumber = call.LineNumber
-                        });
-                    }
+                        Severity = ValidationSeverity.Error,
+                        ValidatorName = Name,
+                        Message = $"SendCustomNetworkEvent targets [LocalOnly] method '{call.EventName}'",
+                        Details = "Methods marked [LocalOnly] are not meant to be called over the network. " +
+                                 "Either remove [LocalOnly] from the method, or use SendCustomEvent for local calls.",
+                        RelatedType = type,
+                        FilePath = filePath,
+                        LineNumber = call.LineNumber
+                    });
                 }
             }
 
             return issues;
+        }
+
+        /// <summary>
+        /// Whether the call at this position is made on the behaviour itself: written bare, or through
+        /// 'this.' or 'base.'.
+        ///
+        /// 'other.SendCustomNetworkEvent(NetworkEventTarget.All, "Refresh")' runs Refresh on the other
+        /// behaviour. Whether this type happens to have a [LocalOnly] method of the same name has nothing
+        /// to do with it, and reading every call in the file as a call on this type reported exactly that
+        /// coincidence as an error.
+        /// </summary>
+        private static bool IsCallOnSelf(string sourceCode, int callIndex)
+        {
+            int position = callIndex - 1;
+
+            // The match sits inside a longer name -- 'MySendCustomNetworkEvent(...)' is some other method.
+            if (position >= 0 && IsIdentifierCharacter(sourceCode[position]))
+                return false;
+
+            while (position >= 0 && char.IsWhiteSpace(sourceCode[position]))
+                position--;
+
+            if (position < 0 || sourceCode[position] != '.')
+                return true;
+
+            position--;
+
+            while (position >= 0 && char.IsWhiteSpace(sourceCode[position]))
+                position--;
+
+            int receiverEnd = position;
+
+            while (position >= 0 && IsIdentifierCharacter(sourceCode[position]))
+                position--;
+
+            // Not an identifier at all -- 'GetTarget().SendCustomNetworkEvent(...)', 'targets[i].Send...'.
+            if (receiverEnd < 0 || position == receiverEnd)
+                return false;
+
+            // The whole identifier is read, so 'database.SendCustomNetworkEvent' is not taken for 'base.'.
+            string receiver = sourceCode.Substring(position + 1, receiverEnd - position);
+
+            return receiver == "this" || receiver == "base";
+        }
+
+        private static bool IsIdentifierCharacter(char character)
+        {
+            return char.IsLetterOrDigit(character) || character == '_';
         }
 
         private HashSet<string> GetLocalOnlyMethods(Type type)
@@ -77,18 +158,12 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
             return methods;
         }
 
-        private List<NetworkEventCall> FindNetworkEventCalls(Type type)
+        private List<NetworkEventCall> FindNetworkEventCalls(string sourceCode)
         {
             var calls = new List<NetworkEventCall>();
 
-            string sourceFile = FindSourceFile(type);
-            if (string.IsNullOrEmpty(sourceFile) || !System.IO.File.Exists(sourceFile))
-                return calls;
-
             try
             {
-                string sourceCode = System.IO.File.ReadAllText(sourceFile);
-
                 // Find SendCustomNetworkEvent calls
                 // Patterns:
                 //   SendCustomNetworkEvent(NetworkEventTarget.All, "MethodName")
@@ -107,6 +182,9 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
                     var matches = Regex.Matches(sourceCode, pattern);
                     foreach (Match match in matches)
                     {
+                        if (!IsCallOnSelf(sourceCode, match.Index))
+                            continue;
+
                         int lineNumber = sourceCode.Substring(0, match.Index).Count(c => c == '\n') + 1;
                         calls.Add(new NetworkEventCall
                         {

@@ -22,7 +22,13 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
             var analyzer = new WorldAnalyzer();
             var result = analyzer.AnalyzeBehaviours(context.Behaviours);
 
-            // Convert world-level violations to validation issues
+            // Convert world-level violations to validation issues.
+            //
+            // This is the only loop, and it has to stay the only one. WorldAnalyzer already copies every
+            // behaviour-level error into the world list, prefixed with the behaviour's name; a second pass
+            // over the per-behaviour lists re-added each of those under the same text, so one oversized
+            // payload showed up as two errors and the validator's error count was double the truth.
+            // Behaviour-level warnings are left to the Bandwidth Analyzer window, as they always were.
             foreach (var violation in result.Violations)
             {
                 issues.Add(new ValidationIssue
@@ -30,28 +36,9 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
                     Severity = MapSeverity(violation.Severity),
                     ValidatorName = Name,
                     Message = violation.Message,
-                    Details = violation.Recommendation
+                    Details = violation.Recommendation,
+                    RelatedType = violation.BehaviourType
                 });
-            }
-
-            // Convert behaviour-level violations
-            foreach (var behaviour in result.BehaviourResults)
-            {
-                foreach (var violation in behaviour.Violations)
-                {
-                    // Only propagate errors (warnings are handled by bandwidth analyzer window)
-                    if (violation.Severity == AnalysisSeverity.Error)
-                    {
-                        issues.Add(new ValidationIssue
-                        {
-                            Severity = ValidationSeverity.Error,
-                            ValidatorName = Name,
-                            Message = $"{behaviour.BehaviourType.Name}: {violation.Message}",
-                            Details = violation.Recommendation,
-                            RelatedType = behaviour.BehaviourType
-                        });
-                    }
-                }
             }
 
             return issues;

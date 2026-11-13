@@ -15,10 +15,16 @@ namespace UdonSharp.CE.Procgen
     /// - Simplex noise (more efficient, fewer artifacts)
     /// - Worley/cellular noise
     /// - Fractal combinations (fBm, ridged)
+    ///
+    /// The seed is not world-global under Udon. UdonSharp emits the statics of a non-behaviour type into each
+    /// calling behaviour's own program heap, so the permutation table one behaviour builds with
+    /// <see cref="Initialize"/> is invisible to every other behaviour. A behaviour that samples noise without
+    /// having called Initialize itself silently gets the seed-0 table, whatever seed the rest of the world
+    /// was given. Call Initialize(seed) in every behaviour that samples.
     /// </remarks>
     /// <example>
     /// <code>
-    /// // Initialize once with a seed
+    /// // Initialize with the shared seed, in each behaviour that samples noise
     /// CENoise.Initialize(worldSeed);
     ///
     /// // Generate terrain height
@@ -47,6 +53,11 @@ namespace UdonSharp.CE.Procgen
         /// Whether the noise system has been initialized.
         /// </summary>
         private static bool _initialized;
+
+        /// <summary>
+        /// Seed-derived value mixed into the Worley cell hash.
+        /// </summary>
+        private static int _worleySalt;
 
         #endregion
 
@@ -79,7 +90,8 @@ namespace UdonSharp.CE.Procgen
 
         /// <summary>
         /// Initializes the noise system with a seed.
-        /// Call once at world start before using noise functions.
+        /// Call it before sampling, in every behaviour that samples: the tables it builds belong to the
+        /// calling behaviour only (see the remarks on <see cref="CENoise"/>).
         /// </summary>
         /// <param name="seed">The seed for deterministic generation.</param>
         public static void Initialize(int seed)
@@ -103,11 +115,18 @@ namespace UdonSharp.CE.Procgen
                 _permMod12[i] = _perm[i & 255] % 12;
             }
 
+            // Worley hashes cell coordinates directly and never touches the permutation table, so without
+            // this it returned the same pattern for every seed. Drawn after the shuffle so the tables above
+            // stay exactly what each seed always produced.
+            _worleySalt = rng.NextInt();
+
             _initialized = true;
         }
 
         /// <summary>
         /// Ensures the noise system is initialized with a default seed.
+        /// Seed 0 is only a fallback so sampling never dereferences a missing table; a behaviour that
+        /// reaches it is not using the world's seed.
         /// </summary>
         private static void EnsureInitialized()
         {
@@ -336,7 +355,10 @@ namespace UdonSharp.CE.Procgen
             if (t0 >= 0)
             {
                 t0 *= t0;
-                int gi0 = _permMod12[ii + _perm[jj + _perm[kk]]];
+                // The inner sum reaches 510 and _perm holds 256 entries, so it has to be wrapped like the
+                // other three corners are. Unmasked, this read past the table for roughly half of all
+                // inputs, and an out-of-range read halts the calling behaviour under Udon.
+                int gi0 = _permMod12[ii + _perm[jj + _perm[kk] & 255]];
                 n0 = t0 * t0 * Vector3.Dot(Grad3[gi0], new Vector3(x0, y0, z0));
             }
 
@@ -455,7 +477,7 @@ namespace UdonSharp.CE.Procgen
         /// </summary>
         /// <param name="x">X coordinate.</param>
         /// <param name="y">Y coordinate.</param>
-        /// <param name="octaves">Number of noise layers (1-8 recommended).</param>
+        /// <param name="octaves">Number of noise layers (1-8 recommended). Fewer than 1 returns 0.</param>
         /// <param name="persistence">Amplitude decay per octave (0.5 typical).</param>
         /// <param name="lacunarity">Frequency multiplier per octave (2.0 typical).</param>
         /// <returns>Fractal noise value, approximately in [-1, 1].</returns>
@@ -474,7 +496,10 @@ namespace UdonSharp.CE.Procgen
                 frequency *= lacunarity;
             }
 
-            return total / maxValue;
+            // No octave runs when octaves is below 1, and amplitudes that cancel out do the same thing to
+            // maxValue: both used to divide by zero and hand NaN to whatever was placing geometry with the
+            // result. Every fractal variant below ends with this same guard.
+            return maxValue != 0f ? total / maxValue : 0f;
         }
 
         /// <summary>
@@ -495,7 +520,7 @@ namespace UdonSharp.CE.Procgen
                 frequency *= lacunarity;
             }
 
-            return total / maxValue;
+            return maxValue != 0f ? total / maxValue : 0f;
         }
 
         /// <summary>
@@ -518,7 +543,7 @@ namespace UdonSharp.CE.Procgen
                 frequency *= lacunarity;
             }
 
-            return total / maxValue;
+            return maxValue != 0f ? total / maxValue : 0f;
         }
 
         /// <summary>
@@ -541,7 +566,7 @@ namespace UdonSharp.CE.Procgen
                 frequency *= lacunarity;
             }
 
-            return total / maxValue;
+            return maxValue != 0f ? total / maxValue : 0f;
         }
 
         /// <summary>
@@ -562,7 +587,7 @@ namespace UdonSharp.CE.Procgen
                 frequency *= lacunarity;
             }
 
-            return total / maxValue;
+            return maxValue != 0f ? total / maxValue : 0f;
         }
 
         #endregion
@@ -571,7 +596,13 @@ namespace UdonSharp.CE.Procgen
 
         private static int FloorToInt(float x)
         {
-            return x >= 0 ? (int)x : (int)x - 1;
+            // A truncate-then-subtract floor is off by one on every exact negative integer (-2.0 became -3)
+            // while the fractional part, taken with Mathf.Floor, stayed 0. Perlin then read the lattice
+            // column to the left of the one it was standing on, so the noise jumped along every negative
+            // integer coordinate -- which is exactly where grid sampling such as x * 0.1f lands.
+            // Mathf.FloorToInt also cannot throw: a bare (int) cast is lowered to Convert.ToInt32 under Udon,
+            // which halts the behaviour for a coordinate outside int range.
+            return Mathf.FloorToInt(x);
         }
 
         private static float Fade(float t)
@@ -608,14 +639,14 @@ namespace UdonSharp.CE.Procgen
 
         private static int Hash2D(int x, int y)
         {
-            int h = x * 374761393 + y * 668265263;
+            int h = (x * 374761393 + y * 668265263) ^ _worleySalt;
             h = (h ^ (h >> 13)) * 1274126177;
             return h ^ (h >> 16);
         }
 
         private static int Hash3D(int x, int y, int z)
         {
-            int h = x * 374761393 + y * 668265263 + z * 1440670387;
+            int h = (x * 374761393 + y * 668265263 + z * 1440670387) ^ _worleySalt;
             h = (h ^ (h >> 13)) * 1274126177;
             return h ^ (h >> 16);
         }

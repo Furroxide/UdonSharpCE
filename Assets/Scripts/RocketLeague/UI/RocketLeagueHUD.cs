@@ -69,6 +69,12 @@ namespace RocketLeague
 
             if (LobbyPanel != null)
                 LobbyPanel.SetActive(true);
+
+            // Start order between this and the manager is undefined. If the manager went first it has
+            // already drawn the match state, and the blanket hide above has just wiped it -- which for a
+            // player joining mid-overtime or at Game Over would stay wiped until the state next changed.
+            if (Manager != null)
+                Manager.RefreshHud();
         }
 
         private void Update()
@@ -265,6 +271,40 @@ namespace RocketLeague
         }
 
         /// <summary>
+        /// Puts every overlay that belongs to a match state where that state says it should be: raises
+        /// the ones the state calls for and lowers the rest. Driven by RocketLeagueManager whenever the
+        /// synced state changes, on the owner and on everyone else alike.
+        ///
+        /// The goal banner is the exception. It is raised by the goal event, which carries the scoring
+        /// team, and runs on its own timer; this only takes it down once play has moved on.
+        /// </summary>
+        /// <param name="countdownRemaining">Seconds left on the kickoff countdown, when that is the state.</param>
+        /// <param name="winningTeam">1 = Blue, 0 = Orange. Only read at Game Over.</param>
+        public void ApplyMatchState(GameState state, float countdownRemaining, int winningTeam)
+        {
+            if (state == GameState.Countdown)
+                ShowCountdown(countdownRemaining);
+            else
+                HideCountdown();
+
+            if (OvertimePanel != null)
+                OvertimePanel.SetActive(state == GameState.Overtime);
+
+            if (state == GameState.GameOver)
+                ShowGameOver(winningTeam);
+            else if (GameOverPanel != null)
+                GameOverPanel.SetActive(false);
+
+            if (state != GameState.GoalScored && state != GameState.GameOver)
+            {
+                _goalDisplayTimer = 0f;
+
+                if (GoalScoredPanel != null)
+                    GoalScoredPanel.SetActive(false);
+            }
+        }
+
+        /// <summary>
         /// Shows the game over screen.
         /// </summary>
         public void ShowGameOver(int winningTeam)
@@ -327,6 +367,10 @@ namespace RocketLeague
 
                 if (LobbyPanel != null)
                     LobbyPanel.SetActive(true);
+
+                // Only the master's reset goes through. For anyone else the match is still wherever it
+                // was, so put back whatever the hide above took down.
+                Manager.RefreshHud();
             }
         }
     }

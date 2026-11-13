@@ -549,6 +549,9 @@ namespace UdonSharp
             return serializedUdonProgramAsset;
         }
 
+        protected override NetworkCallingEntrypointMetadata[] GetLastNetworkCallingMetadata()
+            => networkEntrypointMetadata;
+
         public void ApplyProgram()
         {
             GetSerializedProgramAssetWithoutRefresh().StoreProgram(program, networkEntrypointMetadata);

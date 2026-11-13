@@ -29,7 +29,12 @@ namespace UdonSharp.CE.Data
     /// </summary>
     /// <remarks>
     /// Note: VRChat DataDictionary only supports string keys for JSON compatibility.
-    /// For non-string keys, use the converter overloads.
+    /// For non-string keys, use the converter overloads -- from editor or plain C# code. They take
+    /// delegates, which Udon cannot represent, so an UdonSharpBehaviour that needs non-string keys in
+    /// JSON converts them itself while copying entries into a DataDictionary.
+    ///
+    /// Capacity is a slot count, not an entry count: the table rebuilds itself once it is 75% full,
+    /// so reserving room for n entries without a rebuild takes a capacity above n / 0.75.
     /// </remarks>
     public class CEDictionary<TKey, TValue> : IEnumerable
     {
@@ -121,10 +126,26 @@ namespace UdonSharp.CE.Data
                 return;
             }
 
-            // Rehash if too full (including tombstones)
-            if (_size + _tombstoneCount >= (int)(_capacity * LoadFactor))
+            // Make room before probing. Tombstones count against the load factor because they lengthen
+            // probe chains exactly as live entries do, but only live entries justify a bigger table:
+            // growing on tombstones is how a dictionary that only ever held a handful of entries ended up
+            // hundreds of thousands of slots wide. Remove already sweeps tombstones out once they pass a
+            // quarter of the table, so as things stand this only fires on a table at least half live,
+            // and grows it. The in-place branch keeps that decision about live entries here rather than
+            // leaving it to whatever threshold Remove happens to sweep at.
+            int threshold = (int)(_capacity * LoadFactor);
+            if (_size + _tombstoneCount >= threshold)
             {
-                Resize();
+                // Half the threshold, not the threshold itself: a rebuild in place has to buy a run of
+                // cheap inserts, or a table sitting just under the threshold would rebuild on every Add.
+                if (_size >= threshold / 2)
+                {
+                    Rehash(_capacity * 2 + 1);
+                }
+                else
+                {
+                    Rehash(_capacity);
+                }
             }
 
             // Find empty or tombstone slot
@@ -179,10 +200,14 @@ namespace UdonSharp.CE.Data
             _size--;
             _tombstoneCount++;
 
-            // Rehash only when tombstones exceed threshold (25% of capacity)
+            // Sweep tombstones once they exceed 25% of capacity. Same capacity: a removal never needs
+            // more room, and growing here made capacity track the number of removals ever performed
+            // rather than the number of entries held -- keys that never repeat (player ids, handles)
+            // doubled the table every capacity/4 removals, and GetKeys, ContainsValue, Clear and
+            // enumeration all walk every slot.
             if (_tombstoneCount > _capacity / 4)
             {
-                Resize();
+                Rehash(_capacity);
             }
             
             return true;
@@ -421,7 +446,8 @@ namespace UdonSharp.CE.Data
 
         /// <summary>
         /// Deserializes a JSON string to a CEDictionary.
-        /// Note: JSON numbers become doubles, use converter for precise types.
+        /// JSON numbers arrive as doubles and are converted to TValue: truncated toward zero and clamped
+        /// to its range for the integer types. JSON object keys are always strings, so TKey must be string.
         /// </summary>
         public static CEDictionary<TKey, TValue> FromJson(string json)
         {
@@ -522,29 +548,56 @@ namespace UdonSharp.CE.Data
             return -1;
         }
 
-        private void Resize()
+        /// <summary>
+        /// Rebuilds the table at <paramref name="newCapacity"/> slots, dropping every tombstone.
+        /// The caller guarantees <paramref name="newCapacity"/> is larger than the live entry count.
+        /// </summary>
+        /// <remarks>
+        /// Entries are re-probed inline. This must never go back through <see cref="Add"/>: it is reached
+        /// from inside Add, and U# gives a method one static set of parameter slots rather than a stack
+        /// frame. Re-inserting through Add overwrote the outer call's <c>key</c> and <c>value</c> with the
+        /// last pair rehashed, so the entry that triggered the growth was silently dropped and an entry
+        /// already in the table was stored a second time. Plain C# has real frames and never shows it,
+        /// which is why only a test that runs in the Udon VM can cover this.
+        /// </remarks>
+        private void Rehash(int newCapacity)
         {
-            int newCapacity = _capacity * 2 + 1;
             TKey[] oldKeys = _keys;
             TValue[] oldValues = _values;
             byte[] oldSlotState = _slotState;
             int oldCapacity = _capacity;
 
-            _capacity = newCapacity;
-            _keys = new TKey[newCapacity];
-            _values = new TValue[newCapacity];
-            _slotState = new byte[newCapacity];
-            _size = 0;
-            _tombstoneCount = 0;  // Clear tombstones during resize
+            TKey[] newKeys = new TKey[newCapacity];
+            TValue[] newValues = new TValue[newCapacity];
+            byte[] newSlotState = new byte[newCapacity];
 
             for (int i = 0; i < oldCapacity; i++)
             {
                 // Only copy occupied slots, skip tombstones
                 if (oldSlotState[i] == SlotOccupied)
                 {
-                    Add(oldKeys[i], oldValues[i]);
+                    TKey oldKey = oldKeys[i];
+                    int idx = (oldKey.GetHashCode() & 0x7FFFFFFF) % newCapacity;
+
+                    // Keys in the old table are already unique and the new table holds no tombstones,
+                    // so the first empty slot on the probe chain is the right one.
+                    while (newSlotState[idx] != SlotEmpty)
+                    {
+                        idx++;
+                        if (idx == newCapacity) idx = 0;
+                    }
+
+                    newKeys[idx] = oldKey;
+                    newValues[idx] = oldValues[i];
+                    newSlotState[idx] = SlotOccupied;
                 }
             }
+
+            _keys = newKeys;
+            _values = newValues;
+            _slotState = newSlotState;
+            _capacity = newCapacity;
+            _tombstoneCount = 0;  // _size is unchanged: every live entry was carried across
         }
 
         #endregion

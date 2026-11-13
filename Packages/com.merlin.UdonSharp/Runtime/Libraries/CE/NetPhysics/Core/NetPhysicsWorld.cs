@@ -77,18 +77,44 @@ namespace UdonSharp.CE.NetPhysics
         private const int StateSendMaxBackoffDoublings = 5;
         private const float StateSendMaxBackoffSeconds = 2f;
 
-        private int _stateChunkCursor;
         private StateCompressor _stateCompressor;
         private PhysicsSnapshot _receivedSnapshot;
         private PhysicsSnapshot _broadcastSnapshot;
         private RollbackManager _rollbackManager;
 
+        // The box state packets quantize positions into, measured from this object's own position. It
+        // used to be fixed in world space around the origin, and anything outside it is clamped onto
+        // its surface: the shipped arena sits 121 m down the z axis, so most of it arrived pinned to the
+        // z = -100 face on every client but the authority. Every client derives the same box because
+        // every client has this object in the same place.
+        //
+        // The defaults reach 100 m either side of this object and from 10 m below it to 150 m above. The
+        // height is what a car can climb: the jump and double jump followed by a full two-second tank
+        // pointed straight up -- 5000 N on 180 kg against gravity -- peaks about 50 m up with the shipped
+        // car's drag and about 130 m up with none, and the shipped arena has no ceiling. A 50 m box
+        // clamped that climb onto its lid on every client but the authority. Each axis is quantized to
+        // 65,536 steps across the box, so the defaults still place a position within about 1.5 mm per
+        // axis, 2.5 mm overall.
+        [Tooltip("Low corner of the box state packets encode positions in, relative to this object. A position outside the box is clamped onto it.")]
+        public Vector3 StateBoundsMin = new Vector3(-100f, -10f, -100f);
+        [Tooltip("High corner of the box state packets encode positions in, relative to this object. A position outside the box is clamped onto it.")]
+        public Vector3 StateBoundsMax = new Vector3(100f, 150f, 100f);
+
+        // Per-entity send scheduling for BroadcastState, parallel to _entities. See
+        // SyncPrioritizer.SelectForPacket.
+        private float[] _sendPriorities;
+        private float[] _sendDebt;
+        private int[] _sendSelection;
         private NetPhysicsEntity[] _entities;
         private int _entityCount;
 
+        // Set when an entity registers or leaves; the automatic ids are worked out again before they are
+        // next used. See EnsureEntityIds.
+        private bool _entityIdsDirty;
+
         private void Start()
         {
-            _entities = new NetPhysicsEntity[Mathf.Max(1, MaxEntities)];
+            EnsureEntityCapacity(Mathf.Max(1, MaxEntities));
             _clock = new PhysicsClock(TickRate);
             _history = new FrameHistory(Mathf.Max(1, HistorySize), _entities.Length);
             _tempSnapshot = new PhysicsSnapshot(_entities.Length);
@@ -96,6 +122,8 @@ namespace UdonSharp.CE.NetPhysics
             _inputPredictor = new InputPredictor();
 
             _stateCompressor = new StateCompressor();
+            _stateCompressor.WorldMin = transform.position + StateBoundsMin;
+            _stateCompressor.WorldMax = transform.position + StateBoundsMax;
             _receivedSnapshot = new PhysicsSnapshot(_entities.Length);
             _broadcastSnapshot = new PhysicsSnapshot(_entities.Length);
             _rollbackManager = new RollbackManager();
@@ -104,13 +132,20 @@ namespace UdonSharp.CE.NetPhysics
 
             _currentFrame = GetServerFrame();
 
+            // Entities that registered before this ran have ids from here on. Any that register later
+            // are folded in, and everything renumbered to match, before ids are next used.
+            EnsureEntityIds();
+
             ClaimAuthorityIfMaster();
         }
 
         private void FixedUpdate()
         {
             if (AutoSimulate)
+            {
                 Simulate();
+                ApplyVehicleForces();
+            }
 
             if (!IsAuthority || StateSendRate <= 0f)
                 return;
@@ -183,16 +218,38 @@ namespace UdonSharp.CE.NetPhysics
             if (player == null || !player.IsValid())
                 return;
 
-            // A new owner starts its own send cadence and its own round-robin position; inheriting the
-            // previous owner's timer would either stall the first broadcast or burst several at once.
+            // A new owner starts its own send cadence; inheriting the previous owner's timer would
+            // either stall the first broadcast or burst several at once.
             _lastStateSendTime = Time.time;
-            _stateChunkCursor = 0;
             _stateSendFailures = 0;
 
             // The client that just handed the world over has to start accepting packets again even
             // though the sequence counter continues from the value it wrote itself.
             if (!player.isLocal)
+            {
                 _lastProcessedStateSequence = _stateSequence;
+                return;
+            }
+
+            // This client's bodies are now the state everybody else is corrected toward. Whatever
+            // correction they were still easing in describes the previous owner's simulation, and
+            // the next broadcast would otherwise ship it: an entity records the pose it is being
+            // corrected toward, not the one its Rigidbody is at.
+            for (int i = 0; i < _entityCount; i++)
+            {
+                if (_entities[i] != null)
+                    _entities[i].ClearCorrection();
+            }
+        }
+
+        public override void OnPlayerLeft(VRCPlayerApi player)
+        {
+            // The input tables keep a departed player's slot until told otherwise, and a full table
+            // turns new drivers away rather than evict anybody. See InputBuffer.
+            if (player == null) return;
+            int playerId = player.playerId;
+            if (_inputBuffer != null) _inputBuffer.RemovePlayer(playerId);
+            if (_inputPredictor != null) _inputPredictor.RemovePlayer(playerId);
         }
 
         public override void OnPostSerialization(SerializationResult result)
@@ -226,41 +283,39 @@ namespace UdonSharp.CE.NetPhysics
             return milliseconds / 1000 * tickRate + milliseconds % 1000 * tickRate / 1000;
         }
 
+        /// <summary>
+        /// Adds an entity to the simulation. An entity whose id is not pinned is numbered the next time
+        /// ids are needed; see NetPhysicsEntity's _entityId for the rule.
+        /// </summary>
         public void RegisterEntity(NetPhysicsEntity entity)
         {
             if (entity == null)
                 return;
 
-            // Assign an ID if needed.
-            if (entity.EntityId < 0)
-            {
-                int assigned = FindNextFreeEntityId();
-                entity.SetEntityIdInternal(assigned);
-            }
+            bool pinned = entity.HasExplicitEntityId;
 
-            // Prevent duplicates.
             for (int i = 0; i < _entityCount; i++)
             {
-                if (_entities[i] == null)
+                NetPhysicsEntity registered = _entities[i];
+                if (registered == null)
                     continue;
-                if (_entities[i] == entity || _entities[i].EntityId == entity.EntityId)
+                if (registered == entity)
+                    return;
+
+                // Two entities pinned to one id cannot both be addressed; the second is left out.
+                if (pinned && registered.HasExplicitEntityId && registered.EntityId == entity.EntityId)
                     return;
             }
 
             EnsureEntityCapacity(_entityCount + 1);
 
-            // Insert sorted by EntityId for stable snapshot ordering.
-            int insertIndex = _entityCount;
-            while (insertIndex > 0 && _entities[insertIndex - 1] != null && _entities[insertIndex - 1].EntityId > entity.EntityId)
-            {
-                _entities[insertIndex] = _entities[insertIndex - 1];
-                insertIndex--;
-            }
-
-            _entities[insertIndex] = entity;
+            _entities[_entityCount] = entity;
+            _sendDebt[_entityCount] = 0f;
             _entityCount++;
 
-            // CELogger.Debug("NetPhysics", $"Registered entity {entity.name} (id={entity.EntityId})");
+            // Numbered as a batch rather than here: everything that registers in the same frame -- at
+            // load, every entity in the scene -- then costs one pass, not one pass each.
+            _entityIdsDirty = true;
         }
 
         public void UnregisterEntity(NetPhysicsEntity entity)
@@ -276,13 +331,175 @@ namespace UdonSharp.CE.NetPhysics
                 for (int j = i; j < _entityCount - 1; j++)
                 {
                     _entities[j] = _entities[j + 1];
+                    _sendDebt[j] = _sendDebt[j + 1];
                 }
 
                 _entities[_entityCount - 1] = null;
+                _sendDebt[_entityCount - 1] = 0f;
                 _entityCount--;
 
-                // CELogger.Debug("NetPhysics", $"Unregistered entity {entity.name} (id={entity.EntityId})");
+                // The automatic ids are a function of who is registered, so they are worked out again
+                // without this entity: a client that joins after it left never saw it at all.
+                _entityIdsDirty = true;
                 return;
+            }
+        }
+
+        /// <summary>
+        /// Numbers every entity whose id is not pinned, if anything has registered or left since the
+        /// last time. See NetPhysicsEntity's _entityId for the rule.
+        /// </summary>
+        private void EnsureEntityIds()
+        {
+            if (!_entityIdsDirty)
+                return;
+
+            _entityIdsDirty = false;
+
+            int count = _entityCount;
+            var automatic = new NetPhysicsEntity[count];
+            var pinnedIds = new int[count];
+            int automaticCount = 0;
+            int pinnedCount = 0;
+
+            for (int i = 0; i < count; i++)
+            {
+                NetPhysicsEntity entity = _entities[i];
+                if (entity == null)
+                    continue;
+
+                if (entity.HasExplicitEntityId)
+                {
+                    pinnedIds[pinnedCount] = entity.EntityId;
+                    pinnedCount++;
+                    continue;
+                }
+
+                // Kept in hierarchy order as they are collected.
+                Transform place = entity.transform;
+                int insert = automaticCount;
+                while (insert > 0 && CompareHierarchyOrder(automatic[insert - 1].transform, place) > 0)
+                {
+                    automatic[insert] = automatic[insert - 1];
+                    insert--;
+                }
+
+                automatic[insert] = entity;
+                automaticCount++;
+            }
+
+            bool renumbered = false;
+            int next = 0;
+            for (int k = 0; k < automaticCount; k++)
+            {
+                while (ContainsId(pinnedIds, pinnedCount, next))
+                    next++;
+
+                NetPhysicsEntity entity = automatic[k];
+                if (entity.EntityId != next)
+                {
+                    entity.SetEntityIdInternal(next);
+                    renumbered = true;
+                }
+
+                next++;
+            }
+
+            SortEntitiesById();
+
+            // Recorded frames name entities by id, so once an id has moved they describe the wrong
+            // bodies. Any packet in flight is measured against an empty history instead.
+            if (renumbered && _history != null)
+                _history.Clear();
+        }
+
+        /// <summary>
+        /// Negative when <paramref name="a"/> comes first in the scene hierarchy -- by sibling index from
+        /// the scene root down, an ancestor before its descendants -- positive when <paramref name="b"/>
+        /// does, zero for the same transform.
+        /// </summary>
+        private static int CompareHierarchyOrder(Transform a, Transform b)
+        {
+            if (a == b)
+                return 0;
+
+            int depthA = GetHierarchyDepth(a);
+            int depthB = GetHierarchyDepth(b);
+
+            // Lift the deeper one to the other's depth; landing on the other means it is an ancestor.
+            Transform x = a;
+            Transform y = b;
+            for (int i = depthA; i > depthB; i--)
+                x = x.parent;
+            for (int i = depthB; i > depthA; i--)
+                y = y.parent;
+
+            if (x == y)
+                return depthA < depthB ? -1 : 1;
+
+            // Climb together until the two are siblings; their sibling indices decide. Two scene roots
+            // count as siblings, ordered by their index among the scene's root objects.
+            while (x.parent != y.parent)
+            {
+                x = x.parent;
+                y = y.parent;
+            }
+
+            return x.GetSiblingIndex() < y.GetSiblingIndex() ? -1 : 1;
+        }
+
+        private static int GetHierarchyDepth(Transform transformInScene)
+        {
+            int depth = 0;
+            Transform current = transformInScene;
+            while (current != null)
+            {
+                depth++;
+                current = current.parent;
+            }
+
+            return depth;
+        }
+
+        private static bool ContainsId(int[] ids, int count, int id)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                if (ids[i] == id)
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Puts the registry back in id order, which snapshots follow.
+        /// </summary>
+        private void SortEntitiesById()
+        {
+            int count = _entityCount;
+            var ids = new int[count];
+            for (int i = 0; i < count; i++)
+                ids[i] = _entities[i] != null ? _entities[i].EntityId : int.MaxValue;
+
+            for (int i = 1; i < count; i++)
+            {
+                NetPhysicsEntity entity = _entities[i];
+                float debt = _sendDebt[i];
+                int id = ids[i];
+
+                int j = i;
+                while (j > 0 && ids[j - 1] > id)
+                {
+                    _entities[j] = _entities[j - 1];
+                    _sendDebt[j] = _sendDebt[j - 1];
+                    ids[j] = ids[j - 1];
+                    j--;
+                }
+
+                _entities[j] = entity;
+                _sendDebt[j] = debt;
+                ids[j] = id;
             }
         }
 
@@ -316,6 +533,8 @@ namespace UdonSharp.CE.NetPhysics
 
         public NetPhysicsEntity GetEntity(int entityId)
         {
+            EnsureEntityIds();
+
             for (int i = 0; i < _entityCount; i++)
             {
                 if (_entities[i] != null && _entities[i].EntityId == entityId)
@@ -326,7 +545,8 @@ namespace UdonSharp.CE.NetPhysics
         }
 
         /// <summary>
-        /// Main simulation entry point. Intended to be called from FixedUpdate.
+        /// Runs simulation ticks. Manual FixedUpdate callers must call ApplyVehicleForces afterwards,
+        /// once per physics step, including steps with no simulation tick.
         /// </summary>
         public void Simulate()
         {
@@ -368,11 +588,15 @@ namespace UdonSharp.CE.NetPhysics
         }
 
         /// <summary>
-        /// Simulates a single tick. Used for rollback resimulation.
+        /// Simulates one logical tick at the current frame and records it in history. Per-tick vehicle
+        /// logic only: the continuous forces belong to the physics step, see <see cref="ApplyVehicleForces"/>.
         /// </summary>
         /// <param name="input">Input for the locally driven vehicle on this frame.</param>
         public void SimulateSingleTick(InputFrame input)
         {
+            // The recorded frame names entities by id.
+            EnsureEntityIds();
+
             int frame = _currentFrame;
             if (input == null)
                 input = InputFrame.Empty;
@@ -413,7 +637,7 @@ namespace UdonSharp.CE.NetPhysics
                     vehicleInput = _inputPredictor.Predict(ownerId, frame, Time.time);
                 }
 
-                vehicle.ApplyInput(vehicleInput);
+                vehicle.TickInput(vehicleInput);
             }
 
             // Note: entity-specific simulation is game-defined and implemented by derived entities.
@@ -506,7 +730,13 @@ namespace UdonSharp.CE.NetPhysics
             // Only non-authority clients reconcile; the owner is authoritative.
             if (!IsAuthority && _rollbackManager != null)
             {
-                _rollbackManager.ProcessServerState(_receivedSnapshot.Frame, _receivedSnapshot);
+                // The packet names entities by id.
+                EnsureEntityIds();
+
+                VRCPlayerApi local = Networking.LocalPlayer;
+                int localPlayerId = local != null && local.IsValid() ? local.playerId : -1;
+
+                _rollbackManager.Reconcile(_receivedSnapshot.Frame, _receivedSnapshot, _entities, _entityCount, _currentFrame, TickRate, localPlayerId);
             }
         }
 
@@ -540,6 +770,9 @@ namespace UdonSharp.CE.NetPhysics
             if (!IsAuthority || _stateCompressor == null || _broadcastSnapshot == null)
                 return;
 
+            // The packet names entities by id.
+            EnsureEntityIds();
+
             int maxEntities = GetStatePacketEntityCap();
 
             _broadcastSnapshot.Frame = _currentFrame - 1;
@@ -551,45 +784,21 @@ namespace UdonSharp.CE.NetPhysics
             VRCPlayerApi local = Networking.LocalPlayer;
             int writeIndex = 0;
 
-            // Fill the packet in descending sync priority so that, when the arena holds more bodies
-            // than one packet can carry, the ball and the cars people are actually near go out first.
-            // The round-robin cursor is kept as the scan origin so equal-priority entities rotate
-            // through packets instead of the low-index ones winning every time.
-            if (_entityCount > 0)
+            for (int i = 0; i < _entityCount; i++)
+                _sendPriorities[i] = _entities[i] != null ? _prioritizer.CalculatePriority(_entities[i], local) : -1f;
+
+            writeIndex = _prioritizer.SelectForPacket(_sendPriorities, _sendDebt, _entityCount, maxEntities, _sendSelection);
+            for (int n = 0; n < writeIndex; n++)
             {
-                int origin = _stateChunkCursor % _entityCount;
-
-                while (writeIndex < maxEntities)
+                NetPhysicsEntity entity = _entities[_sendSelection[n]];
+                entity.SaveState(_broadcastSnapshot, n);
+                EntityType type = entity.EntityType;
+                if (type == EntityType.LocalVehicle || type == EntityType.OtherVehicle)
                 {
-                    int bestIndex = -1;
-                    float bestPriority = 0f;
-
-                    for (int scan = 0; scan < _entityCount; scan++)
-                    {
-                        int i = (origin + scan) % _entityCount;
-
-                        var candidate = _entities[i];
-                        if (candidate == null)
-                            continue;
-                        if (IsAlreadyInPacket(candidate.EntityId, writeIndex))
-                            continue;
-
-                        float priority = _prioritizer != null ? _prioritizer.CalculatePriority(candidate, local) : 1f;
-                        if (bestIndex >= 0 && priority <= bestPriority)
-                            continue;
-
-                        bestPriority = priority;
-                        bestIndex = i;
-                    }
-
-                    if (bestIndex < 0)
-                        break;
-
-                    _entities[bestIndex].SaveState(_broadcastSnapshot, writeIndex);
-                    writeIndex++;
+                    int driver = ((NetVehicle)entity).OwnerPlayerId;
+                    if (driver >= 0 && (local == null || driver != local.playerId))
+                        _broadcastSnapshot.InputLagFrames[n] = _inputBuffer != null ? _inputBuffer.GetInputLag(driver) : PhysicsSnapshot.UnknownInputLag;
                 }
-
-                _stateChunkCursor = (origin + 1) % _entityCount;
             }
 
             _broadcastSnapshot.EntityCount = writeIndex;
@@ -608,23 +817,29 @@ namespace UdonSharp.CE.NetPhysics
             RequestSerialization();
         }
 
-        private bool IsAlreadyInPacket(int entityId, int writeCount)
+        /// <summary>
+        /// Applies every vehicle's continuous forces for one physics step, from the input of its most
+        /// recent tick. Called once per FixedUpdate after <see cref="Simulate"/>, whether or not that
+        /// FixedUpdate ran a tick. See <see cref="NetVehicle.TickInput"/> for why the two are split.
+        /// </summary>
+        public void ApplyVehicleForces()
         {
-            for (int i = 0; i < writeCount; i++)
+            for (int i = 0; i < _entityCount; i++)
             {
-                if (_broadcastSnapshot.EntityIds[i] == entityId)
-                    return true;
+                NetPhysicsEntity entity = _entities[i];
+                if (entity == null) continue;
+                EntityType type = entity.EntityType;
+                if (type == EntityType.LocalVehicle || type == EntityType.OtherVehicle)
+                    ((NetVehicle)entity).ApplyForces();
             }
-
-            return false;
         }
 
         public FrameHistory GetHistory() => _history;
 
         /// <summary>
-        /// Moves the frame cursor for rollback resimulation only. The cursor is otherwise owned by the
-        /// server clock in <see cref="Simulate"/>: rewriting it to chase an incoming packet is exactly
-        /// what used to make this world drift out of the history window and snap on every packet.
+        /// Moves the frame cursor. Nothing in this library calls it: the cursor is owned by the server
+        /// clock in <see cref="Simulate"/>, and rewriting it to chase an incoming packet is exactly what
+        /// used to make this world drift out of the history window and snap on every packet.
         /// </summary>
         internal void SetCurrentFrameInternal(int frame)
         {
@@ -652,23 +867,20 @@ namespace UdonSharp.CE.NetPhysics
 
         private void EnsureEntityCapacity(int required)
         {
-            if (_entities != null && _entities.Length >= required)
+            if (_entities != null && _entities.Length >= required && _sendDebt != null)
                 return;
 
             int newSize = Mathf.Max(required, _entities == null ? 1 : _entities.Length * 2);
             var newArray = new NetPhysicsEntity[newSize];
+            var debt = new float[newSize];
             if (_entities != null && _entityCount > 0)
                 System.Array.Copy(_entities, newArray, _entityCount);
-
+            if (_sendDebt != null)
+                System.Array.Copy(_sendDebt, debt, Mathf.Min(_sendDebt.Length, newSize));
             _entities = newArray;
-        }
-
-        private int FindNextFreeEntityId()
-        {
-            int id = 0;
-            while (GetEntity(id) != null)
-                id++;
-            return id;
+            _sendDebt = debt;
+            _sendPriorities = new float[newSize];
+            _sendSelection = new int[newSize];
         }
     }
 }

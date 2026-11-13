@@ -11,13 +11,17 @@ namespace UdonSharp.CE.Net
     /// Calling an [Rpc] method normally is the common path: the compiler turns the call into a
     /// SendCustomNetworkEvent with the declared target. That rewrite is refused for a call made from
     /// inside another [Rpc] method (CE0045), because every receiving client would re-broadcast and
-    /// multiply the traffic by the player count on each hop. Sometimes that fan-out is exactly what the
-    /// author wants -- an owner-only command that relays to everyone, for instance. This class is the
-    /// supported way to say so, at the call site, where a reader can see the send.
+    /// multiply the traffic by the player count on each hop. Sometimes a second hop is exactly what the
+    /// author wants -- a request any player may send to the owner, which the owner then relays to
+    /// everyone, for instance. This class is the supported way to say so, at the call site, where a
+    /// reader can see the send.
     /// </summary>
     /// <example>
     /// <code>
-    /// [Rpc(Target = RpcTarget.Owner, OwnerOnly = true)]
+    /// // Any player may ask. Target = Owner means the body runs on the owner alone, so the relay below
+    /// // is sent once. No OwnerOnly here: it would make the owner drop every request it did not send
+    /// // itself, which is every request this method exists to receive.
+    /// [Rpc(Target = RpcTarget.Owner)]
     /// public void RequestStart()
     /// {
     ///     // A plain StartGame() call here would be CE0045: the rewrite would make every receiver
@@ -25,7 +29,8 @@ namespace UdonSharp.CE.Net
     ///     CENet.Rpc(this, RpcTarget.All, nameof(StartGame));
     /// }
     ///
-    /// [Rpc]
+    /// // OwnerOnly belongs on this half: every client checks that the relay really came from the owner.
+    /// [Rpc(OwnerOnly = true)]
     /// public void StartGame() { gameStarted = true; }
     /// </code>
     /// </example>

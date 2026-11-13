@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using UdonSharp;
 using UdonSharp.CE.Editor.DevTools.Analysis;
+using UdonSharpEditor;
 using UnityEditor;
 using UnityEngine;
 using VRC.Udon;
@@ -11,8 +12,17 @@ using VRC.Udon;
 namespace UdonSharp.CE.Editor.DevTools.NetworkSim
 {
     /// <summary>
-    /// Simulates late-join scenarios for testing sync behaviour.
-    /// Captures scene state, clears synced variables, and tests reconstruction.
+    /// Replays an owner's synced state into running behaviours the way VRChat hands it to a joining
+    /// client, and reports what each behaviour made of it.
+    ///
+    /// A late joiner is given the owner's last serialized value for every synced variable and then
+    /// receives OnDeserialization. That is the whole of what this does: it writes the captured values
+    /// into the backing UdonBehaviour and raises the event there. It runs in play mode only and never
+    /// touches the C# proxies -- they hold the scene's authored values, so writing to them edits the
+    /// scene rather than the running world.
+    ///
+    /// What it cannot model is the rest of a joiner's situation: a real joiner starts with fresh
+    /// non-synced state, whereas the behaviours here keep whatever local state they have built up.
     /// </summary>
     public class LateJoinSimulator
     {
@@ -40,6 +50,11 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
         #region State
 
         /// <summary>
+        /// The Udon event VRChat raises on a behaviour once its synced variables have been written.
+        /// </summary>
+        private const string DeserializationEvent = "_onDeserialization";
+
+        /// <summary>
         /// Captured state snapshots.
         /// </summary>
         public List<BehaviourSnapshot> CapturedSnapshots { get; private set; } = new List<BehaviourSnapshot>();
@@ -54,16 +69,48 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
         /// </summary>
         public bool IsSimulating { get; private set; }
 
+        /// <summary>
+        /// How many captured behaviours still exist.
+        ///
+        /// A capture can outlive the play session it was taken in when domain reload is switched off;
+        /// every object it refers to is destroyed by then, and such snapshots must not count as state
+        /// that can be replayed.
+        /// </summary>
+        public int LiveSnapshotCount
+        {
+            get
+            {
+                int count = 0;
+
+                foreach (var snapshot in CapturedSnapshots)
+                {
+                    if (IsLive(snapshot))
+                        count++;
+                }
+
+                return count;
+            }
+        }
+
         #endregion
 
         #region Public Methods
 
         /// <summary>
-        /// Captures the current state of all synced variables in the scene.
+        /// Captures the current value of every synced variable from the running UdonBehaviours.
         /// </summary>
         public void CaptureCurrentState()
         {
             CapturedSnapshots.Clear();
+
+            // The live values are in the Udon heap, which only exists while the world is running. The C#
+            // proxies this used to read hold the authored scene values in edit mode and a stale copy in
+            // play mode, so a capture taken from them was never the state an owner would serialize.
+            if (!EditorApplication.isPlaying)
+            {
+                Debug.LogWarning("[LateJoinSimulator] Enter play mode before capturing: synced state lives in the running UdonBehaviours.");
+                return;
+            }
 
             var behaviours = UnityEngine.Object.FindObjectsOfType<UdonSharpBehaviour>();
 
@@ -80,11 +127,21 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
         }
 
         /// <summary>
-        /// Simulates a late-join by clearing all synced variables and triggering reconstruction.
+        /// Simulates a late join: every captured behaviour receives the captured values and then
+        /// OnDeserialization, as it would from the owner.
         /// </summary>
         public LateJoinSimulationResult SimulateLateJoin(float delaySeconds = 0f)
         {
-            if (CapturedSnapshots.Count == 0)
+            // Never outside play mode. This used to write default(T) into every synced field of the
+            // scene's proxies, with no Undo and nothing to put them back: run in edit mode it zeroed the
+            // authored values, and the next scene save made that permanent.
+            if (!EditorApplication.isPlaying)
+            {
+                Debug.LogWarning("[LateJoinSimulator] Late-join simulation only runs in play mode.");
+                return null;
+            }
+
+            if (LiveSnapshotCount == 0)
             {
                 Debug.LogWarning("[LateJoinSimulator] No state captured. Call CaptureCurrentState first.");
                 return null;
@@ -95,12 +152,9 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
             var result = new LateJoinSimulationResult
             {
                 StartTime = DateTime.Now,
-                TotalBehaviours = CapturedSnapshots.Count,
-                TotalSyncedFields = CapturedSnapshots.Sum(s => s.SyncedFields.Count)
+                TotalBehaviours = LiveSnapshotCount,
+                TotalSyncedFields = CapturedSnapshots.Where(IsLive).Sum(s => s.SyncedFields.Count)
             };
-
-            // Clear synced variables
-            ClearSyncedVariables();
 
             // Wait for delay (simulating network latency)
             if (delaySeconds > 0)
@@ -110,11 +164,22 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
                 // For editor, we'll note the delay but proceed immediately
             }
 
-            // Trigger late-join reconstruction
-            TriggerLateJoinReconstruction();
+            try
+            {
+                // Deliver the owner's state and raise the event
+                DeliverCapturedState();
 
-            // Verify reconstruction
-            result.ReconstructionResults = VerifyReconstruction();
+                // Verify reconstruction
+                result.ReconstructionResults = VerifyReconstruction();
+                result.HaltedBehaviours = CapturedSnapshots.Count(s => IsLive(s) && s.Backing.HasError);
+            }
+            finally
+            {
+                // Whatever a handler did with them -- or however this method is left -- the synced
+                // variables end as the captured values and never as something a failed run left behind.
+                WriteCapturedState();
+                IsSimulating = false;
+            }
 
             result.EndTime = DateTime.Now;
             result.SuccessRate = result.ReconstructionResults.Count > 0
@@ -122,7 +187,6 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
                 : 0f;
 
             LastResult = result;
-            IsSimulating = false;
 
             Debug.Log($"[LateJoinSimulator] Simulation complete. Success rate: {result.SuccessRate * 100:F1}%");
 
@@ -130,36 +194,23 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
         }
 
         /// <summary>
-        /// Restores the captured state to all behaviours.
+        /// Writes the captured values back into the running behaviours.
         /// </summary>
         public void RestoreCapturedState()
         {
-            if (CapturedSnapshots.Count == 0)
+            if (!EditorApplication.isPlaying)
+            {
+                Debug.LogWarning("[LateJoinSimulator] Captured state can only be restored in play mode.");
+                return;
+            }
+
+            if (LiveSnapshotCount == 0)
             {
                 Debug.LogWarning("[LateJoinSimulator] No state captured to restore.");
                 return;
             }
 
-            int restoredCount = 0;
-
-            foreach (var snapshot in CapturedSnapshots)
-            {
-                if (snapshot.Behaviour == null)
-                    continue;
-
-                foreach (var field in snapshot.SyncedFields)
-                {
-                    try
-                    {
-                        SetFieldValue(snapshot.Behaviour, field.FieldName, field.CapturedValue);
-                        restoredCount++;
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.LogWarning($"[LateJoinSimulator] Failed to restore {field.FieldName}: {ex.Message}");
-                    }
-                }
-            }
+            int restoredCount = WriteCapturedState();
 
             Debug.Log($"[LateJoinSimulator] Restored {restoredCount} field values");
         }
@@ -176,54 +227,48 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
             foreach (var behaviour in behaviours)
             {
                 var behaviourType = behaviour.GetType();
-                var fields = behaviourType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
 
                 // A None / NoVariableSync behaviour transmits no variables at all, so its [UdonSynced]
-                // fields belong in their own bucket rather than in the [SyncOnJoin] coverage ratio -- they
-                // are not fields that "still need" late-join handling, they are fields that never replicate.
+                // fields belong in their own bucket -- they are not fields a late joiner receives, they
+                // are fields that never replicate.
                 bool syncsVariables =
-                    BehaviourAnalyzer.ModeSyncsVariables(BehaviourAnalyzer.ResolveSyncMode(behaviourType));
+                    BehaviourAnalyzer.ModeSyncsVariables(BehaviourAnalyzer.ResolveSyncMode(behaviour));
 
                 if (!syncsVariables)
                     analysis.BehavioursWithoutVariableSync++;
 
-                foreach (var field in fields)
+                foreach (var field in GetInstanceFields(behaviourType))
                 {
+                    // Counted on its own, not as a share of the [UdonSynced] fields. [SyncOnJoin] goes
+                    // on a plain field and CE generates the synced payload that carries it; looking for
+                    // it only on fields that were already [UdonSynced] reported no coverage for exactly
+                    // the fields that use it, and then advised adding it to fields VRChat already
+                    // delivers to late joiners.
+                    if (HasAttributeNamed(field, "SyncOnJoinAttribute"))
+                        analysis.SyncOnJoinFields++;
+
                     // Check for UdonSynced attribute
-                    var syncAttr = field.GetCustomAttribute<UdonSyncedAttribute>();
-                    if (syncAttr != null)
+                    if (field.GetCustomAttribute<UdonSyncedAttribute>() == null)
+                        continue;
+
+                    if (!syncsVariables)
                     {
-                        if (!syncsVariables)
-                        {
-                            analysis.NonReplicatingSyncedFields++;
-                            continue;
-                        }
-
-                        analysis.TotalSyncedFields++;
-
-                        // Check for SyncOnJoin (CE attribute)
-                        var syncOnJoinAttr = field.GetCustomAttributes()
-                            .FirstOrDefault(a => a.GetType().Name == "SyncOnJoinAttribute");
-
-                        if (syncOnJoinAttr != null)
-                        {
-                            analysis.SyncOnJoinFields++;
-                        }
+                        analysis.NonReplicatingSyncedFields++;
+                        continue;
                     }
+
+                    analysis.TotalSyncedFields++;
                 }
 
                 // Check for OnPlayerJoined handler
-                var onPlayerJoined = behaviourType.GetMethod("OnPlayerJoined",
-                    BindingFlags.Public | BindingFlags.Instance);
-                if (onPlayerJoined != null)
+                if (FindUserOverride(behaviourType, "OnPlayerJoined", 1) != null)
                 {
                     analysis.OnPlayerJoinedHandlers++;
                 }
 
-                // Check for OnDeserialization handler
-                var onDeserialization = behaviourType.GetMethod("OnDeserialization",
-                    BindingFlags.Public | BindingFlags.Instance);
-                if (onDeserialization != null)
+                // Check for OnDeserialization handler, in either of its two signatures
+                if (FindUserOverride(behaviourType, "OnDeserialization", 0) != null ||
+                    FindUserOverride(behaviourType, "OnDeserialization", 1) != null)
                 {
                     analysis.OnDeserializationHandlers++;
                 }
@@ -236,30 +281,95 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
 
         #endregion
 
+        #region Reflection Helpers
+
+        /// <summary>
+        /// Finds a behaviour's own implementation of a UdonSharpBehaviour event, or null if it has none.
+        ///
+        /// A lookup by name alone cannot answer this. UdonSharpBehaviour declares OnDeserialization twice
+        /// (with and without a DeserializationResult), so Type.GetMethod("OnDeserialization") throws
+        /// AmbiguousMatchException for every behaviour there is; and for an event declared once, such as
+        /// OnPlayerJoined, the same lookup returns the empty base virtual, which reports a handler on
+        /// behaviours that have none. Walking only the user's own types, by name and parameter count,
+        /// avoids both.
+        /// </summary>
+        internal static MethodInfo FindUserOverride(Type behaviourType, string methodName, int parameterCount)
+        {
+            const BindingFlags declaredInstance =
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+
+            for (Type type = behaviourType; type != null && type != typeof(UdonSharpBehaviour); type = type.BaseType)
+            {
+                foreach (MethodInfo method in type.GetMethods(declaredInstance))
+                {
+                    if (method.Name == methodName && method.GetParameters().Length == parameterCount)
+                        return method;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Every instance field a behaviour carries, including private ones declared on its base classes.
+        ///
+        /// Type.GetFields on the derived type leaves those out, so a [UdonSynced] private field on a
+        /// shared base class was invisible here even though it is synced like any other.
+        /// </summary>
+        internal static List<FieldInfo> GetInstanceFields(Type behaviourType)
+        {
+            const BindingFlags declaredInstance =
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+
+            var fields = new List<FieldInfo>();
+
+            for (Type type = behaviourType; type != null && type != typeof(UdonSharpBehaviour); type = type.BaseType)
+            {
+                fields.AddRange(type.GetFields(declaredInstance));
+            }
+
+            return fields;
+        }
+
+        private static bool HasAttributeNamed(FieldInfo field, string attributeTypeName)
+        {
+            return field.GetCustomAttributes().Any(a => a.GetType().Name == attributeTypeName);
+        }
+
+        #endregion
+
         #region Internal Methods
+
+        private static bool IsLive(BehaviourSnapshot snapshot)
+        {
+            return snapshot != null && snapshot.Behaviour != null && snapshot.Backing != null;
+        }
 
         private BehaviourSnapshot CaptureBehaviourState(UdonSharpBehaviour behaviour)
         {
             if (behaviour == null)
                 return null;
 
+            UdonBehaviour backing = UdonSharpEditorUtility.GetBackingUdonBehaviour(behaviour);
+            if (backing == null)
+                return null;
+
             var snapshot = new BehaviourSnapshot
             {
                 Behaviour = behaviour,
+                Backing = backing,
                 BehaviourType = behaviour.GetType(),
                 GameObjectName = behaviour.gameObject.name,
-                BehaviourSyncMode = BehaviourAnalyzer.ResolveSyncMode(behaviour.GetType())
+                BehaviourSyncMode = BehaviourAnalyzer.ResolveSyncMode(behaviour)
             };
 
-            // Fields on a None / NoVariableSync behaviour never leave the local client, so clearing and
-            // "reconstructing" them measures nothing but local assignment and would report a success rate
-            // that has no bearing on what a real late joiner sees.
+            // Fields on a None / NoVariableSync behaviour never leave the local client, so replaying
+            // them measures nothing but local assignment and would report a success rate that has no
+            // bearing on what a real late joiner sees.
             if (!BehaviourAnalyzer.ModeSyncsVariables(snapshot.BehaviourSyncMode))
                 return null;
 
-            var fields = snapshot.BehaviourType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-
-            foreach (var field in fields)
+            foreach (var field in GetInstanceFields(snapshot.BehaviourType))
             {
                 var syncAttr = field.GetCustomAttribute<UdonSyncedAttribute>();
                 if (syncAttr == null)
@@ -267,7 +377,11 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
 
                 try
                 {
-                    var value = field.GetValue(behaviour);
+                    // Read from the heap, in the heap's own representation, and written back the same
+                    // way: nothing here has to know how U# stores an enum or a user type.
+                    if (!backing.TryGetProgramVariable(field.Name, out object value))
+                        continue;
+
                     snapshot.SyncedFields.Add(new FieldSnapshot
                     {
                         FieldName = field.Name,
@@ -285,48 +399,30 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
             return snapshot;
         }
 
-        private void ClearSyncedVariables()
+        /// <summary>
+        /// Hands every captured behaviour the owner's values and raises OnDeserialization on it.
+        /// </summary>
+        private void DeliverCapturedState()
         {
             foreach (var snapshot in CapturedSnapshots)
             {
-                if (snapshot.Behaviour == null)
+                if (!IsLive(snapshot))
                     continue;
 
-                foreach (var field in snapshot.SyncedFields)
-                {
-                    try
-                    {
-                        var defaultValue = GetDefaultValue(field.FieldType);
-                        SetFieldValue(snapshot.Behaviour, field.FieldName, defaultValue);
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.LogWarning($"[LateJoinSimulator] Failed to clear {field.FieldName}: {ex.Message}");
-                    }
-                }
-            }
-
-            Debug.Log("[LateJoinSimulator] Cleared all synced variables");
-        }
-
-        private void TriggerLateJoinReconstruction()
-        {
-            // Call OnDeserialization on all behaviours
-            foreach (var snapshot in CapturedSnapshots)
-            {
-                if (snapshot.Behaviour == null)
+                // A behaviour that has already halted runs nothing. Verification reports it as failed
+                // rather than letting its untouched variables read as a successful reconstruction.
+                if (snapshot.Backing.HasError)
                     continue;
+
+                WriteSnapshot(snapshot);
 
                 try
                 {
-                    // Check for OnDeserialization method
-                    var method = snapshot.BehaviourType.GetMethod("OnDeserialization",
-                        BindingFlags.Public | BindingFlags.Instance);
-
-                    if (method != null)
-                    {
-                        method.Invoke(snapshot.Behaviour, null);
-                    }
+                    // On the UdonBehaviour, where the program actually runs. Invoking the proxy's C#
+                    // method instead would execute the handler in the editor against the proxy's fields
+                    // and leave the running world untouched. A behaviour with no handler has no such
+                    // entry point and this does nothing.
+                    snapshot.Backing.SendCustomEvent(DeserializationEvent);
                 }
                 catch (Exception ex)
                 {
@@ -334,7 +430,97 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
                 }
             }
 
-            Debug.Log("[LateJoinSimulator] Triggered late-join reconstruction");
+            Debug.Log("[LateJoinSimulator] Delivered captured state and raised OnDeserialization");
+        }
+
+        /// <summary>
+        /// Writes every captured value into its behaviour. Returns how many fields were written.
+        /// </summary>
+        private int WriteCapturedState()
+        {
+            int written = 0;
+
+            foreach (var snapshot in CapturedSnapshots)
+            {
+                if (!IsLive(snapshot))
+                    continue;
+
+                written += WriteSnapshot(snapshot);
+            }
+
+            return written;
+        }
+
+        private int WriteSnapshot(BehaviourSnapshot snapshot)
+        {
+            int written = 0;
+
+            foreach (var field in snapshot.SyncedFields)
+            {
+                try
+                {
+                    // A fresh copy each time: the heap must never share an array with the snapshot, or
+                    // the program writing into it would rewrite what was captured.
+                    if (WriteProgramVariable(snapshot.Backing, field.FieldName, CloneValue(field.CapturedValue)))
+                        written++;
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[LateJoinSimulator] Failed to write {field.FieldName}: {ex.Message}");
+                }
+            }
+
+            return written;
+        }
+
+        private static MethodInfo _typedSetProgramVariable;
+
+        /// <summary>
+        /// Writes a heap variable as the type its slot already holds.
+        ///
+        /// SetProgramVariable(string, object) is not that: it stores through SetHeapVariable&lt;object&gt;,
+        /// and the heap keeps a value in place only when the slot is already a StrongBox of the same T,
+        /// so every int, float or Vector3 slot written that way was replaced with a StrongBox&lt;object&gt;
+        /// and reported its type as object from then on. Writing through SetProgramVariable&lt;T&gt; with
+        /// the slot's own T leaves the slot as the compiled program declared it.
+        /// </summary>
+        private static bool WriteProgramVariable(UdonBehaviour behaviour, string symbolName, object value)
+        {
+            Type slotType = behaviour.GetProgramVariableType(symbolName);
+            if (slotType == null)
+                return false;
+
+            // A value the slot cannot hold is not written. It came out of this slot, so a mismatch means
+            // the program was recompiled since the capture.
+            if (value == null ? slotType.IsValueType : !slotType.IsInstanceOfType(value))
+                return false;
+
+            if (_typedSetProgramVariable == null)
+            {
+                _typedSetProgramVariable = typeof(UdonBehaviour)
+                    .GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                    .FirstOrDefault(method => method.Name == nameof(UdonBehaviour.SetProgramVariable) &&
+                                              method.IsGenericMethodDefinition &&
+                                              method.GetParameters().Length == 2);
+            }
+
+            if (_typedSetProgramVariable == null)
+            {
+                behaviour.SetProgramVariable(symbolName, value);
+                return true;
+            }
+
+            try
+            {
+                _typedSetProgramVariable.MakeGenericMethod(slotType).Invoke(behaviour, new[] { symbolName, value });
+            }
+            catch (TargetInvocationException invocationFailure) when (invocationFailure.InnerException != null)
+            {
+                // Reported by the caller as the write that failed, not as a reflection error.
+                throw invocationFailure.InnerException;
+            }
+
+            return true;
         }
 
         private List<FieldReconstructionResult> VerifyReconstruction()
@@ -343,8 +529,10 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
 
             foreach (var snapshot in CapturedSnapshots)
             {
-                if (snapshot.Behaviour == null)
+                if (!IsLive(snapshot))
                     continue;
+
+                bool halted = snapshot.Backing.HasError;
 
                 foreach (var field in snapshot.SyncedFields)
                 {
@@ -357,13 +545,17 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
 
                     try
                     {
-                        var fieldInfo = snapshot.BehaviourType.GetField(field.FieldName,
-                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-
-                        if (fieldInfo != null)
+                        if (snapshot.Backing.TryGetProgramVariable(field.FieldName, out object current))
                         {
-                            result.CurrentValue = fieldInfo.GetValue(snapshot.Behaviour);
+                            result.CurrentValue = current;
                             result.Reconstructed = ValuesEqual(result.OriginalValue, result.CurrentValue);
+                        }
+
+                        if (halted)
+                        {
+                            // The values may well still match -- nothing ran to change them.
+                            result.Reconstructed = false;
+                            result.Error = "behaviour halted";
                         }
                     }
                     catch (Exception ex)
@@ -378,7 +570,7 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
             return results;
         }
 
-        private object CloneValue(object value)
+        private static object CloneValue(object value)
         {
             if (value == null)
                 return null;
@@ -386,50 +578,15 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
             // Handle arrays
             if (value is Array array)
             {
-                var clone = Array.CreateInstance(array.GetType().GetElementType(), array.Length);
-                Array.Copy(array, clone, array.Length);
-                return clone;
+                return array.Clone();
             }
 
-            // Value types are copied by value
-            if (value.GetType().IsValueType)
-                return value;
-
-            // Strings are immutable
-            if (value is string)
-                return value;
-
-            // For other reference types, just return the reference
-            // (we can't deep clone arbitrary objects)
+            // Value types are copied by value, strings are immutable, and other reference types cannot
+            // be deep cloned in general -- the reference is all there is to hand back.
             return value;
         }
 
-        private object GetDefaultValue(Type type)
-        {
-            if (type == null)
-                return null;
-
-            if (type.IsValueType)
-                return Activator.CreateInstance(type);
-
-            if (type.IsArray)
-                return null;
-
-            return null;
-        }
-
-        private void SetFieldValue(UdonSharpBehaviour behaviour, string fieldName, object value)
-        {
-            var field = behaviour.GetType().GetField(fieldName,
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-
-            if (field != null)
-            {
-                field.SetValue(behaviour, value);
-            }
-        }
-
-        private bool ValuesEqual(object a, object b)
+        private static bool ValuesEqual(object a, object b)
         {
             if (a == null && b == null)
                 return true;
@@ -465,6 +622,13 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
     public class BehaviourSnapshot
     {
         public UdonSharpBehaviour Behaviour;
+
+        /// <summary>
+        /// The UdonBehaviour that runs <see cref="Behaviour"/>. Synced state is read from and written to
+        /// its heap; the proxy is only how the behaviour was found.
+        /// </summary>
+        public UdonBehaviour Backing;
+
         public Type BehaviourType;
         public string GameObjectName;
         public List<FieldSnapshot> SyncedFields = new List<FieldSnapshot>();
@@ -504,6 +668,13 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
         public int TotalSyncedFields;
         public float SimulatedDelay;
         public float SuccessRate;
+
+        /// <summary>
+        /// Behaviours whose UdonBehaviour was halted when the run finished, whether OnDeserialization
+        /// threw or it had stopped earlier. Their fields are reported as not reconstructed.
+        /// </summary>
+        public int HaltedBehaviours;
+
         public List<FieldReconstructionResult> ReconstructionResults = new List<FieldReconstructionResult>();
 
         public TimeSpan Duration => EndTime - StartTime;
@@ -529,7 +700,14 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
     {
         public int TotalBehaviours;
         public int TotalSyncedFields;
+
+        /// <summary>
+        /// Fields marked [SyncOnJoin], whatever else they carry. This is a count in its own right and not
+        /// a share of <see cref="TotalSyncedFields"/>: the attribute belongs on fields that are not
+        /// [UdonSynced], so the two sets barely overlap.
+        /// </summary>
         public int SyncOnJoinFields;
+
         public int OnPlayerJoinedHandlers;
         public int OnDeserializationHandlers;
 
@@ -540,13 +718,9 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
 
         /// <summary>
         /// [UdonSynced] fields declared on those behaviours. They never reach any remote player, late
-        /// joiner or not, so they are excluded from the coverage ratio and reported separately.
+        /// joiner or not, so they are reported separately from the fields that do.
         /// </summary>
         public int NonReplicatingSyncedFields;
-
-        public float SyncOnJoinCoverage => TotalSyncedFields > 0
-            ? (float)SyncOnJoinFields / TotalSyncedFields
-            : 0f;
     }
 
     #endregion
@@ -642,10 +816,12 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
             EditorGUILayout.LabelField("Late-Join Simulator", _headerStyle);
 
             EditorGUILayout.HelpBox(
-                "Test how your world handles players joining mid-session.\n\n" +
-                "1. Capture the current state of synced variables\n" +
-                "2. Simulate a late-join (clears and reconstructs state)\n" +
-                "3. Verify that reconstruction was successful",
+                "Replays the owner's synced state into running behaviours the way VRChat hands it to a " +
+                "player who joins mid-session. Capture and Simulate need play mode.\n\n" +
+                "1. Capture the synced variables of every running behaviour\n" +
+                "2. Simulate: each behaviour receives the captured values, then OnDeserialization\n" +
+                "3. Check that every behaviour kept the delivered state and did not halt\n\n" +
+                "A real joiner also starts with fresh non-synced state. That part is not simulated.",
                 MessageType.Info);
         }
 
@@ -679,7 +855,7 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
 
                 EditorGUILayout.BeginHorizontal();
                 EditorGUILayout.LabelField("[SyncOnJoin] Fields:", GUILayout.Width(150));
-                EditorGUILayout.LabelField($"{_lastAnalysis.SyncOnJoinFields} ({_lastAnalysis.SyncOnJoinCoverage * 100:F0}%)");
+                EditorGUILayout.LabelField(_lastAnalysis.SyncOnJoinFields.ToString());
                 EditorGUILayout.EndHorizontal();
 
                 EditorGUILayout.BeginHorizontal();
@@ -702,15 +878,6 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
                         "handling will populate them.",
                         MessageType.Warning);
                 }
-
-                if (_lastAnalysis.SyncOnJoinCoverage < 1f && _lastAnalysis.TotalSyncedFields > 0)
-                {
-                    EditorGUILayout.Space(5);
-                    EditorGUILayout.HelpBox(
-                        $"Only {_lastAnalysis.SyncOnJoinCoverage * 100:F0}% of synced fields use [SyncOnJoin]. " +
-                        "Consider adding this attribute to fields that need to sync to late-joiners.",
-                        MessageType.Warning);
-                }
             }
 
             EditorGUILayout.EndVertical();
@@ -722,14 +889,18 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
 
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
 
+            bool isPlaying = EditorApplication.isPlaying;
+            int liveSnapshots = _simulator.LiveSnapshotCount;
+
             EditorGUILayout.BeginHorizontal();
 
+            GUI.enabled = isPlaying;
             if (GUILayout.Button("Capture Current State", GUILayout.Height(30)))
             {
                 _simulator.CaptureCurrentState();
             }
 
-            GUI.enabled = _simulator.CapturedSnapshots.Count > 0;
+            GUI.enabled = isPlaying && liveSnapshots > 0;
             if (GUILayout.Button("Restore Captured State", GUILayout.Height(30)))
             {
                 _simulator.RestoreCapturedState();
@@ -738,13 +909,27 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
 
             EditorGUILayout.EndHorizontal();
 
+            if (!isPlaying)
+            {
+                EditorGUILayout.HelpBox(
+                    "Enter play mode to capture. Synced state lives in the running UdonBehaviours; in edit " +
+                    "mode there is only the scene's authored data, which this tool does not modify.",
+                    MessageType.Info);
+            }
+
             // Show capture stats
-            if (_simulator.CapturedSnapshots.Count > 0)
+            if (liveSnapshots > 0)
             {
                 EditorGUILayout.Space(5);
-                int totalFields = _simulator.CapturedSnapshots.Sum(s => s.SyncedFields.Count);
+                int totalFields = 0;
+                foreach (var snapshot in _simulator.CapturedSnapshots)
+                {
+                    if (snapshot != null && snapshot.Behaviour != null && snapshot.Backing != null)
+                        totalFields += snapshot.SyncedFields.Count;
+                }
+
                 EditorGUILayout.LabelField(
-                    $"Captured: {_simulator.CapturedSnapshots.Count} behaviours, {totalFields} fields",
+                    $"Captured: {liveSnapshots} behaviours, {totalFields} fields",
                     EditorStyles.centeredGreyMiniLabel);
             }
 
@@ -757,6 +942,9 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
 
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
 
+            bool isPlaying = EditorApplication.isPlaying;
+            int liveSnapshots = _simulator.LiveSnapshotCount;
+
             // Delay setting
             EditorGUILayout.BeginHorizontal();
             EditorGUILayout.LabelField("Simulated Delay (s):", GUILayout.Width(130));
@@ -765,7 +953,7 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
 
             EditorGUILayout.Space(5);
 
-            GUI.enabled = _simulator.CapturedSnapshots.Count > 0 && !_simulator.IsSimulating;
+            GUI.enabled = isPlaying && liveSnapshots > 0 && !_simulator.IsSimulating;
 
             if (GUILayout.Button("Simulate Late-Join", GUILayout.Height(35)))
             {
@@ -774,7 +962,7 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
 
             GUI.enabled = true;
 
-            if (_simulator.CapturedSnapshots.Count == 0)
+            if (isPlaying && liveSnapshots == 0)
             {
                 EditorGUILayout.HelpBox("Capture state first before simulating.", MessageType.Info);
             }
@@ -810,6 +998,14 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
             EditorGUILayout.LabelField($"{result.Duration.TotalMilliseconds:F0} ms");
             EditorGUILayout.EndHorizontal();
 
+            if (result.HaltedBehaviours > 0)
+            {
+                EditorGUILayout.HelpBox(
+                    $"{result.HaltedBehaviours} behaviour(s) were halted when the run finished. A halted " +
+                    "UdonBehaviour runs nothing until play mode is restarted; the console has the exception.",
+                    MessageType.Error);
+            }
+
             EditorGUILayout.Space(10);
 
             // Individual results
@@ -843,4 +1039,3 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
         #endregion
     }
 }
-

@@ -75,7 +75,7 @@ namespace UdonSharp.Compiler.Binder
             Type targetType = typeSymbol.UdonType.SystemType;
 
             if (typeSymbol.IsEnum && typeSymbol.IsExtern)
-                constantValue = Enum.ToObject(targetType, constantValue);
+                constantValue = targetType.IsEnum ? Enum.ToObject(targetType, constantValue) : Convert.ChangeType(constantValue, targetType);
             
             ConstantValue =
                 (IConstantValue) Activator.CreateInstance(typeof(ConstantValue<>).MakeGenericType(typeSymbol.UdonType.SystemType),

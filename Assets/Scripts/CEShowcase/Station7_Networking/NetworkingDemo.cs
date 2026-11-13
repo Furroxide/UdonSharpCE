@@ -24,9 +24,9 @@ namespace CEShowcase.Station7_Networking
     public class NetworkingDemo : UdonSharpBehaviour
     {
         // All three are Authority.Owner: this station exists to demonstrate owner-based authority, and
-        // every mutator below refuses to run unless _isOwner (or takes ownership first). Declaring that
-        // at the field is what keeps CE0014 checking it, so a future mutator that forgets the guard is
-        // reported instead of quietly writing a value only the local client will ever see.
+        // every mutator below refuses to run unless _isOwner. Declaring that at the field is what keeps
+        // CE0014 checking it, so a future mutator that forgets the guard is reported instead of quietly
+        // writing a value only the local client will ever see.
         [Header("Synced State")]
         [Sync(Authority.Owner)]
         private int _syncedScore;
@@ -75,6 +75,7 @@ namespace CEShowcase.Station7_Networking
         private RateLimiter _positionLimiter;
         
         // State
+        // The log is replicated whole from the owner, so the owner is its only writer -- see AddMessage.
         [SyncOnJoin(Priority = 20)]
         private string[] _messageLog = new string[MAX_MESSAGES];
 
@@ -94,6 +95,9 @@ namespace CEShowcase.Station7_Networking
         private int _localPlayerId;
         private string _localPlayerName;
 
+        // True once a serialization has arrived on this client. See HasSyncedPosition.
+        private bool _syncReceived;
+
         // Ownership tint, eased in Update via a cached property block
         private MaterialPropertyBlock _objectPropertyBlock;
         private Color _objectColor = new Color(0.9f, 0.3f, 0.25f);
@@ -102,13 +106,20 @@ namespace CEShowcase.Station7_Networking
         void Start()
         {
             InitializeRateLimiters();
-            InitializeMessageLog();
             UpdateOwnerStatus();
             
-            // Initialize synced position
-            if (_movableObject != null)
+            // Only the owner seeds synced state. This ran on every client, and on a late joiner the
+            // owner's position and message log can already be in place when Start runs -- VRChat delivers
+            // the values but drops the OnDeserialization for a behaviour that has not started -- so the
+            // seed overwrote them with scene defaults and nothing ever put them back.
+            if (_isOwner)
             {
-                _syncedPosition = _movableObject.localPosition;
+                InitializeMessageLog();
+
+                if (_movableObject != null)
+                {
+                    _syncedPosition = _movableObject.localPosition;
+                }
             }
             
             CELogger.Info("Networking", "CE.Net Networking Demo initialized");
@@ -142,7 +153,7 @@ namespace CEShowcase.Station7_Networking
         void Update()
         {
             // Interpolate object position for smooth visuals
-            if (_movableObject != null)
+            if (_movableObject != null && HasSyncedPosition())
             {
                 _movableObject.localPosition = Vector3.Lerp(
                     _movableObject.localPosition,
@@ -177,6 +188,7 @@ namespace CEShowcase.Station7_Networking
         {
             _syncCount++;
             _lastSyncTime = Time.time;
+            _syncReceived = true;
             
             // Apply synced state
             UpdateObjectVisuals();
@@ -203,19 +215,14 @@ namespace CEShowcase.Station7_Networking
         }
         
         /// <summary>
-        /// Claims write authority. VRChat silently discards writes to synced variables from non-owners,
-        /// so every synced write in this behaviour must be gated on this returning true.
+        /// Whether _syncedPosition holds a real value yet. Only the owner seeds it in Start, so on anyone
+        /// else it is the compiled default until the owner's value is in hand, and easing toward that
+        /// would sink the object to its parent's origin. Non-zero covers a value delivered before Start,
+        /// which never raises OnDeserialization.
         /// </summary>
-        private bool TakeOwnership()
+        private bool HasSyncedPosition()
         {
-            VRCPlayerApi localPlayer = Networking.LocalPlayer;
-            if (localPlayer == null || !localPlayer.IsValid())
-                return false;
-
-            if (!Networking.IsOwner(localPlayer, gameObject))
-                Networking.SetOwner(localPlayer, gameObject);
-
-            return Networking.IsOwner(localPlayer, gameObject);
+            return _isOwner || _syncReceived || _syncedPosition != Vector3.zero;
         }
 
         /// <summary>
@@ -280,20 +287,13 @@ namespace CEShowcase.Station7_Networking
                 return;
             }
             
-            if (!TakeOwnership())
-            {
-                CELogger.Warning("Networking", "Could not take ownership; chat message not sent.");
-                return;
-            }
-
             string message = $"Hello from {_localPlayerName}!";
-            _syncedMessage = message;
 
-            // Publish the text before announcing it. Without this the remotes run ReceiveChatMessage and
-            // read their own stale _syncedMessage, so the message never crosses the wire.
-            RequestSerialization();
-
-            SendCustomNetworkEvent(NetworkEventTarget.All, nameof(ReceiveChatMessage));
+            // Sender and text travel on the event itself. They used to be read back on arrival -- the
+            // text from a synced field, the sender from the object's owner -- and neither a serialization
+            // nor an ownership transfer is ordered against a network event, so a client that heard the
+            // event first printed the previous message under whoever had sent that one.
+            SendCustomNetworkEvent(NetworkEventTarget.All, nameof(ReceiveChatMessage), _localPlayerName, message);
             
             _rpcSentCount++;
             CELogger.Info("Networking", $"Sent chat: {message}");
@@ -303,18 +303,17 @@ namespace CEShowcase.Station7_Networking
         /// Network callback for chat messages.
         /// </summary>
         [Rpc(RpcTarget.All, RateLimit = 2f)]
-        public void ReceiveChatMessage()
+        public void ReceiveChatMessage(string sender, string message)
         {
             _rpcReceivedCount++;
             
-            string sender = "Unknown";
-            VRCPlayerApi owner = Networking.GetOwner(gameObject);
-            if (owner != null && owner.IsValid())
+            // The owner keeps the last message as synced state for whoever arrives later.
+            if (_isOwner)
             {
-                sender = owner.displayName;
+                _syncedMessage = message;
             }
             
-            AddMessage($"<color=#00FF00>{sender}</color>: {_syncedMessage}");
+            AddMessage($"<color=#00FF00>{sender}</color>: {message}");
             
             CELogger.Debug("Networking", $"Received chat from {sender}");
         }
@@ -432,8 +431,21 @@ namespace CEShowcase.Station7_Networking
             _objectTargetColor = _isOwner ? new Color(0.2f, 0.85f, 0.45f) : new Color(0.9f, 0.3f, 0.25f);
         }
         
+        /// <summary>
+        /// Appends a line to the shared log. Only the owner writes it; everybody else shows the copy
+        /// [SyncOnJoin] delivers.
+        ///
+        /// Every client used to append here as well as receiving the owner's log whole, so each event
+        /// reached a non-owner twice -- once as its own append and once inside the next delivery -- and
+        /// whichever landed second either doubled the line or wiped out the first.
+        /// </summary>
         private void AddMessage(string message)
         {
+            if (!_isOwner)
+                return;
+
+            EnsureMessageLog();
+
             // Shift messages
             if (_messageCount >= MAX_MESSAGES)
             {
@@ -448,6 +460,36 @@ namespace CEShowcase.Station7_Networking
             _messageCount++;
             
             UpdateMessagesText();
+
+            // Publish the new line now. Left alone, capture only runs when somebody joins.
+            SendCustomEvent("_CE_SyncOnJoin_RequestCapture");
+        }
+
+        /// <summary>
+        /// A client that inherits the log writes into whatever the last delivery left behind, so its
+        /// shape is checked rather than assumed: an index past the end here halts the behaviour.
+        /// </summary>
+        private void EnsureMessageLog()
+        {
+            if (_messageLog == null || _messageLog.Length != MAX_MESSAGES)
+            {
+                string[] resized = new string[MAX_MESSAGES];
+                int kept = 0;
+
+                if (_messageLog != null)
+                {
+                    kept = Mathf.Min(_messageLog.Length, MAX_MESSAGES);
+                    for (int i = 0; i < kept; i++)
+                    {
+                        resized[i] = _messageLog[i];
+                    }
+                }
+
+                _messageLog = resized;
+                _messageCount = Mathf.Min(_messageCount, kept);
+            }
+
+            _messageCount = Mathf.Clamp(_messageCount, 0, MAX_MESSAGES);
         }
         
         private void UpdateMessagesText()
@@ -456,7 +498,8 @@ namespace CEShowcase.Station7_Networking
             
             string text = "<b>NETWORK LOG</b>\n\n";
             
-            for (int i = 0; i < _messageCount; i++)
+            int count = _messageLog == null ? 0 : Mathf.Min(_messageCount, _messageLog.Length);
+            for (int i = 0; i < count; i++)
             {
                 text += _messageLog[i] + "\n";
             }
@@ -508,8 +551,10 @@ namespace CEShowcase.Station7_Networking
         {
             if (player == null) return;
             
-            AddMessage($"<color=#888888>{player.displayName} left</color>");
+            // Refresh ownership first: if it was the owner who left, the client that inherits the log is
+            // the one that has to record it.
             UpdateOwnerStatus();
+            AddMessage($"<color=#888888>{player.displayName} left</color>");
         }
         
         // ========================================

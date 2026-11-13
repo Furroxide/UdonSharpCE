@@ -241,10 +241,12 @@ namespace CEShowcase.Station5_Persistence
             // compiled heap default (un-collected) until the owner happened to serialize again.
             if (!_started)
             {
-                // First activation: OnEnable runs before Start, and OnDeserialization is allowed to land
-                // before Start too, so _isCollected may already be true here. Start caches _startPosition
-                // and the renderer list and then applies the state itself -- applying it now would play
-                // the pickup burst at the world origin.
+                // First activation: OnEnable runs before Start, and synced values can be delivered before
+                // Start too -- VRChat drops the OnDeserialization for a behaviour that has not started,
+                // but the data is already in place -- so _isCollected may be true here. Start caches
+                // _startPosition and the renderer list and then applies the state itself, which is the
+                // only time such a delivery gets applied; doing it now would play the pickup burst at
+                // the world origin.
                 return;
             }
 

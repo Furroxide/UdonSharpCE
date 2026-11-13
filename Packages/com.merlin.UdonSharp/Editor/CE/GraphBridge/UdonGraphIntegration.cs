@@ -166,29 +166,22 @@ namespace UdonSharp.CE.Editor.GraphBridge
         #region Node Registration
 
         /// <summary>
-        /// Registered custom nodes by menu path.
+        /// Registered custom nodes by menu path. Null until something asks for it.
+        ///
+        /// Deliberately not filled on load. An [InitializeOnLoadMethod] used to queue a full node scan
+        /// after every domain reload -- every script compile and every play-mode entry -- in every
+        /// project, including the ones with no [GraphNode] in them and no GraphBridge window open.
         /// </summary>
         private static Dictionary<string, NodeDefinition> _registeredNodes;
-
-        /// <summary>
-        /// Initializes the integration system.
-        /// </summary>
-        [InitializeOnLoadMethod]
-        private static void Initialize()
-        {
-            _registeredNodes = new Dictionary<string, NodeDefinition>();
-
-            EditorApplication.delayCall += () =>
-            {
-                RefreshNodes();
-            };
-        }
 
         /// <summary>
         /// Refreshes the registered node list.
         /// </summary>
         public static void RefreshNodes()
         {
+            if (_registeredNodes == null)
+                _registeredNodes = new Dictionary<string, NodeDefinition>();
+
             _registeredNodes.Clear();
 
             var nodes = GraphNodeGenerator.GetNodeDefinitions();

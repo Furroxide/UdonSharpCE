@@ -80,9 +80,14 @@ namespace UdonSharp.CE.Procgen
         );
 
         /// <summary>
-        /// The room's bounding rectangle.
+        /// The room's top-right corner (exclusive): <see cref="Position"/> plus <see cref="Size"/>.
+        /// Together with Position this is the room's rectangle. It is a pair of Vector2Int rather than a
+        /// RectInt because Udon does not expose RectInt, so a RectInt member could not be compiled.
         /// </summary>
-        public RectInt Bounds => new RectInt(Position, Size);
+        public Vector2Int Max => new Vector2Int(
+            Position.x + Size.x,
+            Position.y + Size.y
+        );
     }
 
     /// <summary>
@@ -139,9 +144,15 @@ namespace UdonSharp.CE.Procgen
         public int[] CriticalPath;
 
         /// <summary>
-        /// The bounds containing all rooms and corridors.
+        /// Bottom-left corner of the area containing all rooms and corridors.
+        /// Held as a corner and a size rather than a RectInt, which Udon does not expose.
         /// </summary>
-        public RectInt Bounds;
+        public Vector2Int BoundsMin;
+
+        /// <summary>
+        /// Size of the area containing all rooms and corridors.
+        /// </summary>
+        public Vector2Int BoundsSize;
 
         /// <summary>
         /// Gets the room with Start type.
@@ -223,7 +234,8 @@ namespace UdonSharp.CE.Procgen
         public float SecretRoomChance = 0.1f;
 
         /// <summary>
-        /// Maximum generation bounds.
+        /// Maximum generation bounds. Every room lies inside (0, 0) to this size; a room size larger than
+        /// the bounds is shrunk to fit.
         /// </summary>
         public Vector2Int MaxBounds = new Vector2Int(100, 100);
     }
@@ -241,6 +253,9 @@ namespace UdonSharp.CE.Procgen
     /// 3. Add extra connections based on connectivity parameter
     /// 4. Generate L-shaped corridors between connected rooms
     /// 5. Assign room types along critical path
+    ///
+    /// Generation runs to completion inside one call; it is not time-sliced. Cost grows with the square of
+    /// the room count, so expect a hitch on large layouts and generate them while nobody is watching.
     /// </remarks>
     /// <example>
     /// <code>
@@ -272,6 +287,10 @@ namespace UdonSharp.CE.Procgen
     [PublicAPI]
     public static class CEDungeon
     {
+        // Room-to-room tables in this file (connections, distances) are count * count arrays indexed
+        // [from * count + to]. UdonSharp cannot compile a multidimensional array, so while these were
+        // int[,] and float[,] no behaviour that called Generate could be built at all.
+
         #region Main Generation
 
         /// <summary>
@@ -301,7 +320,7 @@ namespace UdonSharp.CE.Procgen
             }
 
             // Step 2: Build graph connections (MST + extra)
-            int[,] connections = BuildConnections(rng, rooms, config.Connectivity);
+            int[] connections = BuildConnections(rng, rooms, config.Connectivity);
 
             // Step 3: Assign connected rooms to each room
             AssignConnectedRooms(rooms, connections);
@@ -311,20 +330,20 @@ namespace UdonSharp.CE.Procgen
 
             // Step 5: Find critical path (longest path from Start to Boss)
             int[] criticalPath = FindCriticalPath(rooms, connections);
+            MarkCriticalCorridors(corridors, criticalPath);
 
             // Step 6: Assign room types
             AssignRoomTypes(rng, rooms, criticalPath, config);
 
-            // Calculate bounds
-            RectInt bounds = CalculateBounds(rooms, corridors);
+            DungeonLayout layout = new DungeonLayout();
+            layout.Rooms = rooms;
+            layout.Corridors = corridors;
+            layout.CriticalPath = criticalPath;
 
-            return new DungeonLayout
-            {
-                Rooms = rooms,
-                Corridors = corridors,
-                CriticalPath = criticalPath,
-                Bounds = bounds
-            };
+            // Calculate bounds
+            AssignBounds(layout);
+
+            return layout;
         }
 
         /// <summary>
@@ -361,7 +380,28 @@ namespace UdonSharp.CE.Procgen
             int spacing,
             Vector2Int maxBounds)
         {
+            int boundsX = maxBounds.x;
+            int boundsY = maxBounds.y;
+
+            // No room fits in an empty or inverted area. Returning none lets the caller hand back an empty
+            // layout instead of a room hanging outside bounds that cannot contain it.
+            if (boundsX < 1 || boundsY < 1)
+                return new DungeonRoom[0];
+
+            int minWidth = minSize.x;
+            int maxWidth = maxSize.x;
+            int minHeight = minSize.y;
+            int maxHeight = maxSize.y;
+
             DungeonRoom[] rooms = new DungeonRoom[targetCount];
+
+            // Placed rectangles are mirrored into int arrays so the collision test below never has to read
+            // them back out of the room objects, and a rejected candidate never allocates one.
+            int[] placedX = new int[targetCount];
+            int[] placedY = new int[targetCount];
+            int[] placedWidth = new int[targetCount];
+            int[] placedHeight = new int[targetCount];
+
             int placedCount = 0;
             int maxAttempts = targetCount * 50;
             int attempts = 0;
@@ -371,25 +411,29 @@ namespace UdonSharp.CE.Procgen
                 attempts++;
 
                 // Generate random room size
-                int width = rng.Range(minSize.x, maxSize.x + 1);
-                int height = rng.Range(minSize.y, maxSize.y + 1);
+                int width = rng.RangeInclusive(minWidth, maxWidth);
+                int height = rng.RangeInclusive(minHeight, maxHeight);
+
+                // A configured size the bounds cannot hold used to be placed at the origin anyway and
+                // overhang them (8x8 bounds produced an 11x9 room). Shrink it to fit, and never let a
+                // zero or negative configured size through as a room with no area.
+                if (width < 1) width = 1;
+                if (height < 1) height = 1;
+                if (width > boundsX) width = boundsX;
+                if (height > boundsY) height = boundsY;
 
                 // Generate random position
-                int x = rng.Range(0, maxBounds.x - width);
-                int y = rng.Range(0, maxBounds.y - height);
+                int x = rng.RangeInclusive(0, boundsX - width);
+                int y = rng.RangeInclusive(0, boundsY - height);
 
-                var newRoom = new DungeonRoom
-                {
-                    Id = placedCount,
-                    Position = new Vector2Int(x, y),
-                    Size = new Vector2Int(width, height)
-                };
-
-                // Check for collisions with existing rooms
+                // Check for collisions with existing rooms, each grown by the spacing on every side
                 bool collides = false;
                 for (int i = 0; i < placedCount; i++)
                 {
-                    if (RoomsOverlap(rooms[i], newRoom, spacing))
+                    if (x < placedX[i] + placedWidth[i] + spacing &&
+                        x + width > placedX[i] - spacing &&
+                        y < placedY[i] + placedHeight[i] + spacing &&
+                        y + height > placedY[i] - spacing)
                     {
                         collides = true;
                         break;
@@ -398,7 +442,16 @@ namespace UdonSharp.CE.Procgen
 
                 if (!collides)
                 {
+                    DungeonRoom newRoom = new DungeonRoom();
+                    newRoom.Id = placedCount;
+                    newRoom.Position = new Vector2Int(x, y);
+                    newRoom.Size = new Vector2Int(width, height);
+
                     rooms[placedCount] = newRoom;
+                    placedX[placedCount] = x;
+                    placedY[placedCount] = y;
+                    placedWidth[placedCount] = width;
+                    placedHeight[placedCount] = height;
                     placedCount++;
                 }
             }
@@ -417,23 +470,6 @@ namespace UdonSharp.CE.Procgen
             return rooms;
         }
 
-        /// <summary>
-        /// Checks if two rooms overlap (including spacing).
-        /// </summary>
-        private static bool RoomsOverlap(DungeonRoom a, DungeonRoom b, int spacing)
-        {
-            RectInt boundsA = new RectInt(
-                a.Position.x - spacing,
-                a.Position.y - spacing,
-                a.Size.x + spacing * 2,
-                a.Size.y + spacing * 2
-            );
-
-            RectInt boundsB = new RectInt(b.Position, b.Size);
-
-            return boundsA.Overlaps(boundsB);
-        }
-
         #endregion
 
         #region Graph Building
@@ -441,20 +477,21 @@ namespace UdonSharp.CE.Procgen
         /// <summary>
         /// Builds room connections using MST + extra edges.
         /// </summary>
-        private static int[,] BuildConnections(CERandom rng, DungeonRoom[] rooms, float connectivity)
+        /// <returns>A count * count table; entry [a * count + b] is 1 when rooms a and b are connected.</returns>
+        private static int[] BuildConnections(CERandom rng, DungeonRoom[] rooms, float connectivity)
         {
             int count = rooms.Length;
-            int[,] connections = new int[count, count];
+            int[] connections = new int[count * count];
 
             // Calculate distances between all room pairs
-            float[,] distances = new float[count, count];
+            float[] distances = new float[count * count];
             for (int i = 0; i < count; i++)
             {
                 for (int j = i + 1; j < count; j++)
                 {
                     float dist = Vector2Int.Distance(rooms[i].Center, rooms[j].Center);
-                    distances[i, j] = dist;
-                    distances[j, i] = dist;
+                    distances[i * count + j] = dist;
+                    distances[j * count + i] = dist;
                 }
             }
 
@@ -492,16 +529,16 @@ namespace UdonSharp.CE.Procgen
                 // Add edge to MST
                 if (parent[u] >= 0)
                 {
-                    connections[u, parent[u]] = 1;
-                    connections[parent[u], u] = 1;
+                    connections[u * count + parent[u]] = 1;
+                    connections[parent[u] * count + u] = 1;
                 }
 
                 // Update distances
                 for (int v = 0; v < count; v++)
                 {
-                    if (!inTree[v] && distances[u, v] < minDist[v])
+                    if (!inTree[v] && distances[u * count + v] < minDist[v])
                     {
-                        minDist[v] = distances[u, v];
+                        minDist[v] = distances[u * count + v];
                         parent[v] = u;
                     }
                 }
@@ -509,42 +546,112 @@ namespace UdonSharp.CE.Procgen
 
             // Add extra connections based on connectivity
             int possibleExtras = (count * (count - 1)) / 2 - (count - 1);
-            int extraConnections = (int)(possibleExtras * connectivity);
+
+            // The product is only cast for a connectivity strictly inside (0, 1). UdonSharp lowers the cast
+            // to Convert.ToInt32, which throws on NaN or on a value outside int range, so a careless
+            // connectivity would otherwise halt the calling behaviour instead of being clamped.
+            int extraConnections;
+            if (!(connectivity > 0f))
+                extraConnections = 0;
+            else if (connectivity >= 1f)
+                extraConnections = possibleExtras;
+            else
+                extraConnections = (int)(possibleExtras * connectivity);
 
             // Collect non-connected pairs sorted by distance
             int pairCount = 0;
-            int[][] pairs = new int[possibleExtras][];
+            int[] pairA = new int[possibleExtras];
+            int[] pairB = new int[possibleExtras];
             float[] pairDistances = new float[possibleExtras];
 
             for (int i = 0; i < count; i++)
             {
                 for (int j = i + 1; j < count; j++)
                 {
-                    if (connections[i, j] == 0)
+                    if (connections[i * count + j] == 0)
                     {
-                        pairs[pairCount] = new int[] { i, j };
-                        pairDistances[pairCount] = distances[i, j];
+                        pairA[pairCount] = i;
+                        pairB[pairCount] = j;
+                        pairDistances[pairCount] = distances[i * count + j];
                         pairCount++;
                     }
                 }
             }
 
-            // Sort by distance (simple bubble sort for small arrays)
-            for (int i = 0; i < pairCount - 1; i++)
-            {
-                for (int j = 0; j < pairCount - i - 1; j++)
-                {
-                    if (pairDistances[j] > pairDistances[j + 1])
-                    {
-                        float tempDist = pairDistances[j];
-                        pairDistances[j] = pairDistances[j + 1];
-                        pairDistances[j + 1] = tempDist;
+            // Sort by distance with a bottom-up merge sort. It is stable -- a tie keeps the left run's
+            // entry -- so it yields the same order a bubble sort does, and with it the same layouts. A
+            // bubble sort here costs pairCount^2 / 2 comparisons; at the 100-room cap that is close to
+            // twelve million iterations of an Udon loop inside one call, and Udon halts a behaviour whose
+            // single call runs for about ten seconds.
+            int[] mergedA = new int[pairCount];
+            int[] mergedB = new int[pairCount];
+            float[] mergedDistances = new float[pairCount];
 
-                        int[] tempPair = pairs[j];
-                        pairs[j] = pairs[j + 1];
-                        pairs[j + 1] = tempPair;
+            for (int run = 1; run < pairCount; run *= 2)
+            {
+                for (int start = 0; start < pairCount; start += run * 2)
+                {
+                    int mid = start + run;
+                    if (mid > pairCount) mid = pairCount;
+
+                    int end = start + run * 2;
+                    if (end > pairCount) end = pairCount;
+
+                    int left = start;
+                    int right = mid;
+                    int dest = start;
+
+                    while (left < mid && right < end)
+                    {
+                        if (pairDistances[right] < pairDistances[left])
+                        {
+                            mergedDistances[dest] = pairDistances[right];
+                            mergedA[dest] = pairA[right];
+                            mergedB[dest] = pairB[right];
+                            right++;
+                        }
+                        else
+                        {
+                            mergedDistances[dest] = pairDistances[left];
+                            mergedA[dest] = pairA[left];
+                            mergedB[dest] = pairB[left];
+                            left++;
+                        }
+
+                        dest++;
+                    }
+
+                    while (left < mid)
+                    {
+                        mergedDistances[dest] = pairDistances[left];
+                        mergedA[dest] = pairA[left];
+                        mergedB[dest] = pairB[left];
+                        left++;
+                        dest++;
+                    }
+
+                    while (right < end)
+                    {
+                        mergedDistances[dest] = pairDistances[right];
+                        mergedA[dest] = pairA[right];
+                        mergedB[dest] = pairB[right];
+                        right++;
+                        dest++;
                     }
                 }
+
+                // The merged pass becomes the input of the next, wider one
+                float[] swapDistances = pairDistances;
+                pairDistances = mergedDistances;
+                mergedDistances = swapDistances;
+
+                int[] swapA = pairA;
+                pairA = mergedA;
+                mergedA = swapA;
+
+                int[] swapB = pairB;
+                pairB = mergedB;
+                mergedB = swapB;
             }
 
             // Add extra connections (prefer shorter distances with some randomness)
@@ -555,10 +662,10 @@ namespace UdonSharp.CE.Procgen
                 float chance = 1f - (float)i / pairCount;
                 if (rng.NextFloat() < chance * 0.5f + 0.5f)
                 {
-                    int a = pairs[i][0];
-                    int b = pairs[i][1];
-                    connections[a, b] = 1;
-                    connections[b, a] = 1;
+                    int a = pairA[i];
+                    int b = pairB[i];
+                    connections[a * count + b] = 1;
+                    connections[b * count + a] = 1;
                     added++;
                 }
             }
@@ -569,7 +676,7 @@ namespace UdonSharp.CE.Procgen
         /// <summary>
         /// Assigns connected room indices to each room.
         /// </summary>
-        private static void AssignConnectedRooms(DungeonRoom[] rooms, int[,] connections)
+        private static void AssignConnectedRooms(DungeonRoom[] rooms, int[] connections)
         {
             int count = rooms.Length;
 
@@ -579,20 +686,23 @@ namespace UdonSharp.CE.Procgen
                 int connCount = 0;
                 for (int j = 0; j < count; j++)
                 {
-                    if (connections[i, j] > 0)
+                    if (connections[i * count + j] > 0)
                         connCount++;
                 }
 
                 // Assign connected rooms
-                rooms[i].ConnectedRooms = new int[connCount];
+                int[] connected = new int[connCount];
                 int idx = 0;
                 for (int j = 0; j < count; j++)
                 {
-                    if (connections[i, j] > 0)
+                    if (connections[i * count + j] > 0)
                     {
-                        rooms[i].ConnectedRooms[idx++] = j;
+                        connected[idx] = j;
+                        idx++;
                     }
                 }
+
+                rooms[i].ConnectedRooms = connected;
             }
         }
 
@@ -606,7 +716,7 @@ namespace UdonSharp.CE.Procgen
         private static DungeonCorridor[] GenerateCorridors(
             CERandom rng,
             DungeonRoom[] rooms,
-            int[,] connections,
+            int[] connections,
             int width)
         {
             int count = rooms.Length;
@@ -617,7 +727,7 @@ namespace UdonSharp.CE.Procgen
             {
                 for (int j = i + 1; j < count; j++)
                 {
-                    if (connections[i, j] > 0)
+                    if (connections[i * count + j] > 0)
                         corridorCount++;
                 }
             }
@@ -629,7 +739,7 @@ namespace UdonSharp.CE.Procgen
             {
                 for (int j = i + 1; j < count; j++)
                 {
-                    if (connections[i, j] > 0)
+                    if (connections[i * count + j] > 0)
                     {
                         corridors[idx] = GenerateLShapedCorridor(
                             rng, rooms[i], rooms[j], i, j, width);
@@ -655,85 +765,78 @@ namespace UdonSharp.CE.Procgen
             Vector2Int start = from.Center;
             Vector2Int end = to.Center;
 
+            int startX = start.x;
+            int startY = start.y;
+            int endX = end.x;
+            int endY = end.y;
+
             // Choose horizontal-first or vertical-first randomly
             bool horizontalFirst = rng.NextBool();
 
-            Vector2Int corner;
-            if (horizontalFirst)
-            {
-                corner = new Vector2Int(end.x, start.y);
-            }
-            else
-            {
-                corner = new Vector2Int(start.x, end.y);
-            }
+            int cornerX = horizontalFirst ? endX : startX;
+            int cornerY = horizontalFirst ? startY : endY;
 
-            // Generate path points
-            Vector2Int[] path = GeneratePathPoints(start, corner, end);
+            DungeonCorridor corridor = new DungeonCorridor();
+            corridor.FromRoom = fromIdx;
+            corridor.ToRoom = toIdx;
+            corridor.Path = GeneratePathPoints(startX, startY, cornerX, cornerY, endX, endY);
+            corridor.Width = width;
 
-            return new DungeonCorridor
-            {
-                FromRoom = fromIdx,
-                ToRoom = toIdx,
-                Path = path,
-                Width = width
-            };
+            return corridor;
         }
 
         /// <summary>
-        /// Generates individual tiles along a path from start through corner to end.
+        /// Generates individual tiles along a path from start through corner to end, both ends included.
+        /// Each leg is axis-aligned, so the tile count is exactly the two leg lengths plus the start tile.
         /// </summary>
-        private static Vector2Int[] GeneratePathPoints(Vector2Int start, Vector2Int corner, Vector2Int end)
+        private static Vector2Int[] GeneratePathPoints(
+            int startX,
+            int startY,
+            int cornerX,
+            int cornerY,
+            int endX,
+            int endY)
         {
-            // Calculate segment lengths
-            int seg1Length = Mathf.Abs(corner.x - start.x) + Mathf.Abs(corner.y - start.y) + 1;
-            int seg2Length = Mathf.Abs(end.x - corner.x) + Mathf.Abs(end.y - corner.y);
+            int firstLeg = Mathf.Abs(cornerX - startX) + Mathf.Abs(cornerY - startY);
+            int secondLeg = Mathf.Abs(endX - cornerX) + Mathf.Abs(endY - cornerY);
 
-            Vector2Int[] path = new Vector2Int[seg1Length + seg2Length];
+            Vector2Int[] path = new Vector2Int[firstLeg + secondLeg + 1];
             int idx = 0;
 
-            // First segment: start to corner
-            Vector2Int current = start;
-            Vector2Int dir1 = new Vector2Int(
-                corner.x > start.x ? 1 : (corner.x < start.x ? -1 : 0),
-                corner.y > start.y ? 1 : (corner.y < start.y ? -1 : 0)
-            );
+            int x = startX;
+            int y = startY;
 
-            while (current != corner)
+            path[idx] = new Vector2Int(x, y);
+            idx++;
+
+            // First leg: start to corner
+            while (x != cornerX)
             {
-                path[idx++] = current;
-                if (current.x != corner.x)
-                    current.x += dir1.x;
-                else if (current.y != corner.y)
-                    current.y += dir1.y;
-            }
-            path[idx++] = corner;
-
-            // Second segment: corner to end
-            Vector2Int dir2 = new Vector2Int(
-                end.x > corner.x ? 1 : (end.x < corner.x ? -1 : 0),
-                end.y > corner.y ? 1 : (end.y < corner.y ? -1 : 0)
-            );
-
-            current = corner;
-            while (current != end)
-            {
-                if (current.x != end.x)
-                    current.x += dir2.x;
-                else if (current.y != end.y)
-                    current.y += dir2.y;
-
-                if (idx < path.Length)
-                    path[idx++] = current;
+                x += cornerX > x ? 1 : -1;
+                path[idx] = new Vector2Int(x, y);
+                idx++;
             }
 
-            // Trim if needed
-            if (idx < path.Length)
+            while (y != cornerY)
             {
-                Vector2Int[] trimmed = new Vector2Int[idx];
-                for (int i = 0; i < idx; i++)
-                    trimmed[i] = path[i];
-                return trimmed;
+                y += cornerY > y ? 1 : -1;
+                path[idx] = new Vector2Int(x, y);
+                idx++;
+            }
+
+            // Second leg: corner to end
+            while (x != endX)
+            {
+                x += endX > x ? 1 : -1;
+                path[idx] = new Vector2Int(x, y);
+                idx++;
+            }
+
+            while (y != endY)
+            {
+                y += endY > y ? 1 : -1;
+                path[idx] = new Vector2Int(x, y);
+                idx++;
             }
 
             return path;
@@ -746,7 +849,7 @@ namespace UdonSharp.CE.Procgen
         /// <summary>
         /// Finds the longest path through the dungeon (critical path).
         /// </summary>
-        private static int[] FindCriticalPath(DungeonRoom[] rooms, int[,] connections)
+        private static int[] FindCriticalPath(DungeonRoom[] rooms, int[] connections)
         {
             int count = rooms.Length;
             if (count < 2)
@@ -755,13 +858,13 @@ namespace UdonSharp.CE.Procgen
             }
 
             // BFS to find farthest room from room 0 (start candidate)
-            int startRoom = FindFarthestRoom(0, rooms, connections);
+            int startRoom = FindFarthestRoom(0, count, connections);
 
             // BFS to find farthest room from start (boss candidate)
-            int bossRoom = FindFarthestRoom(startRoom, rooms, connections);
+            int bossRoom = FindFarthestRoom(startRoom, count, connections);
 
             // Find path from start to boss using BFS
-            int[] path = FindPath(startRoom, bossRoom, rooms.Length, connections);
+            int[] path = FindPath(startRoom, bossRoom, count, connections);
 
             // Mark rooms on critical path
             for (int i = 0; i < path.Length; i++)
@@ -773,11 +876,37 @@ namespace UdonSharp.CE.Procgen
         }
 
         /// <summary>
+        /// Flags the corridors that join consecutive rooms of the critical path.
+        /// </summary>
+        private static void MarkCriticalCorridors(DungeonCorridor[] corridors, int[] criticalPath)
+        {
+            // Nothing else ever wrote DungeonCorridor.IsOnCriticalPath, so it read false for every corridor
+            // of every layout and a caller styling the main route by it styled nothing.
+            for (int c = 0; c < corridors.Length; c++)
+            {
+                DungeonCorridor corridor = corridors[c];
+                int fromRoom = corridor.FromRoom;
+                int toRoom = corridor.ToRoom;
+
+                for (int step = 0; step < criticalPath.Length - 1; step++)
+                {
+                    int a = criticalPath[step];
+                    int b = criticalPath[step + 1];
+
+                    if ((a == fromRoom && b == toRoom) || (a == toRoom && b == fromRoom))
+                    {
+                        corridor.IsOnCriticalPath = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
         /// Finds the farthest room from a starting room using BFS.
         /// </summary>
-        private static int FindFarthestRoom(int start, DungeonRoom[] rooms, int[,] connections)
+        private static int FindFarthestRoom(int start, int count, int[] connections)
         {
-            int count = rooms.Length;
             int[] distances = new int[count];
             bool[] visited = new bool[count];
 
@@ -788,7 +917,8 @@ namespace UdonSharp.CE.Procgen
             int[] queue = new int[count];
             int queueStart = 0, queueEnd = 0;
 
-            queue[queueEnd++] = start;
+            queue[queueEnd] = start;
+            queueEnd++;
             visited[start] = true;
             distances[start] = 0;
 
@@ -797,15 +927,17 @@ namespace UdonSharp.CE.Procgen
 
             while (queueStart < queueEnd)
             {
-                int current = queue[queueStart++];
+                int current = queue[queueStart];
+                queueStart++;
 
                 for (int next = 0; next < count; next++)
                 {
-                    if (connections[current, next] > 0 && !visited[next])
+                    if (connections[current * count + next] > 0 && !visited[next])
                     {
                         visited[next] = true;
                         distances[next] = distances[current] + 1;
-                        queue[queueEnd++] = next;
+                        queue[queueEnd] = next;
+                        queueEnd++;
 
                         if (distances[next] > maxDist)
                         {
@@ -822,7 +954,7 @@ namespace UdonSharp.CE.Procgen
         /// <summary>
         /// Finds path between two rooms using BFS.
         /// </summary>
-        private static int[] FindPath(int from, int to, int roomCount, int[,] connections)
+        private static int[] FindPath(int from, int to, int roomCount, int[] connections)
         {
             if (from == to)
                 return new int[] { from };
@@ -836,23 +968,26 @@ namespace UdonSharp.CE.Procgen
             int[] queue = new int[roomCount];
             int queueStart = 0, queueEnd = 0;
 
-            queue[queueEnd++] = from;
+            queue[queueEnd] = from;
+            queueEnd++;
             visited[from] = true;
 
             while (queueStart < queueEnd)
             {
-                int current = queue[queueStart++];
+                int current = queue[queueStart];
+                queueStart++;
 
                 if (current == to)
                     break;
 
                 for (int next = 0; next < roomCount; next++)
                 {
-                    if (connections[current, next] > 0 && !visited[next])
+                    if (connections[current * roomCount + next] > 0 && !visited[next])
                     {
                         visited[next] = true;
                         parent[next] = current;
-                        queue[queueEnd++] = next;
+                        queue[queueEnd] = next;
+                        queueEnd++;
                     }
                 }
             }
@@ -942,12 +1077,19 @@ namespace UdonSharp.CE.Procgen
         #region Utilities
 
         /// <summary>
-        /// Calculates bounds encompassing all rooms and corridors.
+        /// Calculates the area encompassing all rooms and corridors and stores it on the layout.
         /// </summary>
-        private static RectInt CalculateBounds(DungeonRoom[] rooms, DungeonCorridor[] corridors)
+        private static void AssignBounds(DungeonLayout layout)
         {
+            DungeonRoom[] rooms = layout.Rooms;
+            DungeonCorridor[] corridors = layout.Corridors;
+
             if (rooms.Length == 0)
-                return new RectInt(0, 0, 0, 0);
+            {
+                layout.BoundsMin = new Vector2Int(0, 0);
+                layout.BoundsSize = new Vector2Int(0, 0);
+                return;
+            }
 
             int minX = int.MaxValue, minY = int.MaxValue;
             int maxX = int.MinValue, maxY = int.MinValue;
@@ -955,28 +1097,39 @@ namespace UdonSharp.CE.Procgen
             // Include rooms
             for (int i = 0; i < rooms.Length; i++)
             {
-                var room = rooms[i];
-                if (room.Position.x < minX) minX = room.Position.x;
-                if (room.Position.y < minY) minY = room.Position.y;
-                if (room.Position.x + room.Size.x > maxX) maxX = room.Position.x + room.Size.x;
-                if (room.Position.y + room.Size.y > maxY) maxY = room.Position.y + room.Size.y;
+                DungeonRoom room = rooms[i];
+                int roomX = room.Position.x;
+                int roomY = room.Position.y;
+                int roomMaxX = roomX + room.Size.x;
+                int roomMaxY = roomY + room.Size.y;
+
+                if (roomX < minX) minX = roomX;
+                if (roomY < minY) minY = roomY;
+                if (roomMaxX > maxX) maxX = roomMaxX;
+                if (roomMaxY > maxY) maxY = roomMaxY;
             }
 
             // Include corridors
             for (int i = 0; i < corridors.Length; i++)
             {
-                var corridor = corridors[i];
-                for (int j = 0; j < corridor.Path.Length; j++)
+                DungeonCorridor corridor = corridors[i];
+                Vector2Int[] path = corridor.Path;
+                int corridorWidth = corridor.Width;
+
+                for (int j = 0; j < path.Length; j++)
                 {
-                    var point = corridor.Path[j];
-                    if (point.x < minX) minX = point.x;
-                    if (point.y < minY) minY = point.y;
-                    if (point.x + corridor.Width > maxX) maxX = point.x + corridor.Width;
-                    if (point.y + corridor.Width > maxY) maxY = point.y + corridor.Width;
+                    int pointX = path[j].x;
+                    int pointY = path[j].y;
+
+                    if (pointX < minX) minX = pointX;
+                    if (pointY < minY) minY = pointY;
+                    if (pointX + corridorWidth > maxX) maxX = pointX + corridorWidth;
+                    if (pointY + corridorWidth > maxY) maxY = pointY + corridorWidth;
                 }
             }
 
-            return new RectInt(minX, minY, maxX - minX, maxY - minY);
+            layout.BoundsMin = new Vector2Int(minX, minY);
+            layout.BoundsSize = new Vector2Int(maxX - minX, maxY - minY);
         }
 
         /// <summary>
@@ -984,19 +1137,27 @@ namespace UdonSharp.CE.Procgen
         /// </summary>
         private static DungeonLayout CreateMinimalLayout(DungeonRoom[] rooms)
         {
+            DungeonLayout layout = new DungeonLayout();
+            layout.Rooms = rooms;
+            layout.Corridors = new DungeonCorridor[0];
+
             if (rooms.Length > 0)
             {
+                // A lone room is the whole critical path, so it carries the flag the path's rooms carry
+                // in a full layout.
                 rooms[0].Type = RoomType.Start;
                 rooms[0].ConnectedRooms = new int[0];
+                rooms[0].IsOnCriticalPath = true;
+                layout.CriticalPath = new int[] { 0 };
+            }
+            else
+            {
+                layout.CriticalPath = new int[0];
             }
 
-            return new DungeonLayout
-            {
-                Rooms = rooms,
-                Corridors = new DungeonCorridor[0],
-                CriticalPath = rooms.Length > 0 ? new int[] { 0 } : new int[0],
-                Bounds = rooms.Length > 0 ? rooms[0].Bounds : new RectInt()
-            };
+            AssignBounds(layout);
+
+            return layout;
         }
 
         #endregion

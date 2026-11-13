@@ -84,30 +84,34 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
         /// </summary>
         public float AverageLatency => (LatencyMin + LatencyMax) / 2f;
 
+        // The rolls below draw from a generator the caller owns, never from UnityEngine.Random. That one is
+        // global state shared with the game: in play mode every simulated packet used to pull values out
+        // of the sequence the world's own code was reading, and nothing here could be reproduced.
+
         /// <summary>
         /// Gets a random latency value within the configured range.
         /// </summary>
-        public float GetRandomLatency()
+        public float GetRandomLatency(System.Random random)
         {
-            float baseLatency = UnityEngine.Random.Range(LatencyMin, LatencyMax);
-            float jitterValue = UnityEngine.Random.Range(-Jitter, Jitter);
+            float baseLatency = Mathf.Lerp(LatencyMin, LatencyMax, (float)random.NextDouble());
+            float jitterValue = Mathf.Lerp(-Jitter, Jitter, (float)random.NextDouble());
             return Mathf.Max(0f, baseLatency + jitterValue);
         }
 
         /// <summary>
         /// Determines if a packet should be dropped based on loss percentage.
         /// </summary>
-        public bool ShouldDropPacket()
+        public bool ShouldDropPacket(System.Random random)
         {
-            return UnityEngine.Random.Range(0f, 100f) < PacketLossPercent;
+            return random.NextDouble() * 100.0 < PacketLossPercent;
         }
 
         /// <summary>
         /// Determines if a packet should be duplicated.
         /// </summary>
-        public bool ShouldDuplicatePacket()
+        public bool ShouldDuplicatePacket(System.Random random)
         {
-            return UnityEngine.Random.Range(0f, 100f) < DuplicatePercent;
+            return random.NextDouble() * 100.0 < DuplicatePercent;
         }
     }
 
@@ -311,9 +315,18 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
         public DateTime StartTime;
 
         /// <summary>
-        /// Average latency per packet.
+        /// Packets that were not dropped.
         /// </summary>
-        public double AverageLatencyMs => TotalPackets > 0 ? TotalLatencyMs / TotalPackets : 0;
+        public long DeliveredPackets => TotalPackets - DroppedPackets;
+
+        /// <summary>
+        /// Average latency per delivered packet.
+        /// </summary>
+        /// <remarks>
+        /// A dropped packet has no latency and adds nothing to the total, so dividing by every packet
+        /// sent understated the figure by exactly the loss rate -- 15% low on a 15% loss profile.
+        /// </remarks>
+        public double AverageLatencyMs => DeliveredPackets > 0 ? TotalLatencyMs / DeliveredPackets : 0;
 
         /// <summary>
         /// Actual packet loss rate.

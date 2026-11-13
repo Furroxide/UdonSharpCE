@@ -76,6 +76,9 @@ namespace UdonSharp.Serialization
                 }
             }
             
+            if (UsbSerializationContext.CollectDependencies)
+                serializedData = (object[])serializedData.Clone();
+
             // We need to add the serialized object to the map before we serialize the fields to handle circular references
             UsbSerializationContext.SerializedObjectMap[sourceObject] = serializedData;
             
@@ -108,6 +111,7 @@ namespace UdonSharp.Serialization
 
                 if (fieldVal == null)
                 {
+                    serializedData[fieldInfo.fieldIndex] = null;
                     continue;
                 }
                 

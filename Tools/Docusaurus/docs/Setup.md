@@ -5,36 +5,28 @@ id: setup
 # Setup
 
 **Requirements**
-- [Unity 2019.4.31f1](https://unity3d.com/get-unity/download/archive)
-- [VRCSDK3 + Udon](https://vrchat.com/home/download)
+- Unity 2022.3 (the version the [VRChat Creator Companion](https://vcc.docs.vrchat.com/) installs)
+- The VRChat Worlds SDK, 3.8.1 or newer
 
 **Installation**
 
-You can get UdonSharp by using the [VRChat Creator Companion](https://vcc.docs.vrchat.com/) (also known as the VCC), its [CLI](https://vcc.docs.vrchat.com/vpm/cli/), or a [starter template](https://github.com/vrchat-community/template-udonsharp). 
+UdonSharp CE is distributed through its own VPM listing. It replaces UdonSharp in a project, so a project
+must not have both packages installed.
 
-## Create a new UdonSharp project with the VCC:
+## Add the UdonSharp CE listing to the VCC
 - Install the latest version of the [Creator Companion](https://vrchat.com/home/download).
-- From the main screen, select "New", then "UdonSharp", and choose a directory.
-- Press "Open Project". That's it!
+- Open Settings → Packages → Add Repository.
+- Add `https://vrc.furroxide.dev/vpm/index.json` and confirm.
 
-## Create a new UdonSharp Project with Source Control:
-- Visit the [UdonSharp Project Template repository](https://github.com/vrchat-community/template-udonsharp).
-- Press "Use this template".
-- Clone the project to your computer using your favorite Git client.
-- Open the project directly in Unity, or add it to the VCC for easy access and updating later.
+## Add UdonSharp CE to a world project
+- Add the project to the VCC, migrating it if necessary, and select it from the Projects listing.
+- If the project lists **UdonSharp**, remove it first.
+- Find **UdonSharp CE** in the package list and press "Add".
 
-## Add UdonSharp to an existing Udon Project:
-- Add the project to the VCC, migrating it if necessary.
-- Select the project from the Projects listing screen.
-- In the Repo dropdown above the Package listings, ensure "Curated" is selected.
-![image](/images/repos-official-curated.png)
-- Find UdonSharp in the listed packages and press "Add".
-
-
-## Create or Add UdonSharp with the CLI
+## Add UdonSharp CE with the CLI
 [The CLI](https://vcc.docs.vrchat.com/vpm/cli/) is a tool for advanced users, and the best way to manage VPM projects on non-Windows systems for now.
-- [New Project from Template](https://vcc.docs.vrchat.com/vpm/cli/#new)
-- [Add Package to Project](https://vcc.docs.vrchat.com/vpm/cli/#add-package)
+- Add the listing with `vpm add repo https://vrc.furroxide.dev/vpm/index.json`.
+- Then [add the package](https://vcc.docs.vrchat.com/vpm/cli/#add-package) `com.merlin.udonsharp` to your project.
 
 **Getting started**
 

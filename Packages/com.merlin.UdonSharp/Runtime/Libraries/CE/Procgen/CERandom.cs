@@ -4,16 +4,17 @@ using UnityEngine;
 namespace UdonSharp.CE.Procgen
 {
     /// <summary>
-    /// Deterministic pseudo-random number generator using xorshift128+.
+    /// Deterministic pseudo-random number generator using xoroshiro128+.
     ///
     /// Produces identical sequences across all clients given the same seed,
     /// enabling synchronized procedural generation in multiplayer worlds.
     /// </summary>
     /// <remarks>
-    /// xorshift128+ provides:
-    /// - Determinism: Same seed = same sequence on all clients
-    /// - Speed: Very fast compared to System.Random
-    /// - Quality: Passes BigCrush statistical tests
+    /// xoroshiro128+ (the 55/14/36 parameter set, seeded through splitmix64) provides:
+    /// - Determinism: Same seed = same sequence on all clients, for every int seed including negative ones
+    /// - Speed: A handful of 64-bit shifts and xors per value
+    /// - Quality: Good for gameplay; its lowest bits are the weakest, which is why every helper here except
+    ///   NextBool builds its result from the upper bits. It is not a cryptographic generator.
     /// - Period: 2^128 - 1 (effectively infinite for game purposes)
     /// </remarks>
     /// <example>
@@ -68,8 +69,29 @@ namespace UdonSharp.CE.Procgen
         /// Creates a random generator with a seed from the current time.
         /// Note: This is NOT deterministic across clients.
         /// </summary>
-        public CERandom() : this((int)System.DateTime.Now.Ticks)
+        public CERandom()
         {
+            // Written out rather than chained through ': this(...)'. UdonSharp binds a constructor's body
+            // and nothing else, so a chained initializer never runs under Udon: the seed stayed 0, Reset()
+            // was never reached, and the state stayed all-zero -- the one state this generator cannot leave,
+            // so every draw returned 0 for the life of the instance.
+            _seed = TimeSeed();
+            Reset();
+        }
+
+        /// <summary>
+        /// The low 32 bits of the clock, as the int a C# truncating cast would give.
+        /// </summary>
+        private static int TimeSeed()
+        {
+            // UdonSharp lowers '(int)ticks' to Convert.ToInt32(long), which throws for a value outside int
+            // range instead of truncating -- and the current tick count is always far outside it. Fold the
+            // low word into int range by hand so the conversion that remains can never overflow.
+            long low = System.DateTime.Now.Ticks & 0xFFFFFFFFL;
+            if (low > 0x7FFFFFFFL)
+                low -= 0x100000000L;
+
+            return (int)low;
         }
 
         /// <summary>
@@ -77,8 +99,19 @@ namespace UdonSharp.CE.Procgen
         /// </summary>
         public void Reset()
         {
-            // Initialize state using splitmix64 for good initial distribution
-            ulong z = (ulong)_seed + 0x9E3779B97F4A7C15UL;
+            // Initialize state using splitmix64 for good initial distribution.
+            //
+            // The seed is widened by hand instead of with '(ulong)_seed'. UdonSharp lowers that cast to
+            // Convert.ToUInt64(int), which throws for every negative seed where C# sign-extends, and a
+            // thrown extern halts the behaviour: a world seeded from Networking.GetServerTimeInMilliseconds()
+            // died on whichever half of the clock is negative, on every client the seed was synced to.
+            // Masking the sign bit off keeps the remaining cast in range, and or-ing the upper bits back in
+            // reproduces the sign extension exactly, so each seed still yields the sequence it always did.
+            ulong z = (ulong)(_seed & 0x7FFFFFFF);
+            if (_seed < 0)
+                z |= 0xFFFFFFFF80000000UL;
+
+            z += 0x9E3779B97F4A7C15UL;
             z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9UL;
             z = (z ^ (z >> 27)) * 0x94D049BB133111EBUL;
             _s0 = z ^ (z >> 31);
@@ -129,7 +162,7 @@ namespace UdonSharp.CE.Procgen
         #region Core Generation
 
         /// <summary>
-        /// Generates the next 64-bit random value (xorshift128+ algorithm).
+        /// Generates the next 64-bit random value (xoroshiro128+ algorithm).
         /// </summary>
         private ulong NextULong()
         {
@@ -165,7 +198,8 @@ namespace UdonSharp.CE.Procgen
         }
 
         /// <summary>
-        /// Returns a random 32-bit integer.
+        /// Returns a random non-negative integer with 31 random bits, in [0, int.MaxValue].
+        /// It never returns a negative value.
         /// </summary>
         public int NextInt()
         {
@@ -173,7 +207,7 @@ namespace UdonSharp.CE.Procgen
         }
 
         /// <summary>
-        /// Returns a non-negative random 32-bit integer.
+        /// Returns a random non-negative integer with 30 random bits, in [0, 2^30).
         /// </summary>
         public int NextIntPositive()
         {
@@ -182,6 +216,7 @@ namespace UdonSharp.CE.Procgen
 
         /// <summary>
         /// Returns a random integer in the range [min, maxExclusive).
+        /// Returns <paramref name="min"/> without consuming a draw when the range is empty.
         /// </summary>
         /// <param name="min">Inclusive minimum value.</param>
         /// <param name="maxExclusive">Exclusive maximum value.</param>
@@ -192,11 +227,23 @@ namespace UdonSharp.CE.Procgen
 
             int range = maxExclusive - min;
             
-            // For small ranges, simple modulo works well and is unbiased enough
-            // For ranges that could cause bias, we use rejection sampling
-            // Note: Using int operations since Udon doesn't expose uint/long modulo
-            int r = NextIntPositive();
-            return min + (r % range);
+            // Spans up to 2^30 reduce a 30-bit draw with a plain modulo. There is no rejection step: the
+            // lowest (2^30 mod range) results are favoured by one part in 2^30 / range, which is far below
+            // anything gameplay can observe. It is kept exactly as it was so existing seeds keep producing
+            // the layouts they always have. Int arithmetic throughout: Udon exposes no long or uint modulo.
+            if (range > 0 && range <= 1073741824)
+            {
+                int r = NextIntPositive();
+                return min + (r % range);
+            }
+
+            // Anything wider used to go through the same modulo and could not work. A 30-bit draw never
+            // reaches the top of a span above 2^30, and a span above int.MaxValue wraps 'range' negative --
+            // Range(int.MinValue, int.MaxValue) wrapped it to -1 and returned int.MinValue every time.
+            // A double holds any int span exactly and NextDouble() has 53 random bits, so scale that instead.
+            // The floor is at most span - 1, which keeps the final cast inside int range.
+            double span = (double)maxExclusive - (double)min;
+            return (int)((double)min + System.Math.Floor(NextDouble() * span));
         }
 
         /// <summary>
@@ -204,7 +251,13 @@ namespace UdonSharp.CE.Procgen
         /// </summary>
         public int RangeInclusive(int min, int max)
         {
-            return Range(min, max + 1);
+            if (max < int.MaxValue)
+                return Range(min, max + 1);
+
+            // max + 1 wraps to int.MinValue here, which Range reads as an empty range, so an upper bound of
+            // int.MaxValue always returned min. Scale across the inclusive span directly instead.
+            double span = (double)max - (double)min + 1.0;
+            return (int)((double)min + System.Math.Floor(NextDouble() * span));
         }
 
         #endregion

@@ -26,11 +26,21 @@ namespace UdonSharp.CE.NetPhysics
         public AnimationCurve SteeringCurve;
         public AnimationCurve LateralFrictionCurve;
 
+        // Throttle, brake and boost are forces in newtons and the jump and dodge values are impulses in
+        // newton-seconds: all of them are divided by the Rigidbody's mass, which is how VehiclePreset
+        // derives them (mass * top speed / time to reach it). Throttle, boost and the steering torque
+        // used to be applied as accelerations instead, which ignores mass -- on the 180 kg body these
+        // defaults are sized for, 2000 was meant to be about 11 m/s^2 and was 2000 m/s^2.
         [Header("Forces")]
+        [Tooltip("Peak drive force in newtons.")]
         public float MaxThrottle = 2000f;
+        [Tooltip("Peak braking / reverse force in newtons.")]
         public float MaxBrake = 3000f;
+        [Tooltip("Scales the steering torque: full lock applies ten times this, in newton-metres.")]
         public float MaxSteering = 45f;
+        [Tooltip("Boost force in newtons.")]
         public float MaxBoost = 5000f;
+        [Tooltip("Jump impulse in newton-seconds.")]
         public float JumpImpulse = 500f;
 
         [Header("Dodge/Flip")]
@@ -47,6 +57,7 @@ namespace UdonSharp.CE.NetPhysics
         [Header("Stability")]
         public float StabilityRollTorque = 50f;
         public float StabilityDownForce = 100f;
+        [Tooltip("How far below the underside of the collider the ground may be for the car to count as grounded, in metres.")]
         public float GroundedThreshold = 0.2f;
 
         [Header("Boost")]
@@ -66,7 +77,7 @@ namespace UdonSharp.CE.NetPhysics
         // id never left the master -- was reported as somebody else's car even to its own driver.
         //
         // Authority records who may write a field, not where the local copy of the value came from.
-        // NetPhysicsWorld runs ApplyInput for every vehicle on every client, so boost and the dodge
+        // NetPhysicsWorld runs TickInput for every vehicle on every client, so boost and the dodge
         // window are integrated by all of them; the driver id is written by all of them too, applied
         // from the AssignDriver broadcast (see LatchDriverId) so input routing starts on the frame the
         // assignment is heard instead of stalling until the owner's next serialization arrives. That the
@@ -83,7 +94,7 @@ namespace UdonSharp.CE.NetPhysics
 
         // Only the bits a remote client cannot work out for itself are carried. Grounded used to sit
         // here too and it was pure wire cost: UpdateGroundedState raycasts it at the top of every
-        // ApplyInput, and NetPhysicsWorld runs ApplyInput for every vehicle on every client at the tick
+        // TickInput, and NetPhysicsWorld runs TickInput for every vehicle on every client at the tick
         // rate, so a received grounded bit was overwritten before anything could read it. These two are
         // different -- while a car is airborne nothing local recomputes them, so without them a remote
         // client kept offering a second dodge the driver had already spent.
@@ -103,7 +114,7 @@ namespace UdonSharp.CE.NetPhysics
         private int _pendingDriverId = -1;
         private bool _hasPendingDriverId;
 
-        // Simulated time this ApplyInput call is allowed to integrate. Zero on a replayed frame.
+        // Simulated time this TickInput call is allowed to integrate. Zero for a frame already integrated.
         private int _lastIntegratedFrame;
         private bool _hasIntegratedFrame;
         private float _integrationSeconds;
@@ -112,10 +123,34 @@ namespace UdonSharp.CE.NetPhysics
         private int _groundedWheelCount;
         private Vector3 _groundNormal = Vector3.up;
 
+        // Where the ground ray starts, in local space, and how far it has to travel just to get out of
+        // the vehicle's own collider. See RefreshGroundProbe.
+        private Vector3 _groundProbeCenter;
+        private float _groundProbeHalfHeight;
+        private bool _groundProbeReady;
+
         // Jump/Dodge state
         private bool _hasDoubleJump;
         private bool _jumpHeldLastFrame;
         private bool _dodgeUsed;
+
+        // Set by a jump and held until the car has either left the ground ray's reach or stopped
+        // rising. See UpdateGroundedState.
+        private bool _takingOff;
+        private int _takeOffStep;
+
+        // Speed away from the ground, in m/s, above which a car that has just jumped is still on its
+        // way up rather than back down.
+        private const float TakeOffSpeed = 0.1f;
+
+        // What ApplyForces acts on: the newest tick's input and the share of boost that tick was
+        // allowed to burn. Copied, because the frames handed to TickInput are scratch objects their
+        // owners overwrite.
+        private InputFrame _forceInput;
+        private float _boostThrust;
+
+        // Physics steps this vehicle has been stepped through, counted by ApplyForces.
+        private int _physicsSteps;
 
         public VehiclePreset Preset
         {
@@ -125,6 +160,9 @@ namespace UdonSharp.CE.NetPhysics
                 _preset = value;
                 if (_preset != null)
                     _preset.ApplyTo(this);
+
+                // A preset resizes the collider the ground ray is measured from.
+                RefreshGroundProbe();
             }
         }
 
@@ -160,18 +198,30 @@ namespace UdonSharp.CE.NetPhysics
             if (_recorder == null)
                 _recorder = GetComponent<InputRecorder>();
 
-            // Only the owner seeds the tank. VRChat is allowed to deliver OnDeserialization before
-            // Start, so seeding this unconditionally would overwrite a boost level a late joiner had
-            // already been told about with a full tank it has not earned.
+            // Only the owner seeds the synced state. A late joiner's copy can already hold the owner's
+            // values by now: VRChat writes received values into the program before Start, although it
+            // does not run OnDeserialization until Start has. Seeding them on every client replaces the
+            // boost level and dodge timer that client had already been told about with a full tank and
+            // a fresh window it had not earned, which is what resetting the timer here for everybody
+            // used to do.
             if (Networking.IsOwner(gameObject))
+            {
                 _boostRemaining = MaxBoostSeconds;
+                _jumpTimer = 0f;
+            }
 
-            _hasDoubleJump = false;
-            _jumpTimer = 0f;
-            _dodgeUsed = false;
+            // For the same reason the air state cannot wait for OnDeserialization: a packet that landed
+            // before Start never ran it, and clearing the state here instead left a late joiner's copy
+            // of an airborne car without the double jump its driver still held, so that copy could not
+            // follow the driver's dodge. Where nothing has arrived the flags are clear, so this still
+            // starts the car with neither.
+            ApplyAirStateFlags();
+
             _lastStateSendTime = Time.time;
             if (_preset != null)
                 _preset.ApplyTo(this);
+
+            RefreshGroundProbe();
         }
 
         protected override void FixedUpdate()
@@ -225,6 +275,15 @@ namespace UdonSharp.CE.NetPhysics
             // flag constants for why it is not sent. The driver id is predicted too but needs no line
             // here: nothing derives a second local copy from it, so the field being overwritten by the
             // owner's value is the whole of its reconciliation.
+            ApplyAirStateFlags();
+        }
+
+        /// <summary>
+        /// Derives the local air state from the synced flags. Run from OnDeserialization and from Start,
+        /// since VRChat only runs the former once the latter has.
+        /// </summary>
+        private void ApplyAirStateFlags()
+        {
             _hasDoubleJump = (_airStateFlags & FLAG_DOUBLE_JUMP) != 0;
             _dodgeUsed = (_airStateFlags & FLAG_DODGE_USED) != 0;
         }
@@ -337,6 +396,7 @@ namespace UdonSharp.CE.NetPhysics
             _dodgeUsed = false;
             _isGrounded = false;
             _jumpHeldLastFrame = false;
+            _takingOff = false;
 
             MarkStatePublished(PackAirState());
             RequestSerialization();
@@ -450,9 +510,32 @@ namespace UdonSharp.CE.NetPhysics
         public int OwnerPlayerId => _ownerPlayerId;
 
         /// <summary>
-        /// Applies an input frame to the vehicle. Call during the simulation tick.
+        /// Runs one simulation tick and one physics step's worth of forces. For a caller that steps
+        /// the vehicle itself, exactly once per FixedUpdate; <see cref="NetPhysicsWorld"/> does not use
+        /// it, because its ticks and its physics steps are not one-to-one -- it calls
+        /// <see cref="TickInput"/> per tick and <see cref="ApplyForces"/> per physics step.
         /// </summary>
         public void ApplyInput(InputFrame input)
+        {
+            TickInput(input);
+            ApplyForces();
+        }
+
+        /// <summary>
+        /// The per-tick half of the simulation: grounding, the jump timer, the boost tank, and the
+        /// jump, double-jump and dodge edges. Call once per simulation frame.
+        /// </summary>
+        /// <remarks>
+        /// Thrust, steering, friction and air control are deliberately not here. Simulation ticks run
+        /// at the tick rate against the shared clock; PhysX integrates once per FixedUpdate. The two
+        /// rates differ, so a FixedUpdate sees zero, one, two or three ticks, and a continuous force
+        /// added once per tick was integrated that many times in a single physics step: no drive at all
+        /// on some steps, double or triple on others, 20% too much on average at the default rates,
+        /// and a friction term strong enough to reverse the car's sideways velocity whenever two ticks
+        /// landed together. Everything here is either an event (an impulse is owed once however many
+        /// steps there are) or integrates simulated time itself.
+        /// </remarks>
+        public void TickInput(InputFrame input)
         {
             if (input == null)
                 input = InputFrame.Empty;
@@ -466,32 +549,30 @@ namespace UdonSharp.CE.NetPhysics
             UpdateGroundedState(rb);
             UpdateJumpTimer();
 
+            // Reset jump state when grounded. A car that has just jumped does not count as grounded
+            // while it is still on its way up -- see UpdateGroundedState.
             if (_isGrounded)
-            {
-                ApplyThrottle(rb, input.Throttle / 127f);
-                ApplySteering(rb, input.Steering / 127f);
-                ApplyLateralFriction(rb);
-                ApplyStabilityForces(rb);
-
-                // Reset jump state when grounded
                 ResetJumpState();
-            }
-            else
-            {
-                // Air control when not grounded
-                ApplyAirControl(rb, input);
-            }
 
-            // Boost (works both grounded and airborne)
+            // Boost (works both grounded and airborne). The tank is spent here, per tick; the thrust it
+            // pays for is applied by ApplyForces.
+            _boostThrust = 0f;
             if ((input.Buttons & InputFrame.BUTTON_BOOST) != 0 && input.Boost > 0)
             {
-                ApplyBoost(rb, input.Boost / 255f);
+                if (_boostRemaining > 0f)
+                {
+                    float amount = input.Boost / 255f;
+                    _boostThrust = amount;
+
+                    // Drained on every client, not just the owner: that is what Predicted buys, a meter
+                    // that keeps moving between packets instead of stepping once per serialization.
+                    _boostRemaining = Mathf.Max(0f, _boostRemaining - _integrationSeconds * amount);
+                }
             }
             else if (BoostRegenRate > 0f)
             {
                 // Passive boost regeneration when not boosting, run on every client -- this is what
-                // Predicted declares, and the owner's packet is what keeps the tanks agreeing. Integrates
-                // the simulated step, which is zero on a replayed frame -- see BeginSimulationStep.
+                // Predicted declares, and the owner's packet is what keeps the tanks agreeing.
                 _boostRemaining = Mathf.Min(MaxBoostSeconds, _boostRemaining + BoostRegenRate * _integrationSeconds);
             }
 
@@ -516,24 +597,58 @@ namespace UdonSharp.CE.NetPhysics
             }
 
             _jumpHeldLastFrame = jumpPressed;
+
+            if (_forceInput == null)
+                _forceInput = new InputFrame();
+            _forceInput.CopyFrom(input);
+        }
+
+        /// <summary>
+        /// The per-physics-step half of the simulation: thrust, steering, friction, stability and air
+        /// control, from the input of the most recent <see cref="TickInput"/>. Call exactly once per
+        /// FixedUpdate, after that step's ticks; a FixedUpdate with no tick still needs it, since the
+        /// driver is still holding the throttle.
+        /// </summary>
+        public void ApplyForces()
+        {
+            Rigidbody rb = RigidbodyComponent;
+            if (rb == null)
+                return;
+
+            if (_forceInput != null)
+            {
+                if (_isGrounded)
+                {
+                    ApplyThrottle(rb, _forceInput.Throttle / 127f);
+                    ApplySteering(rb, _forceInput.Steering / 127f);
+                    ApplyLateralFriction(rb);
+                    ApplyStabilityForces(rb);
+                }
+                else
+                {
+                    // Air control when not grounded
+                    ApplyAirControl(rb, _forceInput);
+                }
+
+                if (_boostThrust > 0f)
+                    rb.AddForce(transform.forward * (MaxBoost * _boostThrust), ForceMode.Force);
+            }
+
+            // Counted last: a jump stamps itself with the count as it stood during the tick, and the
+            // count moving on is how UpdateGroundedState knows that jump's impulse has been integrated.
+            _physicsSteps++;
         }
 
         public void SetVisualWheelPositions(Vector3[] positions) { }
 
         /// <summary>
-        /// Works out how much simulated time this <see cref="ApplyInput"/> call may integrate.
+        /// Works out how much simulated time this <see cref="TickInput"/> call may integrate.
         /// </summary>
         /// <remarks>
-        /// RollbackManager corrects this client by restoring an authoritative snapshot and calling
-        /// SimulateSingleTick again for every frame between it and the present, which means ApplyInput
-        /// runs a second time for frames that were already simulated. The boost drain and the
-        /// double-jump timer both integrated Time.fixedDeltaTime once per *call*, so every correction
-        /// burned the tank again and aged the dodge window out from under the driver. Once those two
-        /// became synced fields that local error stopped being cosmetic: the owner then published it as
-        /// the value every other client had to believe.
-        ///
-        /// Integration is therefore driven by the simulated frame number, not by the wall clock. A frame
-        /// that has already been integrated contributes nothing, so a replay is exactly idempotent.
+        /// Integration is driven by the simulated frame number, not by the wall clock or by the number
+        /// of calls: the boost tank and the double-jump timer are synced, so a value spent twice for
+        /// one frame is not a local glitch but something the owner then publishes for every other
+        /// client to believe. A frame that has already been integrated contributes nothing.
         /// </remarks>
         private void BeginSimulationStep()
         {
@@ -550,22 +665,22 @@ namespace UdonSharp.CE.NetPhysics
 
             int steps = frame - _lastIntegratedFrame;
 
-            // A frame older than anything rollback could ever replay is not a replay: it is the world
-            // re-anchoring its counter to the server clock after a hitch or a late join. Re-anchor with
-            // it, or boost and the jump timer freeze until the counter catches up to where it was.
-            int replayWindow = World != null ? Mathf.Max(1, World.HistorySize) : 128;
-            if (steps < -replayWindow)
+            if (steps == 0)
             {
-                _lastIntegratedFrame = frame;
-                _integrationSeconds = tickDelta;
+                // The same frame again. Nothing may be spent or aged twice.
+                _integrationSeconds = 0f;
                 return;
             }
 
-            if (steps <= 0)
+            if (steps < 0)
             {
-                // Replayed frame. Forces still have to be re-applied to reproduce the trajectory, but
-                // nothing may be spent or aged twice.
-                _integrationSeconds = 0f;
+                // The frame counter only ever moves backwards when the world re-anchors it to the server
+                // clock. Re-anchor with it. This used to be taken for a replayed frame unless the jump
+                // was longer than the whole history window, so a correction of anything from twenty
+                // frames to a couple of seconds froze the boost drain and the jump timer until the
+                // counter had climbed back to where it was -- free boost for as long as that took.
+                _lastIntegratedFrame = frame;
+                _integrationSeconds = tickDelta;
                 return;
             }
 
@@ -603,7 +718,7 @@ namespace UdonSharp.CE.NetPhysics
                 forceMagnitude = curve * MaxBrake * throttle;
             }
 
-            rb.AddForce(transform.forward * forceMagnitude, ForceMode.Acceleration);
+            rb.AddForce(transform.forward * forceMagnitude, ForceMode.Force);
         }
 
         private void ApplySteering(Rigidbody rb, float steering)
@@ -621,7 +736,7 @@ namespace UdonSharp.CE.NetPhysics
 
             float maxAngle = curve * MaxSteering;
             float yawTorque = steering * maxAngle * 10f;
-            rb.AddTorque(transform.up * yawTorque, ForceMode.Acceleration);
+            rb.AddTorque(transform.up * yawTorque, ForceMode.Force);
         }
 
         private void ApplyLateralFriction(Rigidbody rb)
@@ -662,20 +777,6 @@ namespace UdonSharp.CE.NetPhysics
             }
         }
 
-        private void ApplyBoost(Rigidbody rb, float amount)
-        {
-            if (_boostRemaining <= 0f || amount <= 0f)
-                return;
-
-            rb.AddForce(transform.forward * (MaxBoost * amount), ForceMode.Acceleration);
-
-            // Drained on every client, not just the owner: that is what Predicted buys, a meter that
-            // keeps moving between packets instead of stepping once per serialization. The force is
-            // re-applied on a replayed frame, the drain is not: _integrationSeconds is zero there. See
-            // BeginSimulationStep.
-            _boostRemaining = Mathf.Max(0f, _boostRemaining - _integrationSeconds * amount);
-        }
-
         private void ApplyJump(Rigidbody rb)
         {
             if (!_isGrounded)
@@ -688,6 +789,8 @@ namespace UdonSharp.CE.NetPhysics
             _jumpTimer = 0f;
             _dodgeUsed = false;
             _isGrounded = false;
+            _takingOff = true;
+            _takeOffStep = _physicsSteps;
         }
 
         private void ApplyDoubleJump(Rigidbody rb)
@@ -766,9 +869,9 @@ namespace UdonSharp.CE.NetPhysics
         {
             if (!_isGrounded && _hasDoubleJump)
             {
-                // Aged on every client, per Predicted, in simulated rather than wall-clock time: a
-                // replayed frame contributes nothing, so a rollback cannot age the dodge window out from
-                // under the driver. See BeginSimulationStep.
+                // Aged on every client, per Predicted, in simulated rather than wall-clock time: a frame
+                // already integrated contributes nothing, so the dodge window cannot be aged twice for
+                // one frame. See BeginSimulationStep.
                 _jumpTimer += _integrationSeconds;
             }
         }
@@ -780,13 +883,54 @@ namespace UdonSharp.CE.NetPhysics
             _dodgeUsed = false;
         }
 
+        /// <summary>
+        /// Measures the ground ray from the vehicle's own collider.
+        /// </summary>
+        /// <remarks>
+        /// The ray used to start a tenth of a metre above the pivot and run for GroundedThreshold, which
+        /// on the shipped car -- a unit box scaled to half a metre tall -- ended inside the car's own
+        /// collider, a quarter of a metre short of the floor it was resting on. The car was never
+        /// grounded, so throttle, steering and the jump were all unreachable. It now starts at the
+        /// collider's centre, where Unity's raycast cannot see the collider it starts inside, and runs
+        /// for the collider's half-height plus GroundedThreshold, so GroundedThreshold means what its
+        /// tooltip says whatever the car's size and scale.
+        /// </remarks>
+        private void RefreshGroundProbe()
+        {
+            BoxCollider box = GetComponent<BoxCollider>();
+            _groundProbeCenter = box != null ? box.center : Vector3.zero;
+            _groundProbeHalfHeight = box != null ? box.size.y * 0.5f : 0.5f;
+            _groundProbeReady = true;
+        }
+
         private void UpdateGroundedState(Rigidbody rb)
         {
+            if (!_groundProbeReady)
+                RefreshGroundProbe();
+
             _groundNormal = Vector3.up;
             _groundedWheelCount = 0;
 
-            Ray ray = new Ray(transform.position + transform.up * 0.1f, -transform.up);
-            if (Physics.Raycast(ray, out RaycastHit hit, GroundedThreshold))
+            // Triggers are ignored: a boost pad or a goal mouth is not something to drive on.
+            float reach = transform.TransformVector(Vector3.up * _groundProbeHalfHeight).magnitude + GroundedThreshold;
+            Ray ray = new Ray(transform.TransformPoint(_groundProbeCenter), -transform.up);
+            bool hitGround = Physics.Raycast(ray, out RaycastHit hit, reach, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+            if (_takingOff)
+            {
+                // A car that has just jumped is still within reach of the ground for several ticks, and
+                // counting it as grounded there cleared the double jump and the dodge the jump had just
+                // granted -- neither could ever be used. It stays airborne until it is out of reach or
+                // has stopped moving away. A queued impulse has not changed the velocity until PhysX
+                // takes its next step, so until then there is nothing to read.
+                if (_physicsSteps == _takeOffStep || (hitGround && Vector3.Dot(rb.velocity, hit.normal) > TakeOffSpeed))
+                {
+                    _isGrounded = false;
+                    return;
+                }
+                _takingOff = false;
+            }
+
+            if (hitGround)
             {
                 _isGrounded = true;
                 _groundNormal = hit.normal;

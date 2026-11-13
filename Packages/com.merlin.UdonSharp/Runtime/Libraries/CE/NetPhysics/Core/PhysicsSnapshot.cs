@@ -4,12 +4,22 @@ using UnityEngine;
 namespace UdonSharp.CE.NetPhysics
 {
     /// <summary>
-    /// Captures and restores entity physics state for prediction and rollback.
+    /// Entity physics state at one simulation frame, for prediction history and for the wire.
     /// Uses parallel arrays for fast iteration and compact serialization.
     /// </summary>
     [PublicAPI]
     public class PhysicsSnapshot
     {
+        /// <summary>
+        /// <see cref="InputLagFrames"/> value for "the authority could not say".
+        /// </summary>
+        public const int UnknownInputLag = -1;
+
+        /// <summary>
+        /// <see cref="EntityIds"/> value for a slot that describes no entity.
+        /// </summary>
+        public const int InvalidEntityId = -1;
+
         // Metadata
         public int Frame;
         public float Timestamp;
@@ -21,6 +31,14 @@ namespace UdonSharp.CE.NetPhysics
         public Quaternion[] Rotations;
         public Vector3[] Velocities;
         public Vector3[] AngularVelocities;
+
+        /// <summary>
+        /// For a state received from the authority: how many frames behind <see cref="Frame"/> the
+        /// newest driver input it had applied to this entity was stamped. Zero for anything that is not
+        /// steered through the authority's input buffer, <see cref="UnknownInputLag"/> when the
+        /// authority has no usable figure. Only the client driving that entity reads it.
+        /// </summary>
+        public int[] InputLagFrames;
 
         public PhysicsSnapshot(int maxEntities = 0)
         {
@@ -41,6 +59,7 @@ namespace UdonSharp.CE.NetPhysics
             Rotations = new Quaternion[maxEntities];
             Velocities = new Vector3[maxEntities];
             AngularVelocities = new Vector3[maxEntities];
+            InputLagFrames = new int[maxEntities];
         }
 
         public void Clear()
@@ -50,6 +69,11 @@ namespace UdonSharp.CE.NetPhysics
             EntityCount = 0;
         }
 
+        /// <summary>
+        /// Records every entity through <see cref="NetPhysicsEntity.SaveState"/>, so what is stored is
+        /// the pose each entity is being corrected toward rather than wherever its Rigidbody happens to
+        /// be partway through easing a correction in.
+        /// </summary>
         public void Capture(NetPhysicsEntity[] entities, int count)
         {
             if (entities == null)
@@ -65,19 +89,21 @@ namespace UdonSharp.CE.NetPhysics
             {
                 var entity = entities[i];
                 if (entity == null)
+                {
+                    // Leaving the slot as it was let a destroyed entity's last id -- or the zero a fresh
+                    // array starts with -- stand in for a live entity that happened to share it.
+                    EntityIds[i] = InvalidEntityId;
+                    InputLagFrames[i] = 0;
                     continue;
+                }
 
-                EntityIds[i] = entity.EntityId;
-                Positions[i] = entity.Position;
-                Rotations[i] = entity.Rotation;
-                Velocities[i] = entity.Velocity;
-                AngularVelocities[i] = entity.AngularVelocity;
+                entity.SaveState(this, i);
             }
         }
 
         /// <summary>
-        /// Writes this snapshot straight onto the entities. Rollback resimulation depends on the
-        /// restored state being bit-for-bit what was recorded, so this path never smooths.
+        /// Writes this snapshot straight onto the entities, dropping any correction they were still
+        /// easing in. This is a teleport; use it for resets, not for state received from the network.
         /// </summary>
         public void Restore(NetPhysicsEntity[] entities, int count)
         {
@@ -85,10 +111,15 @@ namespace UdonSharp.CE.NetPhysics
         }
 
         /// <summary>
-        /// Hands this snapshot to the entities as a network correction instead of writing their
-        /// transforms directly, so an entity can ease the jump in. Use this for anything driven by a
-        /// received packet -- raw pokes here are what made remote objects teleport on every packet.
+        /// Hands this snapshot to the entities as the pose they should have right now, so an entity
+        /// can ease a small jump in instead of teleporting.
         /// </summary>
+        /// <remarks>
+        /// The snapshot has to describe the present. A state received from the authority describes the
+        /// frame it was captured at, which is the network delay in the past: handing that over here
+        /// drags every moving entity back to where it used to be. <see cref="RollbackManager"/> is what
+        /// turns a received state into a present-time correction.
+        /// </remarks>
         public void ApplyAsCorrection(NetPhysicsEntity[] entities, int count)
         {
             Apply(entities, count, true);
@@ -149,10 +180,7 @@ namespace UdonSharp.CE.NetPhysics
                 return;
             }
 
-            entity.Position = Positions[index];
-            entity.Rotation = Rotations[index];
-            entity.Velocity = Velocities[index];
-            entity.AngularVelocity = AngularVelocities[index];
+            entity.RestoreState(this, index);
         }
 
         public void CopyFrom(PhysicsSnapshot other)
@@ -173,7 +201,38 @@ namespace UdonSharp.CE.NetPhysics
                 Rotations[i] = other.Rotations[i];
                 Velocities[i] = other.Velocities[i];
                 AngularVelocities[i] = other.AngularVelocities[i];
+                InputLagFrames[i] = other.InputLagFrames[i];
             }
+        }
+
+        /// <summary>
+        /// Index of the entry describing <paramref name="entityId"/>, or -1.
+        /// </summary>
+        public int IndexOfEntity(int entityId)
+        {
+            int count = EntityCount;
+            for (int i = 0; i < count; i++)
+            {
+                if (EntityIds[i] == entityId)
+                    return i;
+            }
+
+            return -1;
+        }
+
+        /// <summary>
+        /// Moves one entry by a correction: positions and velocities add, the rotation is applied on top
+        /// of the stored one in world space.
+        /// </summary>
+        public void OffsetEntity(int index, Vector3 positionDelta, Quaternion rotationDelta, Vector3 velocityDelta, Vector3 angularVelocityDelta)
+        {
+            if (index < 0 || index >= EntityCount)
+                return;
+
+            Positions[index] = Positions[index] + positionDelta;
+            Rotations[index] = rotationDelta * Rotations[index];
+            Velocities[index] = Velocities[index] + velocityDelta;
+            AngularVelocities[index] = AngularVelocities[index] + angularVelocityDelta;
         }
 
         public float CalculateDivergence(PhysicsSnapshot other)
@@ -217,7 +276,7 @@ namespace UdonSharp.CE.NetPhysics
             for (int i = 0; i < countA; i++)
             {
                 int id = EntityIds[i];
-                int j = FindIndexById(other, id);
+                int j = other.IndexOfEntity(id);
                 if (j < 0)
                     continue;
 
@@ -264,17 +323,6 @@ namespace UdonSharp.CE.NetPhysics
                     return i;
             }
 
-            return -1;
-        }
-
-        private static int FindIndexById(PhysicsSnapshot snapshot, int entityId)
-        {
-            int count = snapshot.EntityCount;
-            for (int i = 0; i < count; i++)
-            {
-                if (snapshot.EntityIds[i] == entityId)
-                    return i;
-            }
             return -1;
         }
     }

@@ -107,6 +107,7 @@ namespace UdonSharp.Serialization
             
             while ((bool)moveNextMethod.Invoke(enumerator, null))
             {
+                current = currentProperty.GetValue(enumerator);
                 object key = keyField.GetValue(current);
                 object value = valueField.GetValue(current);
                 

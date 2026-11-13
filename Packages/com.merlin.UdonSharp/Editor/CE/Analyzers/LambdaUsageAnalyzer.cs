@@ -9,7 +9,8 @@ using UdonSharp.Compiler.Symbols;
 namespace UdonSharp.CE.Editor.Analyzers
 {
     /// <summary>
-    /// Reports unsupported lambda or anonymous method usage that survives CE optimizers.
+    /// Reports a lambda or anonymous method that is still standing after CE's ForEach inlining and its
+    /// Action-to-CECallback rewrite. Udon has no delegates, so nothing else can run it.
     /// </summary>
     internal class LambdaUsageAnalyzer : ICompileTimeAnalyzer
     {
@@ -49,14 +50,23 @@ namespace UdonSharp.CE.Editor.Analyzers
 
                 foreach (var lambda in lambdas)
                 {
+                    // The message lists exactly what CE lowers. It used to also promise "immediate invocation",
+                    // which no pass ever lowered, so authors rewrote code into a shape that still failed here.
                     diagnostics.Add(AnalyzerDiagnostic.Error(
                         lambda.GetLocation(),
-                        "Lambda/anonymous methods are not supported by Udon at runtime unless they are " +
-                        "inlined by CE (immediate invocation) or used in supported ForEach helpers. " +
-                        "Rewrite as an explicit loop or extract a method and use CECallback.",
+                        "Lambdas and anonymous methods do not exist in Udon, and CE did not lower this one. CE " +
+                        "lowers two shapes only. (1) A lambda or method group that is the only argument of a " +
+                        "statement-level List<T>.ForEach or CEList<T>.ForEach/ForEachWithIndex/ForEachUntil call " +
+                        "is inlined into a loop -- unless its body returns from inside a loop of its own, uses a " +
+                        "label, declares a name an enclosing local already has, or (ForEachUntil) is more than a " +
+                        "single return. (2) A parameterless System.Action lambda or anonymous method whose body " +
+                        "is one call to a parameterless method of this behaviour becomes a CECallback -- unless " +
+                        "its file, or a file it shares an Action member with, uses an Action in a way a " +
+                        "CECallback cannot follow (?.Invoke(), +=, a null check, a conversion).",
                         AnalyzerId,
                         AnalyzerId,
-                        "Use a block with an explicit loop, or replace with a method + CECallback."
+                        "Write the loop out explicitly, or move the body into a public parameterless method and " +
+                        "pass that method as a CECallback."
                     ));
                 }
             }

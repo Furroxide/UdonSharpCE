@@ -70,9 +70,9 @@ namespace UdonSharp.CE.Async
         /// <summary>
         /// Schedules the state machine to await the given awaiter.
         ///
-        /// Note: only the Assembly-CSharp compilation reaches this. CE's transform has already removed
-        /// every await from the Udon compilation, so continuing the state machine straight away here
-        /// cannot affect world behaviour.
+        /// Note: only the Assembly-CSharp compilation reaches this. CE's transform lowers every
+        /// 'async UdonTask' method in the Udon compilation or fails the compile, so no builder call is
+        /// left there, and continuing the state machine straight away here cannot affect world behaviour.
         /// </summary>
         public void AwaitOnCompleted<TAwaiter, TStateMachine>(
             ref TAwaiter awaiter, ref TStateMachine stateMachine)

@@ -32,9 +32,16 @@ namespace UdonSharp.CE.Net
         Others = 2,
 
         /// <summary>
-        /// Execute locally only (no network transmission).
-        /// Equivalent to calling the method directly.
+        /// On an [Rpc] attribute: calls to the method are left as plain local calls, and nothing is sent.
         /// </summary>
+        /// <remarks>
+        /// That is a statement about the call sites, not about the method. The method is still marked
+        /// [NetworkCallable] like every other [Rpc], so it remains a network event that an explicit
+        /// SendCustomNetworkEvent or <see cref="CENet"/> send can reach; Self does not make it local-only.
+        ///
+        /// Passed to a <see cref="CENet"/> send it means something else again: NetworkEventTarget.Self,
+        /// which does go through VRChat's network event path and delivers to the sending client.
+        /// </remarks>
         Self = 3
     }
 }

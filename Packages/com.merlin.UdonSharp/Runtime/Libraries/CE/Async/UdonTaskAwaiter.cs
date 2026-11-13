@@ -11,9 +11,10 @@ namespace UdonSharp.CE.Async
     /// The OnCompleted method is written to work both before and after UdonSharp's
     /// Action → CECallback transformation (avoids ?. operator on the continuation).
     /// 
-    /// The actual continuation mechanism in a world is CE's async transform, which replaces every await
-    /// with a SendCustomEventDelayedSeconds/Frames call before Roslyn sees it, so this awaiter is only
-    /// ever exercised by the Assembly-CSharp compilation of the same source.
+    /// The actual continuation mechanism in a world is CE's async transform, which replaces every await of
+    /// a UdonTask before Roslyn sees it -- with a SendCustomEventDelayedSeconds/Frames call, or a call into
+    /// another generated state machine -- or fails the compile, so this awaiter is only ever exercised by
+    /// the Assembly-CSharp compilation of the same source.
     /// </summary>
     /// <remarks>
     /// This struct is marked with [CEPreserveAction] to prevent the Action → CECallback

@@ -21,9 +21,9 @@ overview](https://vrc.furroxide.dev/ce-overview)
   manual-sync behaviours, saturated serialization rates, and ownership mistakes.
 - **Declared sync authority** — `[Sync(Authority.Owner)]` vs `[Sync(Authority.Predicted)]` states at
   the field who may write it, so predict-and-reconcile code is no longer reported as a bug.
-- **Networked physics** — a rollback-based framework with input streaming and snapshots.
+- **Networked physics** — a prediction and state-correction framework with input streaming and snapshots.
 - **Performance tooling** — an ECS-lite world, pooling, grids, LOD and batching, plus compiler
-  optimizers.
+  code generators.
 
 ## Modules
 
@@ -32,14 +32,14 @@ overview](https://vrc.furroxide.dev/ce-overview)
 | CE.Core | Implemented | Callback helpers and compiler-facing attributes |
 | CE.Data | Implemented | `CEList`, `CEDictionary`, data bridges, JSON helpers |
 | CE.DevTools | Implemented | Runtime logger, debug console, profiler |
-| CE.Perf | Implemented | ECS-lite world, pooling, grids, LOD, batching |
+| CE.Perf | Implemented | ECS-lite world, grids, LOD; pooling and batching helpers are delegate-based (editor/plain C# only) |
 | CE.Procgen | Implemented | Deterministic RNG, noise, dungeon and WFC tools |
 | CE.GraphBridge | Implemented | Attributes and generators for graph nodes |
-| Editor Tools | Implemented | Analyzers, optimizers, inspector, menu tools |
+| Editor Tools | Implemented | Analyzers, code generators, inspector, menu tools |
 | CE.NetPhysics | Implemented (beta) | Networked physics framework |
 | CE.Net | Partial | Sync/RPC annotations, analysis helpers, rate limiting |
 | CE.Persistence | Partial | Player data models, validation, size estimation |
-| CE.Async | **Partial** | `UdonTask`; `Delay`/`Yield` awaits work — **result-awaiting is not wired** |
+| CE.Async | **Partial** | `UdonTask`; `Delay`/`Yield` and same-class child awaits work — **result-awaiting is not wired** |
 
 Status is tracked in [`UDONSHARP_CE_FEATURES.md`](UDONSHARP_CE_FEATURES.md). Please read the status
 column before depending on a module — `Partial` means exactly what it says.

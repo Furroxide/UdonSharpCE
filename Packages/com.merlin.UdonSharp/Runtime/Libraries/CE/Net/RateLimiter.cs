@@ -9,6 +9,16 @@ namespace UdonSharp.CE.Net
     /// Use this to pace hand-written network sends, serialization requests, or any hot local call.
     /// </summary>
     /// <remarks>
+    /// The limit is a minimum interval, not a count. A limiter built with a rate of N lets a call through
+    /// and then treats every call for the next 1/N seconds as over the limit -- refused when DropOnLimit
+    /// is true, let through with a logged warning when it is false. It does not allow "any N calls
+    /// within a second": <c>new RateLimiter(5f)</c> counts the second of two calls made 50 ms apart as
+    /// over the limit even when nothing else was called that second, so a burst is thinned to one call
+    /// per interval rather than passed through up to a budget. Time is read from <c>Time.time</c>, which
+    /// advances once per frame, so two calls in the same frame are never both within the limit, and the
+    /// rate actually achieved is at most one call per frame and a little under N whenever the interval
+    /// does not land on a frame boundary.
+    ///
     /// Do not stack one of these on an [Rpc] method: VRChat already enforces that method's declared rate
     /// through [NetworkCallable], and a second limiter in front of it only makes the effective rate
     /// harder to reason about.
@@ -17,7 +27,7 @@ namespace UdonSharp.CE.Net
     /// <code>
     /// public class ChatSystem : UdonSharpBehaviour
     /// {
-    ///     // Rate limiter: max 2 messages per second
+    ///     // Rate limiter: at most one message every half second (a rate of 2 per second)
     ///     private RateLimiter _chatLimiter;
     ///
     ///     void Start()
@@ -55,7 +65,8 @@ namespace UdonSharp.CE.Net
         private string _name;
 
         /// <summary>
-        /// Gets or sets the rate limit in calls per second.
+        /// Gets or sets the rate in calls per second, enforced as a minimum interval of 1 / value seconds
+        /// between calls rather than as a count per second. 0 means unlimited.
         /// </summary>
         public float RateLimit
         {
@@ -86,7 +97,10 @@ namespace UdonSharp.CE.Net
         /// <summary>
         /// Creates a new rate limiter.
         /// </summary>
-        /// <param name="rateLimit">Maximum calls per second (0 = unlimited).</param>
+        /// <param name="rateLimit">
+        /// Rate in calls per second (0 = unlimited). Enforced as a minimum interval of 1 / rateLimit
+        /// seconds between calls, so it is a spacing, not a budget of that many calls in any one second.
+        /// </param>
         /// <param name="dropOnLimit">Whether to drop rate-limited calls (true) or just warn (false).</param>
         /// <param name="name">Optional name for logging purposes.</param>
         public RateLimiter(float rateLimit = 0f, bool dropOnLimit = true, string name = null)
@@ -160,8 +174,8 @@ namespace UdonSharp.CE.Net
             if (rpcAttribute == null || rpcAttribute.RateLimit <= 0f)
                 return null;
 
-            // DropOnRateLimit is gone: VRChat drops and offers no queue, so true is the only behaviour
-            // this could ever have produced.
+            // DropOnRateLimit is gone from the attribute, so there is no drop-or-warn choice left to read
+            // from it. Dropping is what this always built when the attribute left the option alone.
             return new RateLimiter(rpcAttribute.RateLimit, true, methodName);
         }
     }

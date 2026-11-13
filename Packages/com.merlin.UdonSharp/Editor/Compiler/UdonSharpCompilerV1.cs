@@ -47,12 +47,20 @@ namespace UdonSharp.Compiler
         public bool ConcurrentBuild { get; set; } = true;
         
         /// <summary>
-        /// Enable the assembly-level optimizer that runs after emit. Enabled by default.
+        /// Reserved for the assembly-level optimizer (<c>UdonSharp.Compiler.Optimization.AssemblyOptimizer</c>).
+        /// Nothing reads this yet: the optimizer has no call site, so the setting has no effect either way.
+        ///
+        /// It used to be documented as "enabled by default" and defaulted to <c>true</c>, which was wrong
+        /// twice over -- it claimed an optimization that never ran, and it meant that adding the two-line
+        /// hook would have switched the passes on for every project at once. Those passes are not sound
+        /// (see the type comment on <c>AssemblyOptimizer</c>), so the default is off and must stay off
+        /// until they are.
         /// </summary>
-        public bool EnableAssemblyOptimization { get; set; } = true;
+        public bool EnableAssemblyOptimization { get; set; } = false;
 
         /// <summary>
-        /// Optional set of pass names to disable when the optimizer runs.
+        /// Optional set of pass names to disable if the assembly-level optimizer is ever run. Unused today,
+        /// for the same reason as <see cref="EnableAssemblyOptimization"/>.
         /// </summary>
         public HashSet<string> DisabledOptimizationPasses { get; set; } = new HashSet<string>();
     }
@@ -266,9 +274,6 @@ namespace UdonSharp.Compiler
                         isStrongBoxed = UdonSharpUtils.IsStrongBoxedType(fieldSymbol.Type.UdonType.SystemType),
                     });
                 }
-                
-                if (fieldInfos.Count == 0)
-                    continue;
                 
                 if (TypeSymbol.TryGetSystemType(referencedUserType.RoslynSymbol, out Type userType))
                 {
@@ -1395,7 +1400,7 @@ namespace UdonSharp.Compiler
                 if (index >= treeEnd)
                     break;
 
-                if (IsCodePosition(root, index))
+                if (IsCodePosition(root, index, token))
                     return true;
             }
 
@@ -1403,9 +1408,10 @@ namespace UdonSharp.Compiler
         }
 
         /// <summary>
-        /// Classifies one source offset as code or as prose the generator was right to ignore.
+        /// Classifies one source offset as a real use of <paramref name="trigger"/>, or as text the
+        /// generator was right to ignore.
         /// </summary>
-        private static bool IsCodePosition(SyntaxNode root, int position)
+        private static bool IsCodePosition(SyntaxNode root, int position, string trigger)
         {
             SyntaxToken token = root.FindToken(position);
 
@@ -1413,6 +1419,32 @@ namespace UdonSharp.Compiler
             // own span does not cover is a comment, a disabled preprocessor region or whitespace.
             if (!token.Span.Contains(position))
                 return false;
+
+            // A trigger spelled with a leading '[' names an attribute, so the bracket it matched has to be
+            // one that opens an attribute list. "Not a comment and not a string" is not the same thing:
+            // 'counts[RpcKind.Chat]++' and 'new int[PlayerDataSlots]' are code and contain "[Rpc" and
+            // "[PlayerData", so a project that declared no [Rpc] and no [PlayerData] at all -- where the
+            // generator correctly transformed nothing -- failed its compile with USCE0001 over an array
+            // index.
+            //
+            // And the attribute that bracket opens has to be the one the trigger names, whole: "[X" stands
+            // for [X] or [XAttribute], never for an attribute whose name merely starts with X. A project's
+            // own [RpcLogger], [PlayerDataCache] or [SyncOnJoinHelper] is a different attribute, and with no
+            // real use of the generator's attribute anywhere the generator correctly emits nothing -- which
+            // the prefix match reported as USCE0001. An attribute that shares a prefix and IS one of the
+            // generator's spellings, like [RpcOwnerOnly], is declared as a trigger of its own.
+            if (!string.IsNullOrEmpty(trigger) && trigger[0] == '[')
+            {
+                if (!token.IsKind(SyntaxKind.OpenBracketToken) || !(token.Parent is AttributeListSyntax attributeList))
+                    return false;
+
+                string attributeName = trigger.Substring(1);
+
+                return attributeList.Attributes.Count > 0 &&
+                       attributeList.Attributes[0].Name is IdentifierNameSyntax written &&
+                       (written.Identifier.ValueText == attributeName ||
+                        written.Identifier.ValueText == attributeName + "Attribute");
+            }
 
             switch (token.Kind())
             {

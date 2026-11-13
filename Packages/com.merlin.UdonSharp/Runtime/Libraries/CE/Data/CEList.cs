@@ -10,6 +10,17 @@ namespace UdonSharp.CE.Data
     /// A type-safe list wrapper with DataList bridge methods.
     /// Provides seamless conversion between UdonSharp List{T} and VRChat DataList.
     /// </summary>
+    /// <remarks>
+    /// Udon cannot represent a delegate, so which lambda-taking members work from an
+    /// UdonSharpBehaviour depends on whether CE rewrites the call at compile time. ForEach,
+    /// ForEachWithIndex and ForEachUntil are rewritten -- the lambda is inlined into a loop. The
+    /// overloads that take a converter (ToDataList(Func), FromDataList(DataList, Func) and
+    /// FromJson(string, Func)) are not, and are for editor and plain C# callers.
+    ///
+    /// An out-of-range index, on the indexer, Insert or RemoveAt, is fatal by design: the error is
+    /// logged and the list then indexes out of bounds on purpose. Under Udon that halts the calling
+    /// behaviour for the rest of the session, so check Count first.
+    /// </remarks>
     public class CEList<T> : IEnumerable
     #if COMPILER_UDONSHARP
         where T : IComparable
@@ -434,7 +445,8 @@ namespace UdonSharp.CE.Data
 
         /// <summary>
         /// Deserializes a JSON string to a CEList.
-        /// Note: JSON numbers become doubles, so use FromJson with converter for precise types.
+        /// JSON numbers arrive as doubles and are converted to T: truncated toward zero and clamped to
+        /// T's range for the integer types. An element that is not a number at all becomes default(T).
         /// </summary>
         public static CEList<T> FromJson(string json)
         {
@@ -483,13 +495,26 @@ namespace UdonSharp.CE.Data
 
         public IEnumerator GetEnumerator()
         {
-            // Cache and reuse iterator to avoid allocation (safe because Udon is single-threaded)
-            if (_cachedIterator == null)
-                _cachedIterator = new CEListIterator<T>(this);
-            else
-                _cachedIterator.Reset();
+            // Cache and reuse iterator to avoid allocation -- but only while nobody else holds it.
+            // Single-threaded does not mean one enumeration at a time: a nested foreach over the same
+            // list, a loop body that calls something which enumerates it, or a comparison that takes
+            // two enumerators of one list asks for a second iterator while the first is still in use.
+            // Handing the cached one back reset the outer loop's position and left it at the end when
+            // the inner loop finished, so the outer loop stopped after its first element.
+            CEListIterator<T> iterator = _cachedIterator;
 
-            return _cachedIterator;
+            if (iterator == null)
+            {
+                iterator = new CEListIterator<T>(this);
+                _cachedIterator = iterator;
+            }
+            else if (iterator.IsEnumerating)
+            {
+                return new CEListIterator<T>(this);
+            }
+
+            iterator.Begin();
+            return iterator;
         }
 
         #endregion
@@ -517,7 +542,7 @@ namespace UdonSharp.CE.Data
     /// <summary>
     /// Iterator for CEList.
     /// </summary>
-    internal class CEListIterator<T> : IEnumerator
+    internal class CEListIterator<T> : IEnumerator, IDisposable
     #if COMPILER_UDONSHARP
         where T : IComparable
     #endif
@@ -525,12 +550,31 @@ namespace UdonSharp.CE.Data
         private CEList<T> _list;
         private int _index;
         private T _current;
+        private bool _enumerating;
 
         public CEListIterator(CEList<T> list)
         {
             _list = list;
             _index = -1;
             _current = default;
+        }
+
+        /// <summary>
+        /// True from the moment CEList hands this iterator out until the enumeration runs off the end or
+        /// is disposed. CEList only hands its cached iterator out again while this is false.
+        /// </summary>
+        public bool IsEnumerating => _enumerating;
+
+        /// <summary>
+        /// Rewinds the iterator and marks it as handed out. Marking it here rather than on the first
+        /// MoveNext matters when two enumerators are taken from one list before either has moved:
+        /// otherwise both are this same object, and each MoveNext advances the other.
+        /// </summary>
+        internal void Begin()
+        {
+            _index = -1;
+            _current = default;
+            _enumerating = true;
         }
 
         public bool MoveNext()
@@ -544,12 +588,24 @@ namespace UdonSharp.CE.Data
                 _index = index;
                 // Access _items directly to skip bounds check (already validated above)
                 _current = list._items[index];
+                _enumerating = true;
                 return true;
             }
 
             _index = count;
             _current = default;
+            _enumerating = false;
             return false;
+        }
+
+        /// <summary>
+        /// Ends the enumeration. foreach calls this when the loop is left early (break, return), which
+        /// is the one exit MoveNext never sees; without it a single early exit would leave the cached
+        /// iterator marked busy for good and every later enumeration would allocate.
+        /// </summary>
+        public void Dispose()
+        {
+            _enumerating = false;
         }
 
         public void Reset()

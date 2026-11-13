@@ -30,8 +30,8 @@ namespace UdonSharp.CE.Editor.Inspector
 
             public static readonly GUIContent UseCEInspectorLabel = new GUIContent(
                 "Use CE Inspector",
-                "Use the CE-enhanced inspector as the default for UdonSharpBehaviours. " +
-                "Disable to use the standard UdonSharp inspector."
+                "Whether UdonSharpBehaviours are drawn by the CE Inspector. This is UdonSharp's project setting " +
+                "Project Settings > Udon Sharp > Default Behaviour Editor; choose \"CE Inspector\" there."
             );
         }
 
@@ -60,19 +60,31 @@ namespace UdonSharp.CE.Editor.Inspector
 
             using (new EditorGUI.IndentLevelScope())
             {
-                // Use CE Inspector toggle
-                EditorGUI.BeginChangeCheck();
-                bool useCE = EditorGUILayout.Toggle(Styles.UseCEInspectorLabel, CEInspectorBootstrap.UseCEInspector);
-                if (EditorGUI.EndChangeCheck())
+                // Shown, not edited. Which inspector draws U# behaviours is UdonSharp's per-project choice;
+                // the toggle that used to sit here stored a preference nothing read, so turning it off left
+                // the CE Inspector drawing everything.
+                bool useCE = CEInspectorBootstrap.UseCEInspector;
+
+                EditorGUI.BeginDisabledGroup(true);
+                EditorGUILayout.Toggle(Styles.UseCEInspectorLabel, useCE);
+                EditorGUI.EndDisabledGroup();
+
+                EditorGUILayout.HelpBox(
+                    useCE
+                        ? "UdonSharp's Default Behaviour Editor is set to CE Inspector."
+                        : "The CE Inspector is not in use. To use it, set Project Settings > Udon Sharp > " +
+                          "Default Behaviour Editor to \"CE Inspector\". The two options below apply only then.",
+                    MessageType.Info);
+
+                if (GUILayout.Button("Open Udon Sharp Project Settings", GUILayout.Width(250)))
                 {
-                    CEInspectorBootstrap.UseCEInspector = useCE;
-                    CEInspectorBootstrap.RefreshAllInspectors();
+                    CEInspectorBootstrap.OpenDefaultEditorSetting();
                 }
 
                 EditorGUILayout.Space(5);
 
                 // Show optimization info toggle
-                EditorGUI.BeginDisabledGroup(!CEInspectorBootstrap.UseCEInspector);
+                EditorGUI.BeginDisabledGroup(!useCE);
                 {
                     CEInspectorBootstrap.ShowOptimizationInfo = EditorGUILayout.Toggle(
                         Styles.ShowOptimizationInfoLabel,

@@ -50,7 +50,9 @@ namespace UdonSharp.Compiler.Binder
         public override Value EmitValue(EmitContext context)
         {
             // First, emit the constructor to create the object
-            Value createdObject = context.EmitValue(ConstructorInvocation);
+            Value createdObject;
+            using (context.InterruptAssignmentScope())
+                createdObject = context.EmitValue(ConstructorInvocation);
 
             if (MemberSymbols == null || MemberSymbols.Length == 0)
                 return createdObject;

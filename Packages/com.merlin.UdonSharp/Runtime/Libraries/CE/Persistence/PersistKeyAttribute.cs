@@ -15,7 +15,7 @@ namespace UdonSharp.CE.Persistence
     /// public class SaveData
     /// {
     ///     [PersistKey("hp")] public int health = 100;
-    ///     [PersistKey("pos")] public Vector3 position;
+    ///     [PersistKey("score")] public int score;
     ///     [PersistKey("name", Optional = true)] public string nickname;
     ///     [PersistKey("flags", Optional = true, DefaultValue = 0)] public int flags;
     /// }
@@ -32,15 +32,17 @@ namespace UdonSharp.CE.Persistence
         public string Key { get; }
 
         /// <summary>
-        /// Whether this field is optional during deserialization.
-        /// If true, missing data will not cause an error and the field
-        /// will retain its default value or the specified DefaultValue.
+        /// Whether <see cref="DefaultValue"/> applies when the key is missing from the stored data.
+        /// A missing key is never an error, Optional or not: the field keeps whatever value the model's
+        /// initializer gave it, unless Optional is true and DefaultValue is set, in which case it gets
+        /// DefaultValue.
         /// </summary>
         public bool Optional { get; set; } = false;
 
         /// <summary>
-        /// Default value to use if the field is missing during deserialization.
-        /// Only applicable when Optional is true.
+        /// Value assigned when the key is missing from the stored data. Only applies when Optional is true.
+        /// It must be a compile-time constant the field's type can hold; null on a value-type field means the
+        /// type's default.
         /// </summary>
         public object DefaultValue { get; set; } = null;
 

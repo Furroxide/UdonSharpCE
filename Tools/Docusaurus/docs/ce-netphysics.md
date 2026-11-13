@@ -21,7 +21,7 @@ public class NetPhysicsBootstrap : UdonSharpBehaviour
         inputRecorder.World = world;
         vehicle.World = world;
 
-        // Entities register themselves in Start() when World is assigned
+        world.RegisterEntity(vehicle); // Safe even when the vehicle or world Start ran first.
     }
 }
 ```
@@ -37,10 +37,9 @@ public class NetPhysicsBootstrap : UdonSharpBehaviour
 | `InputRecorder` | Samples local input and sends redundant input frames. |
 | `InputBuffer` | Buffers server-side inputs and applies throttling. |
 | `InputPredictor` | Predicts inputs when packets are missing. |
-| `FrameHistory` | Stores snapshots for rollback. |
-| `RollbackManager` | Applies rollback and correction. |
+| `FrameHistory` | Stores predicted snapshots for comparison with received state. |
+| `RollbackManager` | Measures historical prediction error and applies a correction at the present. |
 | `StateCompressor` | Quantizes and packs physics snapshots. |
-| `InterestManager` | Filters what entities each client receives. |
 | `SyncPrioritizer` | Prioritizes which entities to send first. |
 
 ## NetPhysicsWorld Highlights
@@ -50,9 +49,10 @@ public class NetPhysicsBootstrap : UdonSharpBehaviour
 | `TickRate` / `MaxTicksPerFrame` | Simulation pacing. |
 | `AutoSimulate` | Run simulation in `FixedUpdate`. |
 | `RegisterEntity()` / `UnregisterEntity()` | Manage entities manually if needed. |
-| `Simulate()` / `SimulateSingleTick()` | Advance simulation. |
+| `Simulate()` / `SimulateSingleTick()` | Advance logical ticks. Manual callers must also call `ApplyVehicleForces()` once per FixedUpdate. |
 | `BroadcastState()` / `ReceiveState()` | Send and receive snapshot data. |
-| `MaxEntitiesPerStatePacket` | Caps entities per sync packet (1 to 8). |
+| `MaxEntitiesPerStatePacket` | Default cap 32; actual cap also respects the packet and state bandwidth budgets. |
+| `StateBoundsMin` / `StateBoundsMax` | Position encoding box relative to the world transform, shared by all clients. |
 
 ## InputFrame Summary
 
@@ -76,13 +76,13 @@ Button flags in `InputFrame`:
 
 | Setting | Default |
 | --- | --- |
-| `ThrottleAxis` | `Vertical` |
-| `SteeringAxis` | `Horizontal` |
-| `JumpButton` | `Jump` |
-| `BoostButton` | `Fire1` |
-| `HandbrakeButton` | `Fire3` |
-| `DodgeButton` | `Fire2` |
+| `InputEnabled` | `true`; false publishes neutral input while recording continues. |
+| `RedundantFrames` | `10`; increases with send interval to overlap the preceding packet, within history capacity. |
+| `SendRate` / `MinSendRate` | `15` / `5` Hz. |
+| `InputBytesPerSecondBudget` | `4096`, shared across driven vehicles; the minimum send rate and redundancy can exceed this soft budget. |
 | `UseStickForDodge` | `true` |
+
+Input comes from VRChat input callbacks rather than configurable Unity input axes.
 
 ## Input Flow
 
@@ -131,12 +131,15 @@ fields; that is left to review. See [Sync Authority](ce-net#sync-authority) for 
 ## Configuration Tips
 
 - Keep `MaxEntitiesPerStatePacket` aligned with your state budget.
-- Tune `StateCompressor` bounds for your world size to improve precision.
+- Set `NetPhysicsWorld.StateBoundsMin/Max` to cover all motion relative to the world transform. Positions outside the box clamp to its surface. The defaults reach 100 m to either side of the world object horizontally, and from 10 m below it to 150 m above, which is higher than a default `NetVehicle` can climb even with no drag. Each axis is quantized to 65,536 steps across the box, so with the defaults a position arrives within about 1.5 mm per axis; a larger box costs precision in proportion.
+- Leave `_entityId` at -1 and the world numbers entities by their place in the scene hierarchy (sibling index from the scene root down, ancestors first), stepping over any id set by hand, so every client agrees whatever order the entities started in. Set the id by hand for an entity that shares its GameObject with another or is reparented or reordered at runtime.
+- `NetVehicle.MaxThrottle`, `MaxBrake` and `MaxBoost` are forces in newtons and `JumpImpulse`, `DodgeImpulse` and `DoubleJumpImpulse` are impulses in newton-seconds, so a heavier `Rigidbody` accelerates less. `VehiclePreset` derives them from mass, top speed and time to reach it.
+- `NetVehicle.GroundedThreshold` is how far below the underside of the vehicle's `BoxCollider` the ground may be for it to count as grounded. Triggers never count as ground.
 - Use `VehiclePreset` assets to share tuning across vehicles.
 
 ## Current Limitations
 
-- State packets are capped to 8 entities per send to stay within typical sync limits.
+- State packets default to a 32-entity cap and are further limited by payload size and the configured bandwidth budget.
 - `NetVehicle` expects a `Rigidbody` and uses physics forces for movement.
 - Authority flows from the master; clients should treat local state as predicted.
 
@@ -152,9 +155,20 @@ public NetVehicle vehicle;
 
 ### Good
 
+Assign `World` in the inspector, or set it from code and register the entity yourself: an entity registers itself only in its own `Start`, which may already have run.
+
 ```csharp
 void Start()
 {
     vehicle.World = world;
+    world.RegisterEntity(vehicle);
 }
 ```
+
+## Correction Model
+
+Udon cannot advance PhysX manually. `RollbackManager` therefore compares authority state with local history at the corresponding input frame, applies the measured position/rotation/velocity delta to the present and affected history, and blends the remaining offset. Without matching history it extrapolates the received pose by velocity. This is state correction, not a rewind and replay of collision physics.
+
+For the vehicle you drive, the corresponding frame is the one stamped on the newest input the authority had applied, which it sends with the car's state. When the authority has no such figure yet, that car is only corrected once it is further out than `CorrectionSnapDistance`. Position error below `RollbackManager.PositionThreshold` plus about one and a half physics steps of travel is ignored, since two clients sample the same frame number up to a physics step apart.
+
+Logical ticks handle timers, boost drain and input edges. Continuous forces run once per FixedUpdate from the newest input, including physics steps with no new tick. Becoming authority and explicit restores clear pending correction offsets. Priority debt lets lower-priority entities eventually receive a state slot.

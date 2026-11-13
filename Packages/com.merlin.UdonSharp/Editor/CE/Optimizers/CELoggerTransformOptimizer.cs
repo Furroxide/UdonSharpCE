@@ -1,3 +1,4 @@
+using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -7,15 +8,23 @@ namespace UdonSharp.CE.Editor.Optimizers
     /// <summary>
     /// Transforms CELogger static method calls into UnityEngine.Debug calls at compile time.
     /// 
-    /// This optimizer enables UdonSharp scripts to use the CELogger API, which would
-    /// otherwise fail compilation because Udon cannot call static methods on user-defined types.
+    /// UdonSharp can compile a real call into CELogger, but CELogger's static state (MinLevel,
+    /// OutputToUnityLog, registered consoles) lives in a separate copy inside every UdonBehaviour that
+    /// uses it, so filtering and console routing configured in one behaviour never reach another. Writing
+    /// each call as the Debug call it amounts to gives every behaviour the same, predictable output
+    /// without carrying CELogger's static initializer into its program.
     /// 
     /// Transformations:
     /// - CELogger.Info(msg) → Debug.Log("[CE][Info] " + msg)
     /// - CELogger.Info(tag, msg) → Debug.Log("[CE][tag][Info] " + msg)
     /// - CELogger.Warning(msg) → Debug.LogWarning("[CE][Warning] " + msg)
     /// - CELogger.Error(msg) → Debug.LogError("[CE][Error] " + msg)
-    /// - etc.
+    /// - CELogger.Log(msg, LogLevel.X) and CELogger.Log(tag, msg, LogLevel.X) → routed by X exactly as the
+    ///   named method for that level is
+    ///
+    /// A call is left as written, as a real call into CELogger, when its level is not a compile-time
+    /// constant (the Debug method cannot be chosen) or when it names its arguments (the concatenation
+    /// would evaluate them in parameter order rather than the order they were written).
     /// </summary>
     internal class CELoggerTransformOptimizer : ICompileTimeOptimizer
     {
@@ -27,7 +36,7 @@ namespace UdonSharp.CE.Editor.Optimizers
 
         public SyntaxTree Optimize(SyntaxTree tree, OptimizationContext context)
         {
-            var rewriter = new CELoggerRewriter(context);
+            var rewriter = new CELoggerRewriter(context, context.GetSemanticModel(tree));
             var newRoot = rewriter.Visit(tree.GetRoot());
 
             if (rewriter.ChangesMade)
@@ -41,17 +50,23 @@ namespace UdonSharp.CE.Editor.Optimizers
         private class CELoggerRewriter : CSharpSyntaxRewriter
         {
             private readonly OptimizationContext _context;
+            private readonly SemanticModel _semanticModel;
             public bool ChangesMade { get; private set; }
 
-            public CELoggerRewriter(OptimizationContext context)
+            public CELoggerRewriter(OptimizationContext context, SemanticModel semanticModel)
             {
                 _context = context;
+                _semanticModel = semanticModel;
             }
 
             public override SyntaxNode VisitInvocationExpression(InvocationExpressionSyntax node)
             {
                 // First visit children
                 var visited = (InvocationExpressionSyntax)base.VisitInvocationExpression(node);
+
+                var method = _semanticModel?.GetSymbolInfo(node).Symbol as IMethodSymbol;
+                if (method?.ContainingType.ToDisplayString() != "UdonSharp.CE.DevTools.CELogger")
+                    return visited;
 
                 // Check if this is a CELogger call
                 if (visited.Expression is MemberAccessExpressionSyntax memberAccess)
@@ -63,7 +78,7 @@ namespace UdonSharp.CE.Editor.Optimizers
                     if (typeName == "CELogger" || 
                         typeName == "UdonSharp.CE.DevTools.CELogger")
                     {
-                        var transformed = TransformCELoggerCall(visited, methodName);
+                        var transformed = TransformCELoggerCall(node, methodName);
                         if (transformed != null)
                         {
                             var originalText = node.ToString();
@@ -77,7 +92,12 @@ namespace UdonSharp.CE.Editor.Optimizers
                                 optimizedText);
 
                             ChangesMade = true;
-                            return transformed.WithTriviaFrom(node);
+                            var replacement = transformed.WithTriviaFrom(node);
+                            int droppedLines = node.ToFullString().Count(c => c == '\n') - replacement.ToFullString().Count(c => c == '\n');
+                            if (droppedLines > 0)
+                                replacement = replacement.WithTrailingTrivia(replacement.GetTrailingTrivia().AddRange(
+                                    Enumerable.Repeat(SyntaxFactory.EndOfLine("\n"), droppedLines)));
+                            return replacement;
                         }
                     }
                 }
@@ -101,6 +121,8 @@ namespace UdonSharp.CE.Editor.Optimizers
                 string methodName)
             {
                 var args = node.ArgumentList.Arguments;
+                // Leaving a named call standing preserves its written argument evaluation order.
+                if (args.Any(argument => argument.NameColon != null)) return null;
 
                 // Determine the Debug method and log level
                 string debugMethod;
@@ -144,55 +166,17 @@ namespace UdonSharp.CE.Editor.Optimizers
                 InvocationExpressionSyntax node,
                 SeparatedSyntaxList<ArgumentSyntax> args)
             {
-                // Log has two overloads:
-                // Log(string message, LogLevel level = LogLevel.Info)
-                // Log(string tag, string message, LogLevel level)
-                
-                if (args.Count < 1)
-                    return null;
-
-                // For simplicity, transform to Debug.Log with the message
-                // This loses the level filtering, but at least the code compiles
-                
-                ExpressionSyntax messageExpr;
-                string prefix;
-
-                if (args.Count >= 3)
+                if (args.Count < 1 || args.Count > 3) return null;
+                string level = "Info";
+                int messageArguments = args.Count == 3 ? 2 : 1;
+                if (args.Count > 1)
                 {
-                    // Log(tag, message, level) format
-                    var tagExpr = args[0].Expression;
-                    messageExpr = args[1].Expression;
-                    prefix = "[CE][\" + ";
-                    
-                    // Build: "[CE][" + tag + "] " + message
-                    var prefixExpr = CreateStringConcat(
-                        CreateStringConcat(
-                            SyntaxFactory.LiteralExpression(
-                                SyntaxKind.StringLiteralExpression,
-                                SyntaxFactory.Literal("[CE][")),
-                            tagExpr),
-                        CreateStringConcat(
-                            SyntaxFactory.LiteralExpression(
-                                SyntaxKind.StringLiteralExpression,
-                                SyntaxFactory.Literal("] ")),
-                            messageExpr));
-                    
-                    return CreateDebugLogCall("Log", prefixExpr);
+                    var constant = _semanticModel.GetConstantValue(node.ArgumentList.Arguments[args.Count - 1].Expression);
+                    if (!constant.HasValue || !(constant.Value is int value) || value < 0 || value > 4) return null;
+                    level = new[] { "Trace", "Debug", "Info", "Warning", "Error" }[value];
                 }
-                else
-                {
-                    // Log(message, level?) format
-                    messageExpr = args[0].Expression;
-                    prefix = "[CE] ";
-                    
-                    var prefixedMessage = CreateStringConcat(
-                        SyntaxFactory.LiteralExpression(
-                            SyntaxKind.StringLiteralExpression,
-                            SyntaxFactory.Literal(prefix)),
-                        messageExpr);
-                    
-                    return CreateDebugLogCall("Log", prefixedMessage);
-                }
+                string debug = level == "Warning" ? "LogWarning" : level == "Error" ? "LogError" : "Log";
+                return CreateDebugCall(debug, level, SyntaxFactory.SeparatedList(args.Take(messageArguments)));
             }
 
             private InvocationExpressionSyntax CreateDebugCall(
@@ -209,7 +193,7 @@ namespace UdonSharp.CE.Editor.Optimizers
                 {
                     // Single argument: method(message)
                     // Transform to: Debug.Log("[CE][Level] " + message)
-                    messageExpr = args[0].Expression;
+                    messageExpr = AsOperand(args[0].Expression);
                     string prefix = $"[CE][{levelTag}] ";
                     
                     var prefixedMessage = CreateStringConcat(
@@ -224,8 +208,8 @@ namespace UdonSharp.CE.Editor.Optimizers
                 {
                     // Two arguments: method(tag, message)
                     // Transform to: Debug.Log("[CE][tag][Level] " + message)
-                    var tagExpr = args[0].Expression;
-                    messageExpr = args[1].Expression;
+                    var tagExpr = AsOperand(args[0].Expression);
+                    messageExpr = AsOperand(args[1].Expression);
 
                     // Build: "[CE][" + tag + "][Level] " + message
                     var prefixExpr = CreateStringConcat(
@@ -244,6 +228,34 @@ namespace UdonSharp.CE.Editor.Optimizers
                 }
 
                 return null;
+            }
+
+            /// <summary>
+            /// The concatenation is assembled as a tree, so it binds as intended whatever the operand is.
+            /// Its text does not. Printed bare, <c>Info(count + 1 + " left")</c> reads -- and re-parses -- as
+            /// <c>"[CE][Info] " + count + 1 + " left"</c>, which concatenates from the left and logs "41 left"
+            /// for a count of 4; <c>a ?? b</c> turns into <c>("[CE][Info] " + a) ?? b</c>, which is never
+            /// null and so never falls back to b; and a conditional's condition swallows the prefix. The
+            /// text is what the optimization report shows and what U# publishes as the module's source, so
+            /// an operand that is not already a primary expression is parenthesized to keep the two saying
+            /// the same thing.
+            /// </summary>
+            private static ExpressionSyntax AsOperand(ExpressionSyntax expression)
+            {
+                switch (expression)
+                {
+                    case LiteralExpressionSyntax _:
+                    case IdentifierNameSyntax _:
+                    case MemberAccessExpressionSyntax _:
+                    case InvocationExpressionSyntax _:
+                    case ElementAccessExpressionSyntax _:
+                    case ParenthesizedExpressionSyntax _:
+                    case InterpolatedStringExpressionSyntax _:
+                        return expression;
+                    default:
+                        return SyntaxFactory.ParenthesizedExpression(expression.WithoutTrivia())
+                            .WithTriviaFrom(expression);
+                }
             }
 
             private BinaryExpressionSyntax CreateStringConcat(
@@ -279,43 +291,3 @@ namespace UdonSharp.CE.Editor.Optimizers
         }
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -59,14 +59,12 @@ namespace CEShowcase.Station3_Leaderboard
             
             _lastInteractTime = Time.time;
             
-            // Add score
+            // Ask the board to score for us. Calling AddScore here only ever worked for the board's
+            // owner: on everyone else it changed their own screen, published nothing, and was wiped by
+            // the owner's next publish.
             if (_leaderboardManager != null)
             {
-                VRCPlayerApi localPlayer = Networking.LocalPlayer;
-                if (localPlayer != null && localPlayer.IsValid())
-                {
-                    _leaderboardManager.AddScore(localPlayer.playerId, _scoreAmount);
-                }
+                _leaderboardManager.RequestScore(_scoreAmount);
             }
             
             // Visual/audio feedback

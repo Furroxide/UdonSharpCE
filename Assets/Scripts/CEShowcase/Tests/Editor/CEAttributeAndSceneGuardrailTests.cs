@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using NUnit.Framework;
+using UnityEditor.SceneManagement;
 using UdonSharp;
 using UdonSharp.CE.Net;
 using UnityEngine;
@@ -17,6 +18,35 @@ namespace CEShowcase.Tests.Editor
     /// </summary>
     public class CEAttributeAndSceneGuardrailTests
     {
+        private Scene _showcaseScene;
+        private Scene _priorActiveScene;
+        private int _priorSceneCount;
+
+        [OneTimeSetUp]
+        public void LoadShowcaseForHeadlessSceneChecks()
+        {
+            if (!Application.isBatchMode || UnityEngine.Object.FindObjectsOfType<UdonSharpBehaviour>(true).Length > 0)
+                return;
+            const string path = "Assets/Scenes/CEShowcase.unity/CEShowcase.unity";
+            if (SceneManager.GetSceneByPath(path).isLoaded) return;
+            _priorSceneCount = SceneManager.sceneCount;
+            _priorActiveScene = SceneManager.GetActiveScene();
+            // Additive loading preserves the test runner's scene and any unsaved contents.
+            _showcaseScene = EditorSceneManager.OpenScene(path, OpenSceneMode.Additive);
+        }
+
+        [OneTimeTearDown]
+        public void RestoreHeadlessSceneSetup()
+        {
+            if (!_showcaseScene.IsValid()) return;
+            if (_priorSceneCount == 0)
+                EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Additive);
+            EditorSceneManager.CloseScene(_showcaseScene, true);
+            if (_priorActiveScene.IsValid() && _priorActiveScene.isLoaded)
+                SceneManager.SetActiveScene(_priorActiveScene);
+            _showcaseScene = default;
+        }
+
         // -----------------------------------------------------------------------------------------
         // Attribute construction — the path every CE feature depends on
         // -----------------------------------------------------------------------------------------

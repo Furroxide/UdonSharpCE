@@ -12,9 +12,16 @@ namespace UdonSharp.CE.DevTools
     /// Features:
     /// - Automatic frame time capture
     /// - Rolling average calculations
-    /// - Manual section timing with BeginSection/EndSection
+    /// - Manual section timing with BeginSection/EndSection (sections may nest)
     /// - Optional UI overlay display
     /// </summary>
+    /// <remarks>
+    /// Section timing reads Time.realtimeSinceStartup, a float of seconds since the client or editor
+    /// process started, so its resolution degrades with uptime: about 0.24 ms after 34 minutes, 0.5 ms
+    /// after 68 minutes, 1 ms after 2.3 hours and 2 ms after 4.5 hours. A single call to a section
+    /// shorter than that reads as 0 or as one whole step. The per-section totals and averages stay
+    /// meaningful over many calls; an individual sub-millisecond sample in a long-running session does not.
+    /// </remarks>
     /// <example>
     /// <code>
     /// // Get profiler reference
@@ -74,8 +81,14 @@ namespace UdonSharp.CE.DevTools
         private float[] _sectionTotals;
         private int[] _sectionCounts;
         private int _sectionCount;
-        private float _currentSectionStart;
-        private int _currentSectionIndex;
+        private bool _sectionLimitWarned;
+
+        // Open sections, innermost last. One slot per BeginSection that has not met its EndSection yet;
+        // a slot holds -1 when that BeginSection could not be given a section to time.
+        private const int MaxOpenSections = 16;
+        private int[] _openSectionIndices;
+        private float[] _openSectionStarts;
+        private int _openSectionCount;
 
         // UI update
         private float _lastDisplayUpdate;
@@ -86,17 +99,8 @@ namespace UdonSharp.CE.DevTools
 
         private void Start()
         {
-            // Initialize frame timing
-            _frameTimes = new float[sampleCount];
-            _sampleIndex = 0;
-            _samplesFilled = 0;
-
-            // Initialize section timing
-            _sectionNames = new string[maxSections];
-            _sectionTotals = new float[maxSections];
-            _sectionCounts = new int[maxSections];
-            _sectionCount = 0;
-            _currentSectionIndex = -1;
+            // Initialize frame and section timing
+            EnsureInitialized();
 
             _lastDisplayUpdate = 0f;
 
@@ -158,6 +162,8 @@ namespace UdonSharp.CE.DevTools
         /// </summary>
         public void Reset()
         {
+            EnsureInitialized();
+
             System.Array.Clear(_frameTimes, 0, _frameTimes.Length);
             _sampleIndex = 0;
             _samplesFilled = 0;
@@ -273,30 +279,60 @@ namespace UdonSharp.CE.DevTools
         /// Begins timing a named section.
         /// Call EndSection() when the section completes.
         /// </summary>
+        /// <remarks>
+        /// Sections nest: each EndSection closes the most recent BeginSection still open, and an outer
+        /// section's time includes the sections timed inside it.
+        /// </remarks>
         public void BeginSection(string sectionName)
         {
-            if (string.IsNullOrEmpty(sectionName)) return;
+            EnsureInitialized();
 
-            // Find or create section
-            int index = FindOrCreateSection(sectionName);
-            if (index < 0) return;
+            // A section that cannot be timed -- no name, or the section table is full -- still takes a
+            // slot. Returning without one left the caller's matching EndSection to close whichever
+            // section was open around it instead.
+            int index = -1;
+            if (!string.IsNullOrEmpty(sectionName))
+            {
+                index = FindOrCreateSection(sectionName);
+            }
 
-            _currentSectionIndex = index;
-            _currentSectionStart = Time.realtimeSinceStartup;
+            if (_openSectionCount >= MaxOpenSections)
+            {
+                // Full, which means EndSection is not being reached for some BeginSection: an early
+                // return between the two is enough. Drop the oldest open section rather than refuse the
+                // new one, or one leaked BeginSection per frame would fill this for good and silently
+                // stop every later section from being timed.
+                for (int i = 1; i < _openSectionCount; i++)
+                {
+                    _openSectionIndices[i - 1] = _openSectionIndices[i];
+                    _openSectionStarts[i - 1] = _openSectionStarts[i];
+                }
+
+                _openSectionCount--;
+            }
+
+            _openSectionIndices[_openSectionCount] = index;
+            _openSectionStarts[_openSectionCount] = Time.realtimeSinceStartup;
+            _openSectionCount++;
         }
 
         /// <summary>
-        /// Ends the current section timing.
+        /// Ends the most recently begun section that is still open.
         /// </summary>
         public void EndSection()
         {
-            if (_currentSectionIndex < 0) return;
+            if (_openSectionCount <= 0) return;
 
-            float elapsed = Time.realtimeSinceStartup - _currentSectionStart;
-            _sectionTotals[_currentSectionIndex] += elapsed;
-            _sectionCounts[_currentSectionIndex]++;
+            // One start time and one index used to be all there was, so a BeginSection inside an open
+            // section overwrote it: the inner section got its time and the outer one recorded nothing.
+            _openSectionCount--;
 
-            _currentSectionIndex = -1;
+            int index = _openSectionIndices[_openSectionCount];
+            if (index < 0) return;
+
+            float elapsed = Time.realtimeSinceStartup - _openSectionStarts[_openSectionCount];
+            _sectionTotals[index] += elapsed;
+            _sectionCounts[index]++;
         }
 
         /// <summary>
@@ -325,6 +361,8 @@ namespace UdonSharp.CE.DevTools
         /// </summary>
         public string[] GetSectionNames()
         {
+            EnsureInitialized();
+
             string[] result = new string[_sectionCount];
             System.Array.Copy(_sectionNames, result, _sectionCount);
             return result;
@@ -335,6 +373,8 @@ namespace UdonSharp.CE.DevTools
         /// </summary>
         public void ResetSections()
         {
+            EnsureInitialized();
+
             System.Array.Clear(_sectionTotals, 0, _sectionTotals.Length);
             System.Array.Clear(_sectionCounts, 0, _sectionCounts.Length);
         }
@@ -383,6 +423,43 @@ namespace UdonSharp.CE.DevTools
 
         #region Private Helpers
 
+        /// <summary>
+        /// Allocates the timing buffers on first use.
+        ///
+        /// Udon runs a public method on a behaviour whose Start has not happened yet -- another
+        /// behaviour's earlier Start, or a profiler object that begins inactive, which is the usual state
+        /// for a debug HUD. When only Start allocated these, the first BeginSection from such a caller
+        /// indexed a null array, and an Udon exception halts the behaviour for the rest of the session.
+        /// </summary>
+        private void EnsureInitialized()
+        {
+            if (_frameTimes != null) return;
+
+            // The sample index is taken modulo this length, so a zero or negative count typed into the
+            // inspector would be a division by zero in the first Update.
+            int frameCapacity = sampleCount;
+            if (frameCapacity < 1) frameCapacity = 1;
+
+            // Zero is a legitimate way to switch section timing off; a negative size is not an array.
+            int sectionCapacity = maxSections;
+            if (sectionCapacity < 0) sectionCapacity = 0;
+
+            _sampleIndex = 0;
+            _samplesFilled = 0;
+
+            _sectionNames = new string[sectionCapacity];
+            _sectionTotals = new float[sectionCapacity];
+            _sectionCounts = new int[sectionCapacity];
+            _sectionCount = 0;
+
+            _openSectionIndices = new int[MaxOpenSections];
+            _openSectionStarts = new float[MaxOpenSections];
+            _openSectionCount = 0;
+
+            // Last, because this is the array the guard above tests.
+            _frameTimes = new float[frameCapacity];
+        }
+
         private int FindSection(string name)
         {
             for (int i = 0; i < _sectionCount; i++)
@@ -400,9 +477,18 @@ namespace UdonSharp.CE.DevTools
             int index = FindSection(name);
             if (index >= 0) return index;
 
-            if (_sectionCount >= maxSections)
+            // Measured against the allocated table rather than maxSections: the two differ when the
+            // inspector value was clamped, and it is the table that gets indexed below.
+            if (_sectionCount >= _sectionNames.Length)
             {
-                CELogger.Warning("Profiler", $"Maximum sections ({maxSections}) reached, cannot add '{name}'");
+                // Once. This is reached on every BeginSection for a name that did not fit, which is every
+                // frame for a section timed in Update.
+                if (!_sectionLimitWarned)
+                {
+                    _sectionLimitWarned = true;
+                    CELogger.Warning("Profiler", $"Maximum sections ({_sectionNames.Length}) reached, cannot add '{name}'");
+                }
+
                 return -1;
             }
 

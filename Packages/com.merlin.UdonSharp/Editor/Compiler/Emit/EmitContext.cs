@@ -55,6 +55,9 @@ namespace UdonSharp.Compiler.Emit
         private readonly Dictionary<TypeSymbol, StaticInitializerInfo> _staticInitializerInfo =
             new Dictionary<TypeSymbol, StaticInitializerInfo>();
 
+        private readonly HashSet<TypeSymbol> _emittingStaticInitializers = new HashSet<TypeSymbol>();
+        private readonly HashSet<MethodSymbol> _staticInitializerMethods = new HashSet<MethodSymbol>();
+
         private sealed class StaticInitializerInfo
         {
             public Value InitFlag;
@@ -211,6 +214,8 @@ namespace UdonSharp.Compiler.Emit
                 setToEmit.UnionWith(methodSymbol.DirectDependencies.OfType<MethodSymbol>());
             }
 
+            setToEmit.UnionWith(_staticInitializerMethods);
+            _staticInitializerMethods.Clear();
             while (setToEmit.Count > 0)
             {
                 HashSet<MethodSymbol> newEmitSet = new HashSet<MethodSymbol>();
@@ -278,6 +283,8 @@ namespace UdonSharp.Compiler.Emit
                     newEmitSet.UnionWith(methodSymbol.DirectDependencies.OfType<MethodSymbol>());
                 }
 
+                newEmitSet.UnionWith(_staticInitializerMethods);
+                _staticInitializerMethods.Clear();
                 setToEmit = newEmitSet;
             }
 
@@ -434,6 +441,8 @@ namespace UdonSharp.Compiler.Emit
             if (typeSymbol == null || typeSymbol.IsExtern || typeSymbol.IsUdonSharpBehaviour)
                 return;
 
+            if (_emittingStaticInitializers.Contains(typeSymbol))
+                return;
             StaticInitializerInfo initializerInfo = GetStaticInitializerInfo(typeSymbol);
             if (initializerInfo.Entries.Length == 0)
                 return;
@@ -445,21 +454,38 @@ namespace UdonSharp.Compiler.Emit
                 initializerInfo.InitFlag.DefaultValue = false;
             }
 
-            JumpLabel initLabel = Module.CreateLabel();
-            JumpLabel exitLabel = Module.CreateLabel();
-
-            Module.AddJumpIfFalse(initLabel, initializerInfo.InitFlag);
-            Module.AddJump(exitLabel);
-            Module.LabelJump(initLabel);
-
-            Module.AddCopy(GetConstantValue(GetTypeSymbol(SpecialType.System_Boolean), true), initializerInfo.InitFlag);
-
-            foreach (StaticInitializerEntry entry in initializerInfo.Entries)
+            _emittingStaticInitializers.Add(typeSymbol);
+            try
             {
-                EmitValueAssignment(GetUserValue(entry.Field), entry.Initializer);
-            }
+                foreach (FieldSymbol field in typeSymbol.GetMembers<FieldSymbol>(this))
+                    if (field.IsStatic && !field.DirectDependencies.IsDefaultOrEmpty)
+                        _staticInitializerMethods.UnionWith(field.DirectDependencies.OfType<MethodSymbol>());
+                foreach (PropertySymbol property in typeSymbol.GetMembers<PropertySymbol>(this))
+                    if (!property.DirectDependencies.IsDefaultOrEmpty)
+                        _staticInitializerMethods.UnionWith(property.DirectDependencies.OfType<MethodSymbol>());
+                JumpLabel initLabel = Module.CreateLabel();
+                JumpLabel exitLabel = Module.CreateLabel();
 
-            Module.LabelJump(exitLabel);
+                // The initializer branch may be skipped on later accesses. Preserve live COW values
+                // before entering it so their copies are initialized on both paths.
+                TopTable.DirtyAllValues();
+                Module.AddJumpIfFalse(initLabel, initializerInfo.InitFlag);
+                Module.AddJump(exitLabel);
+                Module.LabelJump(initLabel);
+
+                Module.AddCopy(GetConstantValue(GetTypeSymbol(SpecialType.System_Boolean), true), initializerInfo.InitFlag);
+
+                foreach (StaticInitializerEntry entry in initializerInfo.Entries)
+                {
+                    EmitValueAssignment(GetUserValue(entry.Field), entry.Initializer);
+                }
+
+                Module.LabelJump(exitLabel);
+            }
+            finally
+            {
+                _emittingStaticInitializers.Remove(typeSymbol);
+            }
         }
 
         private StaticInitializerInfo GetStaticInitializerInfo(TypeSymbol typeSymbol)
@@ -765,6 +791,13 @@ namespace UdonSharp.Compiler.Emit
             if (conversion.IsUserDefined && conversion.MethodSymbol != null)
             {
                 MethodSymbol conversionMethod = (MethodSymbol)GetSymbol(conversion.MethodSymbol);
+
+                // The binder never binds or schedules a conversion operator declared in user code, so calling one
+                // jumped to a method that was never emitted and the compile failed later in assembly with
+                // "Cannot jump to uninitialized jump label" instead of at the conversion.
+                if (!conversionMethod.IsExtern)
+                    throw new NotSupportedException($"User-defined conversion operators are not supported by UdonSharp ('{conversionMethod}'); convert with a static method instead.", CurrentNode?.GetLocation());
+
                 ExecuteBoundInvocation(conversionMethod);
                 return;
             }

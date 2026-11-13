@@ -26,89 +26,193 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
 
             foreach (var type in context.BehaviourTypes)
             {
-                foreach (var methodName in UpdateMethods)
+                string sourceFile = FindSourceFile(type);
+                if (string.IsNullOrEmpty(sourceFile) || !System.IO.File.Exists(sourceFile))
+                    continue;
+
+                string sourceCode;
+
+                try
                 {
-                    var method = type.GetMethod(methodName,
-                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    sourceCode = System.IO.File.ReadAllText(sourceFile);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[CE.Validator] Failed to read {sourceFile}: {ex.Message}");
+                    continue;
+                }
 
-                    if (method == null)
-                        continue;
+                issues.AddRange(ValidateSource(type, sourceCode, context.GetSourceFile(type)));
+            }
 
-                    // Check if method body contains GetComponent calls
-                    var getComponentCalls = FindGetComponentCalls(type, method);
+            return issues;
+        }
 
-                    foreach (var call in getComponentCalls)
+        /// <summary>
+        /// Checks one behaviour type against its source text.
+        ///
+        /// Split out from <see cref="Validate"/> so the text analysis can be driven without a script asset
+        /// on disk: the mistakes this validator has made were all in how it reads source, and that is the
+        /// part worth being able to put a fixture in front of.
+        /// </summary>
+        public List<ValidationIssue> ValidateSource(Type type, string sourceCode, string filePath = null)
+        {
+            var issues = new List<ValidationIssue>();
+
+            if (type == null || string.IsNullOrEmpty(sourceCode))
+                return issues;
+
+            foreach (var methodName in UpdateMethods)
+            {
+                MethodInfo method = FindParameterlessMethod(type, methodName);
+
+                if (method == null)
+                    continue;
+
+                // Check if method body contains GetComponent calls
+                var getComponentCalls = FindGetComponentCalls(type, method, sourceCode);
+
+                foreach (var call in getComponentCalls)
+                {
+                    issues.Add(new ValidationIssue
                     {
-                        issues.Add(new ValidationIssue
-                        {
-                            Severity = ValidationSeverity.Warning,
-                            ValidatorName = Name,
-                            Message = $"GetComponent<{call.GenericTypeName}>() called in {methodName}",
-                            Details = "GetComponent is expensive. Cache the result in Start() or Awake() instead of calling it every frame.",
-                            RelatedType = type,
-                            RelatedMethod = method,
-                            FilePath = context.GetSourceFile(type),
-                            LineNumber = call.LineNumber
-                        });
-                    }
+                        Severity = ValidationSeverity.Warning,
+                        ValidatorName = Name,
+                        Message = $"GetComponent<{call.GenericTypeName}>() called in {methodName}",
+                        Details = "GetComponent is expensive. Cache the result in Start() or Awake() instead of calling it every frame.",
+                        RelatedType = type,
+                        RelatedMethod = method,
+                        FilePath = filePath,
+                        LineNumber = call.LineNumber
+                    });
                 }
             }
 
             return issues;
         }
 
-        private List<GetComponentCallInfo> FindGetComponentCalls(Type type, MethodInfo method)
+        /// <summary>
+        /// The parameterless method of that name, which is the one Unity calls.
+        ///
+        /// Not <c>Type.GetMethod(name, flags)</c>: that throws AmbiguousMatchException as soon as the type
+        /// also declares an overload -- 'void Update()' next to 'void Update(float deltaTime)' -- and the
+        /// throw escaped this validator, so one such behaviour in the scene replaced every result it had
+        /// with a single "Validator crashed".
+        /// </summary>
+        private static MethodInfo FindParameterlessMethod(Type type, string methodName)
+        {
+            foreach (MethodInfo candidate in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+            {
+                if (candidate.Name == methodName && candidate.GetParameters().Length == 0)
+                    return candidate;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Finds where a method's body starts and how long it is, given the position just past its
+        /// parameter list. False when what follows is not a body this can read.
+        ///
+        /// An expression-bodied method has to be recognised as one. The scan used to look for the next
+        /// '{' wherever it was, so for 'void Update() =&gt; Tick();' it walked on into the following method
+        /// and reported that method's GetComponent call -- typically the cached lookup in Start, which is
+        /// the fix this validator recommends -- as a call made in Update.
+        /// </summary>
+        internal static bool TryFindMethodBody(string sourceCode, int afterSignature, out int bodyStart, out int bodyLength)
+        {
+            bodyStart = -1;
+            bodyLength = 0;
+
+            int position = SkipWhitespaceAndComments(sourceCode, afterSignature);
+
+            if (position >= sourceCode.Length)
+                return false;
+
+            if (sourceCode[position] == '=' && position + 1 < sourceCode.Length && sourceCode[position + 1] == '>')
+            {
+                int end = sourceCode.IndexOf(';', position);
+                if (end < 0)
+                    return false;
+
+                bodyStart = position;
+                bodyLength = end - position + 1;
+                return true;
+            }
+
+            if (sourceCode[position] != '{')
+                return false;
+
+            int braceCount = 0;
+
+            for (int i = position; i < sourceCode.Length; i++)
+            {
+                if (sourceCode[i] == '{')
+                {
+                    braceCount++;
+                }
+                else if (sourceCode[i] == '}')
+                {
+                    braceCount--;
+
+                    if (braceCount == 0)
+                    {
+                        bodyStart = position;
+                        bodyLength = i - position + 1;
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static int SkipWhitespaceAndComments(string sourceCode, int position)
+        {
+            while (position < sourceCode.Length)
+            {
+                if (char.IsWhiteSpace(sourceCode[position]))
+                {
+                    position++;
+                    continue;
+                }
+
+                if (string.CompareOrdinal(sourceCode, position, "//", 0, 2) == 0)
+                {
+                    int lineEnd = sourceCode.IndexOf('\n', position);
+                    position = lineEnd < 0 ? sourceCode.Length : lineEnd + 1;
+                    continue;
+                }
+
+                if (string.CompareOrdinal(sourceCode, position, "/*", 0, 2) == 0)
+                {
+                    int commentEnd = sourceCode.IndexOf("*/", position + 2, StringComparison.Ordinal);
+                    position = commentEnd < 0 ? sourceCode.Length : commentEnd + 2;
+                    continue;
+                }
+
+                break;
+            }
+
+            return position;
+        }
+
+        private List<GetComponentCallInfo> FindGetComponentCalls(Type type, MethodInfo method, string sourceCode)
         {
             var calls = new List<GetComponentCallInfo>();
 
             try
             {
-                // Try to find the source file and parse it
-                string sourceFile = FindSourceFile(type);
-                if (string.IsNullOrEmpty(sourceFile) || !System.IO.File.Exists(sourceFile))
-                    return calls;
-
-                string sourceCode = System.IO.File.ReadAllText(sourceFile);
-
                 // Find the method body
                 string methodPattern = $@"(void|public|private|protected)\s+{method.Name}\s*\(\s*\)";
                 var methodMatch = Regex.Match(sourceCode, methodPattern);
                 if (!methodMatch.Success)
                     return calls;
 
-                // Find GetComponent calls within a reasonable range after the method signature
-                int methodStart = methodMatch.Index;
-                int searchEnd = Math.Min(methodStart + 5000, sourceCode.Length);
-                string methodSection = sourceCode.Substring(methodStart, searchEnd - methodStart);
-
-                // Find brace-delimited method body
-                int braceCount = 0;
-                int bodyStart = -1;
-                int bodyEnd = -1;
-
-                for (int i = 0; i < methodSection.Length; i++)
-                {
-                    if (methodSection[i] == '{')
-                    {
-                        if (bodyStart < 0)
-                            bodyStart = i;
-                        braceCount++;
-                    }
-                    else if (methodSection[i] == '}')
-                    {
-                        braceCount--;
-                        if (braceCount == 0 && bodyStart >= 0)
-                        {
-                            bodyEnd = i;
-                            break;
-                        }
-                    }
-                }
-
-                if (bodyStart < 0 || bodyEnd < 0)
+                if (!TryFindMethodBody(sourceCode, methodMatch.Index + methodMatch.Length, out int bodyOffset, out int bodyLength))
                     return calls;
 
-                string methodBody = methodSection.Substring(bodyStart, bodyEnd - bodyStart + 1);
+                string methodBody = sourceCode.Substring(bodyOffset, bodyLength);
 
                 // Find GetComponent calls
                 var getComponentPattern = new Regex(@"GetComponent\s*<\s*(\w+)\s*>\s*\(");
@@ -117,7 +221,7 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
                 foreach (Match match in matches)
                 {
                     // Calculate line number
-                    int absolutePosition = methodStart + bodyStart + match.Index;
+                    int absolutePosition = bodyOffset + match.Index;
                     int lineNumber = sourceCode.Substring(0, absolutePosition).Count(c => c == '\n') + 1;
 
                     calls.Add(new GetComponentCallInfo
@@ -133,7 +237,7 @@ namespace UdonSharp.CE.Editor.DevTools.Validation.Validators
 
                 foreach (Match match in matches)
                 {
-                    int absolutePosition = methodStart + bodyStart + match.Index;
+                    int absolutePosition = bodyOffset + match.Index;
                     int lineNumber = sourceCode.Substring(0, absolutePosition).Count(c => c == '\n') + 1;
 
                     calls.Add(new GetComponentCallInfo

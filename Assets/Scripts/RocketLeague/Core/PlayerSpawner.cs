@@ -36,11 +36,17 @@ namespace RocketLeague
 
         private const int MAX_PLAYERS = 16;
 
+        // Whether the local player is standing in the arena. Local, not synced: it gates what this
+        // client's own input may do to the car it drives. See SetLocalPlayerInArena.
+        private bool _localPlayerInArena;
+
         private void Start()
         {
             // Only the owner may seed the slot table. Running this on every client wrote lobby defaults
-            // over synced state VRChat may already have delivered -- OnDeserialization is allowed to land
-            // before Start -- which showed up as a joining player losing their team and their vehicle.
+            // over synced state VRChat may already have delivered -- the values can land before Start,
+            // and the OnDeserialization that would have re-applied them is dropped for a behaviour that
+            // has not started -- which showed up as a joining player losing their team and their vehicle.
+            // The apply pass below is what picks such a delivery up.
             if (EnsureOwnership())
             {
                 for (int i = 0; i < MAX_PLAYERS; i++)
@@ -153,19 +159,7 @@ namespace RocketLeague
             int slot = AllocateSlot(player.playerId);
             if (slot >= 0)
             {
-                if (AutoAssignTeams)
-                {
-                    // Balance teams
-                    _playerTeams[slot] = _bluePlayerCount <= _orangePlayerCount ? 0 : 1;
-                    if (_playerTeams[slot] == 0)
-                        _bluePlayerCount++;
-                    else
-                        _orangePlayerCount++;
-                }
-                else
-                {
-                    _playerTeams[slot] = 0; // Default to blue
-                }
+                AssignTeamToSlot(slot);
 
                 // Assign vehicle from pool
                 int vehicleIndex = FindAvailableVehicle();
@@ -205,9 +199,73 @@ namespace RocketLeague
                 // Free the slot before releasing the vehicle: visibility is derived from the slot table,
                 // so a release that ran first would still find the vehicle "assigned" and leave it visible.
                 ReleaseVehicle(vehicleIndex);
+                HandVehicleToWaitingPlayer(vehicleIndex);
 
                 RequestSerialization();
             }
+        }
+
+        /// <summary>
+        /// Puts the slot's player on a team and counts them, returning the team.
+        ///
+        /// The count has to move on both branches. With AutoAssignTeams off the player was put on blue
+        /// without being counted, so the spawn lookup that follows asked for blue spawn point "count - 1".
+        /// </summary>
+        private int AssignTeamToSlot(int slot)
+        {
+            // Balance teams, or default everyone to blue
+            int team = AutoAssignTeams && _bluePlayerCount > _orangePlayerCount ? 1 : 0;
+
+            _playerTeams[slot] = team;
+            if (team == 0)
+                _bluePlayerCount++;
+            else
+                _orangePlayerCount++;
+
+            return team;
+        }
+
+        /// <summary>
+        /// Gives a vehicle that has just come free to a player who joined while the pool was empty.
+        ///
+        /// Vehicles were only ever handed out inside OnPlayerJoined, so a player who arrived to an empty
+        /// pool stayed on foot for good: the car a departing driver left behind sat hidden until somebody
+        /// new joined and was given it instead.
+        /// </summary>
+        private void HandVehicleToWaitingPlayer(int vehicleIndex)
+        {
+            if (VehiclePool == null || vehicleIndex < 0 || vehicleIndex >= VehiclePool.Length)
+                return;
+
+            if (VehiclePool[vehicleIndex] == null)
+                return;
+
+            int slot = FindSlotWaitingForVehicle(0);
+            while (slot >= 0)
+            {
+                VRCPlayerApi waiting = VRCPlayerApi.GetPlayerById(_slotPlayerIds[slot]);
+                if (waiting != null && waiting.IsValid())
+                {
+                    _playerVehicleIndices[slot] = vehicleIndex;
+                    AssignVehicleToPlayer(vehicleIndex, waiting, _playerTeams[slot]);
+                    return;
+                }
+
+                // This slot's own player is on the way out too; their leave will free it.
+                slot = FindSlotWaitingForVehicle(slot + 1);
+            }
+        }
+
+        /// <summary>First occupied slot at or after <paramref name="startSlot"/> with no vehicle, or -1.</summary>
+        private int FindSlotWaitingForVehicle(int startSlot)
+        {
+            for (int i = startSlot < 0 ? 0 : startSlot; i < MAX_PLAYERS; i++)
+            {
+                if (IsSlotOccupied(i) && _playerVehicleIndices[i] < 0)
+                    return i;
+            }
+
+            return -1;
         }
 
         /// <summary>
@@ -315,8 +373,22 @@ namespace RocketLeague
             }
         }
 
+        /// <summary>
+        /// Spawn point index for the newest member of a team. Never negative: C#'s % keeps the sign of
+        /// its left operand, so -1 against two or more spawn points is an out-of-range read, and an
+        /// out-of-range read halts this behaviour -- taking every later join and leave with it.
+        /// </summary>
+        private int GetSpawnIndexForTeam(int team)
+        {
+            int count = team == 0 ? _bluePlayerCount : _orangePlayerCount;
+            return count > 0 ? count - 1 : 0;
+        }
+
         private Transform GetSpawnPointForTeam(int team, int index)
         {
+            if (index < 0)
+                index = 0;
+
             if (team == 0 && BlueSpawnPoints != null && BlueSpawnPoints.Length > 0)
             {
                 return BlueSpawnPoints[index % BlueSpawnPoints.Length];
@@ -373,8 +445,7 @@ namespace RocketLeague
             Networking.SetOwner(player, vehicle.gameObject);
 
             // Get spawn point
-            int spawnIndex = team == 0 ? _bluePlayerCount - 1 : _orangePlayerCount - 1;
-            Transform spawnPoint = GetSpawnPointForTeam(team, spawnIndex);
+            Transform spawnPoint = GetSpawnPointForTeam(team, GetSpawnIndexForTeam(team));
 
             if (spawnPoint != null)
             {
@@ -432,7 +503,59 @@ namespace RocketLeague
                 int driverId = GetVehicleDriverId(i);
                 ApplyVehicleOwner(vehicle, driverId);
                 SetVehicleVisible(vehicle, driverId > 0);
+                ApplyInputGate(vehicle);
             }
+        }
+
+        /// <summary>
+        /// Tells the roster whether the local player is in the arena, and with that whether the car they
+        /// drive may listen to them.
+        ///
+        /// A driver is named when they join the instance, and the recorder on their car reads VRChat's
+        /// ordinary movement callbacks, which fire wherever the player happens to be. So the first player
+        /// in drove the car from the hub: walking to a station steered it, and every click on a button
+        /// spent its boost. ArenaTeleporter switches this on, HubTeleporter and a respawn switch it off.
+        ///
+        /// Deliberately only a gate on input. The player is not immobilised -- the same sticks still walk
+        /// their avatar while they drive -- because freezing them would strand anyone the way out could
+        /// not reach.
+        /// </summary>
+        public void SetLocalPlayerInArena(bool inArena)
+        {
+            _localPlayerInArena = inArena;
+
+            if (VehiclePool == null)
+                return;
+
+            for (int i = 0; i < VehiclePool.Length; i++)
+            {
+                if (VehiclePool[i] != null)
+                    ApplyInputGate(VehiclePool[i]);
+            }
+        }
+
+        public override void OnPlayerRespawn(VRCPlayerApi player)
+        {
+            // Respawning drops the player at the world spawn in the hub without going near HubTeleporter.
+            if (player != null && player.isLocal)
+                SetLocalPlayerInArena(false);
+        }
+
+        /// <summary>
+        /// Applies the arena gate to one car's recorder. It is set on every pool vehicle rather than only
+        /// on the local driver's, so a car handed to this player later starts out gated as well; on a car
+        /// somebody else drives the flag has nothing to switch off.
+        /// </summary>
+        private void ApplyInputGate(NetVehicle vehicle)
+        {
+            InputRecorder recorder = vehicle.Recorder;
+
+            // NetVehicle resolves its recorder in its own Start, which may not have run yet.
+            if (recorder == null)
+                recorder = vehicle.GetComponent<InputRecorder>();
+
+            if (recorder != null)
+                recorder.InputEnabled = _localPlayerInArena;
         }
 
         /// <summary>

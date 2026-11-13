@@ -55,9 +55,6 @@ namespace UdonSharp.CE.Editor.Analyzers
             new RequestSerializationRateAnalyzer(),
             new NetworkEventSyncModeAnalyzer(),
 
-            // Phase 3: CE.Async analyzers
-            new AsyncMethodAnalyzer(),
-
             // Phase 2: Lambda validation
             new LambdaUsageAnalyzer(),
 

@@ -71,8 +71,20 @@ namespace UdonSharp.Compiler
     /// Declares that a generator MUST have run if any input source contains one of the trigger tokens.
     ///
     /// This catches the failure shape where a generator is present and registered but silently produced
-    /// nothing -- a presence check alone cannot see that. There are no false positives by construction:
-    /// the condition is "generator did not run at all", not "generator transformed nothing".
+    /// nothing -- a presence check alone cannot see that. It trips in two cases: the generator has no
+    /// <see cref="SourceGeneratorRunStatus.Ran"/> record at all, or it ran and handled no file in the
+    /// whole compile while a trigger token is written somewhere in it.
+    ///
+    /// The second case is what makes the tripwire worth having, and it is also the one that can fire on a
+    /// correct project, so nothing about it is free of false positives by construction. This comment
+    /// used to claim exactly that, on the grounds that the condition was "did not run at all" -- which
+    /// stopped being true when the zero-transform arm was added, and the claim outlived it. Three things
+    /// keep it honest, and each has to stay true: a token is only declared for a hard obligation; a token
+    /// spelled "[X" counts only where that bracket opens an attribute list whose first attribute is named
+    /// X or XAttribute, so neither an array index that starts with the same letters nor a different
+    /// attribute that does ([XLogger]) is a use of it; and a generator
+    /// that recognises its construct and correctly emits nothing reports that through
+    /// <c>OptimizationContext.RecordObligationDischarged</c>, which the runner counts as handling the file.
     /// </summary>
     internal sealed class SourceGeneratorTripwire
     {

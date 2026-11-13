@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using UdonSharp.CE.Net;
 using UdonSharp.CE.Persistence;
 using UnityEngine;
 
@@ -14,25 +15,29 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
     {
         #region Constants
 
+        // Every limit below is NetworkLimits' value under this tool's name. They used to be retyped here,
+        // which is how one tool came to budget 11.0 KB/s against bandwidth it had divided by 1000 while
+        // another quoted 11264 bytes.
+
         /// <summary>
         /// Maximum bytes for continuous sync mode.
         /// </summary>
-        public const int CONTINUOUS_SYNC_LIMIT = 200;
+        public const int CONTINUOUS_SYNC_LIMIT = NetworkLimits.ContinuousSyncMaxBytes;
 
         /// <summary>
         /// Network budget per second in bytes (11 KB/s).
         /// </summary>
-        public const int NETWORK_BUDGET_BYTES_PER_SECOND = 11264;
+        public const int NETWORK_BUDGET_BYTES_PER_SECOND = NetworkLimits.NetworkBudgetBytesPerSecond;
 
         /// <summary>
         /// Default max string length for sync.
         /// </summary>
-        public const int DEFAULT_MAX_STRING_LENGTH = 50;
+        public const int DEFAULT_MAX_STRING_LENGTH = NetworkLimits.DefaultEstimatedSyncedStringLength;
 
         /// <summary>
-        /// Default array size when unknown.
+        /// Bytes a synced string or array costs before any of its contents: the serialized length prefix.
         /// </summary>
-        public const int DEFAULT_ARRAY_SIZE = 16;
+        public const int FRAMING_BYTES = 4;
 
         #endregion
 
@@ -248,8 +253,8 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
             }
 
             // String size: 4 byte header + 2 bytes per character (UTF-16)
-            int minSize = 4; // Empty string
-            int maxSize = 4 + (maxLength * 2);
+            int minSize = FRAMING_BYTES; // Empty string
+            int maxSize = FRAMING_BYTES + (maxLength * NetworkLimits.SyncedStringBytesPerCharacter);
 
             return SizeResult.Variable(minSize, maxSize, $"string (max {maxLength} chars, 2 bytes/char + 4 byte header)");
         }
@@ -269,15 +274,20 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
                 return SizeResult.Fixed(totalSize, $"{elementType.Name}[{arrayLength.Value}] ({elementSize}B × {arrayLength.Value} + 4B header)");
             }
 
-            // Unknown size - use default estimate
-            int estimatedSize = 4 + (elementSize * DEFAULT_ARRAY_SIZE);
-            return SizeResult.Variable(4, estimatedSize, $"{elementType.Name}[] (unknown length, estimated {DEFAULT_ARRAY_SIZE} elements)");
+            // Unknown length. Only the framing is certain, and it is reported as a floor rather than
+            // padded out with a guess: this used to assume sixteen elements, so a 'new byte[60000]' and
+            // a 'new byte[0]' that is refilled every send were both shown as a twenty-byte field.
+            return SizeResult.LowerBound(
+                FRAMING_BYTES,
+                $"{elementType.Name}[], length unknown ahead of time ({FRAMING_BYTES}B framing + {elementSize}B per " +
+                "element; only the framing is counted)");
         }
 
         private int? TryGetArrayLength(FieldInfo field, object defaultValue)
         {
-            // Try to get from default value
-            if (defaultValue is Array arr)
+            // Try to get from default value. An empty array is not a length: a synced array declared
+            // 'new T[0]' is one that gets replaced at runtime, so its real size is the unknown one.
+            if (defaultValue is Array arr && arr.Length > 0)
             {
                 return arr.Length;
             }
@@ -340,34 +350,11 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
             return $"{bytes / (1024f * 1024f):F2} MB";
         }
 
-        /// <summary>
-        /// Calculates quantization savings based on precision value.
-        /// </summary>
-        /// <param name="quantize">Quantization precision (e.g., 0.01 for 1cm).</param>
-        /// <returns>Percentage of bytes saved (0.0 to 1.0).</returns>
-        public static float CalculateQuantizationSavings(float quantize)
-        {
-            if (quantize <= 0)
-                return 0f;
-
-            // Higher precision = more bytes needed
-            // Lower precision = fewer bytes needed
-            if (quantize >= 1f)
-                return 0.75f;
-            if (quantize >= 0.1f)
-                return 0.6f;
-            if (quantize >= 0.01f)
-                return 0.5f;
-            if (quantize >= 0.001f)
-                return 0.3f;
-
-            return 0f;
-        }
-
-        /// <summary>
-        /// Default delta encoding savings for sparse array updates.
-        /// </summary>
-        public const float DEFAULT_DELTA_SAVINGS = 0.5f;
+        // There is deliberately no "savings" helper here for [Sync]'s Quantize or DeltaEncodeHint. Quantize
+        // rounds the value in OnPreSerialization and sends the same four-byte float; DeltaEncodeHint is
+        // advisory and the whole array still goes on the wire. The helpers that used to live here took
+        // 30-75% off a quantized field and half off a hinted one, and a Continuous payload over the limit
+        // was reported as comfortably under it.
 
         #endregion
     }

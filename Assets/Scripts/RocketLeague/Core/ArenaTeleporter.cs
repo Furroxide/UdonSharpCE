@@ -46,6 +46,11 @@ namespace RocketLeague
                     VRC_SceneDescriptor.SpawnOrientation.AlignPlayerWithSpawnPoint,
                     false
                 );
+
+                // From here the car this player drives may listen to them. Until they arrive it must
+                // not: its recorder reads the same movement input that walks them around the hub.
+                if (Manager != null && Manager.Spawner != null)
+                    Manager.Spawner.SetLocalPlayerInArena(true);
             }
 
             Debug.Log("[ArenaTeleporter] Teleported player to Rocket League arena");

@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using UdonSharp.Compiler;
+using UdonSharp.CE.Editor.Optimizers;
 using UnityEditor;
 using UnityEngine;
 
@@ -109,6 +111,17 @@ namespace UdonSharp.CE.Editor.Persistence
                 if (MethodsWithAutoOverloads.Contains(methodName))
                 {
                     var updated = DropGenericTypeArguments(visited, methodName);
+                    var arguments = updated.ArgumentList.Arguments;
+                    for (int i = 0; i < arguments.Count; i++)
+                    {
+                        var argument = arguments[i];
+                        if ((methodName != "Restore" && methodName != "FromData" && methodName != "FromJson") || !argument.RefKindKeyword.IsKind(SyntaxKind.OutKeyword)) continue;
+                        if (argument.Expression is DeclarationExpressionSyntax declaration)
+                            arguments = arguments.Replace(argument, argument.WithExpression(declaration.WithType(SyntaxFactory.ParseTypeName("global::" + model.QualifiedName).WithTrailingTrivia(SyntaxFactory.Space))));
+                        else if (argument.Expression is IdentifierNameSyntax identifier && identifier.Identifier.ValueText == "_")
+                            arguments = arguments.Replace(argument, argument.WithExpression(SyntaxFactory.DeclarationExpression(SyntaxFactory.ParseTypeName("global::" + model.QualifiedName).WithTrailingTrivia(SyntaxFactory.Space), SyntaxFactory.DiscardDesignation())));
+                    }
+                    updated = updated.WithArgumentList(updated.ArgumentList.WithArguments(arguments));
                     if (!ReferenceEquals(updated, visited))
                         DidModify = true;
                     return updated;
@@ -302,7 +315,7 @@ namespace UdonSharp.CE.Editor.Persistence
                 {
                     if (current is NamespaceDeclarationSyntax namespaceDeclaration)
                     {
-                        AddNamespaceWithPrefixes(scope, namespaceDeclaration.Name?.ToString());
+                        AddNamespaceWithPrefixes(scope, FullNamespaceName(namespaceDeclaration));
                         AddUsingNamespaces(scope, namespaceDeclaration.Usings);
                     }
                     else if (current is CompilationUnitSyntax compilationUnit)
@@ -314,6 +327,24 @@ namespace UdonSharp.CE.Editor.Persistence
                 }
 
                 return scope;
+            }
+
+            /// <summary>
+            /// The namespace a declaration block really declares. Nested 'namespace A { namespace B { } }'
+            /// blocks are namespace A.B, and a model records that full name, so the scope has to as well:
+            /// adding only "B" left a call site inside the nested block unable to choose between two models
+            /// that share a short name.
+            /// </summary>
+            private static string FullNamespaceName(NamespaceDeclarationSyntax declaration)
+            {
+                var parts = new Stack<string>();
+                for (SyntaxNode node = declaration; node != null; node = node.Parent)
+                {
+                    if (node is NamespaceDeclarationSyntax namespaceDeclaration)
+                        parts.Push(namespaceDeclaration.Name.ToString());
+                }
+
+                return string.Join(".", parts);
             }
 
             private static void AddNamespaceWithPrefixes(HashSet<string> scope, string namespaceName)
@@ -436,8 +467,22 @@ namespace UdonSharp.CE.Editor.Persistence
 
         private sealed class PersistenceModelCollector
         {
+            private readonly OptimizationContext _constants = new OptimizationContext();
+
+            private object Constant(ExpressionSyntax expression)
+            {
+                var value = _constants.GetSemanticModel(expression.SyntaxTree).GetConstantValue(expression);
+                if (!value.HasValue)
+                    throw new CodeGenerationException("CEPERSIST001", expression.GetLocation(), "Persistence attribute argument must be a supported compile-time constant: " + expression);
+                return value.Value;
+            }
+
+            private static CodeGenerationException Invalid(SyntaxNode node, string message)
+                => new CodeGenerationException("CEPERSIST001", node.GetLocation(), message);
+
             public List<PersistenceModelInfo> CollectModels((SyntaxTree tree, string filePath)[] syntaxTrees)
             {
+                _constants.SetSemanticModelTrees(syntaxTrees.Select(pair => pair.tree));
                 var models = new Dictionary<string, PersistenceModelInfo>(StringComparer.Ordinal);
 
                 foreach (var (tree, filePath) in syntaxTrees)
@@ -448,6 +493,8 @@ namespace UdonSharp.CE.Editor.Persistence
                         if (!TryGetPlayerDataAttribute(classDeclaration, out var attribute))
                             continue;
 
+                        if (classDeclaration.AncestorsAndSelf().OfType<ClassDeclarationSyntax>().Any(c => c.TypeParameterList != null))
+                            throw Invalid(classDeclaration, "Generic persistence models are not supported.");
                         string modelName = GetQualifiedModelName(classDeclaration);
                         if (string.IsNullOrEmpty(modelName))
                             continue;
@@ -462,10 +509,14 @@ namespace UdonSharp.CE.Editor.Persistence
                                 DeclaredFile = filePath
                             };
                             models[modelName] = modelInfo;
+                            ValidateModelType(classDeclaration, modelInfo);
                         }
 
                         if (TryGetStringLiteral(attribute, out string key))
+                        {
                             modelInfo.Key = key;
+                            modelInfo.KeyLocation = attribute.GetLocation();
+                        }
 
                         if (TryGetNamedIntArgument(attribute, "Version", out int version))
                             modelInfo.Version = version;
@@ -474,6 +525,12 @@ namespace UdonSharp.CE.Editor.Persistence
 
                 if (models.Count == 0)
                     return new List<PersistenceModelInfo>();
+
+                foreach (var model in models.Values)
+                    model.HasDeclaredPersistFields = syntaxTrees.SelectMany(pair => pair.tree.GetRoot().DescendantNodes().OfType<ClassDeclarationSyntax>())
+                        .Where(declaration => GetQualifiedModelName(declaration) == model.QualifiedName)
+                        .SelectMany(declaration => declaration.Members.OfType<FieldDeclarationSyntax>())
+                        .Any(field => !field.Modifiers.Any(SyntaxKind.StaticKeyword) && !field.AttributeLists.SelectMany(list => list.Attributes).Any(attribute => IsAttribute(attribute, "PersistIgnore")) && field.AttributeLists.SelectMany(list => list.Attributes).Any(attribute => IsAttribute(attribute, "PersistKey")));
 
                 foreach (var (tree, _) in syntaxTrees)
                 {
@@ -487,8 +544,34 @@ namespace UdonSharp.CE.Editor.Persistence
                         if (!models.TryGetValue(modelName, out var modelInfo))
                             continue;
 
+                        if (classDeclaration.BaseList != null)
+                        {
+                            var symbol = _constants.GetSemanticModel(tree).GetDeclaredSymbol(classDeclaration);
+                            for (var baseType = symbol?.BaseType; baseType != null; baseType = baseType.BaseType)
+                                if (baseType.GetMembers().OfType<IFieldSymbol>().Any(f => f.GetAttributes().Any(a => a.AttributeClass?.Name == "PersistKeyAttribute")))
+                                    throw Invalid(classDeclaration, "Inherited [PersistKey] fields are not supported; declare persisted fields on the model itself.");
+                        }
                         CollectFields(modelInfo, classDeclaration);
                     }
+                }
+
+                var modelsByKey = new Dictionary<string, PersistenceModelInfo>(StringComparer.Ordinal);
+                foreach (var model in models.Values)
+                {
+                    if (model.Key == null)
+                        continue;
+
+                    if (model.Key.StartsWith("__ce_", StringComparison.Ordinal))
+                        throw new CodeGenerationException("CEPERSIST001", model.KeyLocation ?? Location.None,
+                            $"[PlayerData] key '{model.Key}' on '{model.QualifiedName}' is reserved: keys starting with __ce_ belong to CE.");
+
+                    // Two models under one key overwrite each other's save, and neither notices: the model key
+                    // written into the JSON is that same shared key, so each Restore accepts the other's data.
+                    if (modelsByKey.TryGetValue(model.Key, out var other))
+                        throw new CodeGenerationException("CEPERSIST001", model.KeyLocation ?? Location.None,
+                            $"[PlayerData] key '{model.Key}' is used by both '{other.QualifiedName}' and '{model.QualifiedName}'. Give each model its own key; sharing one makes them overwrite each other's save.");
+
+                    modelsByKey.Add(model.Key, model);
                 }
 
                 var result = new List<PersistenceModelInfo>();
@@ -503,17 +586,25 @@ namespace UdonSharp.CE.Editor.Persistence
                     if (model.Version == 0)
                         model.Version = 1;
 
-                    if (!model.HasPersistFields && !model.HasRawDataDictionary)
+                    // Manual Register<T>() is a compile error under Udon, so a Register call site must never
+                    // suppress generation here - doing that used to leave the model with no overloads at all.
+                    // Checked before the no-fields case: a model whose only [PersistKey] field was rejected has
+                    // no fields left, and being told it has none hid the warning that said why.
+                    if (model.HasUnsupportedFields)
                     {
-                        Debug.LogWarning($"[CE.Persistence] Auto-registration skipped for '{model.DisplayName}': no [PersistKey] fields or raw DataDictionary field found.");
+                        Debug.LogWarning($"[CE.Persistence] Auto-registration skipped for '{model.DisplayName}': it has [PersistKey] fields CE cannot generate a converter for (see the warnings above). Change each to a supported, writable public or internal field, or hold the payload in a single DataDictionary field and build it yourself.");
                         continue;
                     }
 
-                    // Manual Register<T>() is a compile error under Udon, so a Register call site must never
-                    // suppress generation here - doing that used to leave the model with no overloads at all.
-                    if (model.HasUnsupportedFields)
+                    if (!model.HasPersistFields && !model.HasRawDataDictionary)
                     {
-                        Debug.LogWarning($"[CE.Persistence] Auto-registration skipped for '{model.DisplayName}': unsupported field types detected. Change the field to a supported type, or hold the payload in a single DataDictionary field and build it yourself.");
+                        // The model's only DataDictionary is one the generated converter could not read or
+                        // assign from outside the class. Saying so beats a warning about a field that exists.
+                        if (model.InaccessibleRawCandidate != null)
+                            throw Invalid(model.InaccessibleRawCandidate,
+                                $"'{model.QualifiedName}' would persist its DataDictionary field, but that field is private, protected, readonly or const. The generated converter reads and assigns it from outside the class, so make it a writable public or internal field.");
+
+                        Debug.LogWarning($"[CE.Persistence] Auto-registration skipped for '{model.DisplayName}': no [PersistKey] fields or raw DataDictionary field found.");
                         continue;
                     }
 
@@ -523,14 +614,15 @@ namespace UdonSharp.CE.Editor.Persistence
                 return result;
             }
 
-            private static void CollectFields(PersistenceModelInfo model, ClassDeclarationSyntax classDeclaration)
+            private void CollectFields(PersistenceModelInfo model, ClassDeclarationSyntax classDeclaration)
             {
                 foreach (var fieldDeclaration in classDeclaration.Members.OfType<FieldDeclarationSyntax>())
                 {
                     if (fieldDeclaration.Modifiers.Any(m => m.IsKind(SyntaxKind.StaticKeyword)))
                         continue;
 
-                    bool isPrivate = fieldDeclaration.Modifiers.Any(m => m.IsKind(SyntaxKind.PrivateKeyword));
+                    bool isPrivate = !fieldDeclaration.Modifiers.Any(m => m.IsKind(SyntaxKind.PublicKeyword) || m.IsKind(SyntaxKind.InternalKeyword)) ||
+                        fieldDeclaration.Modifiers.Any(m => m.IsKind(SyntaxKind.ReadOnlyKeyword) || m.IsKind(SyntaxKind.ConstKeyword));
 
                     var attributes = fieldDeclaration.AttributeLists.SelectMany(list => list.Attributes).ToList();
                     bool ignore = HasAttribute(attributes, "PersistIgnore");
@@ -542,26 +634,35 @@ namespace UdonSharp.CE.Editor.Persistence
 
                     foreach (var variable in fieldDeclaration.Declaration.Variables)
                     {
-                        string fieldName = variable.Identifier.ValueText;
+                        string fieldName = variable.Identifier.Text;
 
                         if (persistAttribute == null)
                         {
-                            if (TryMarkRawDataDictionary(model, fieldType, fieldName))
+                            // Only a writable public or internal DataDictionary can be the raw payload: the
+                            // generated converter reads and assigns it from outside the class. Any other
+                            // DataDictionary is the model's own scratch state, and becomes an error only if the
+                            // model turns out to have nothing else it could persist.
+                            if (isPrivate)
+                            {
+                                if (model.InaccessibleRawCandidate == null && !model.HasDeclaredPersistFields && IsDataDictionaryType(fieldType.ToString()))
+                                    model.InaccessibleRawCandidate = variable;
                                 continue;
+                            }
 
+                            TryMarkRawDataDictionary(model, fieldType, fieldName);
                             continue;
                         }
 
                         if (isPrivate)
                         {
-                            Debug.LogWarning($"[CE.Persistence] Auto-registration skipped field '{fieldName}' in '{model.DisplayName}': field must not be private.");
+                            Debug.LogWarning($"[CE.Persistence] Auto-registration skipped field '{fieldName}' in '{model.DisplayName}': a [PersistKey] field must be public or internal and writable (not readonly or const), because the generated converter reads and assigns it from outside the class.");
                             model.HasUnsupportedFields = true;
                             continue;
                         }
 
                         if (!TryGetStringLiteral(persistAttribute, out string persistKey))
                         {
-                            Debug.LogWarning($"[CE.Persistence] Auto-registration skipped field '{fieldName}' in '{model.DisplayName}': [PersistKey] must use a string literal.");
+                            Debug.LogWarning($"[CE.Persistence] Auto-registration skipped field '{fieldName}' in '{model.DisplayName}': [PersistKey] needs a constant string key.");
                             model.HasUnsupportedFields = true;
                             continue;
                         }
@@ -577,14 +678,16 @@ namespace UdonSharp.CE.Editor.Persistence
                         {
                             Name = fieldName,
                             PersistKey = persistKey,
-                            Type = typeInfo
+                            Type = typeInfo,
+                            Location = variable.GetLocation()
                         };
 
                         if (TryGetNamedBoolArgument(persistAttribute, "Optional", out bool optional))
                             fieldInfo.Optional = optional;
 
-                        if (TryGetNamedArgumentExpression(persistAttribute, "DefaultValue", out string defaultValue))
-                            fieldInfo.DefaultValueExpression = defaultValue;
+                        ExpressionSyntax defaultArgument = NamedArgument(persistAttribute, "DefaultValue");
+                        if (defaultArgument != null)
+                            fieldInfo.DefaultValueExpression = DefaultValueExpression(defaultArgument, typeInfo, fieldName, model);
 
                         var rangeAttribute = GetAttribute(attributes, "Range");
                         if (rangeAttribute != null && TryGetRange(rangeAttribute, out double min, out double max))
@@ -607,7 +710,7 @@ namespace UdonSharp.CE.Editor.Persistence
 
             private static bool TryMarkRawDataDictionary(PersistenceModelInfo model, TypeSyntax typeSyntax, string fieldName)
             {
-                if (model.HasPersistFields)
+                if (model.HasDeclaredPersistFields)
                     return false;
 
                 string typeName = typeSyntax.ToString();
@@ -669,152 +772,251 @@ namespace UdonSharp.CE.Editor.Persistence
                        attrName.EndsWith(name + "Attribute", StringComparison.Ordinal);
             }
 
-            private static bool TryGetStringLiteral(AttributeSyntax attribute, out string value)
+            private bool TryGetStringLiteral(AttributeSyntax attribute, out string value)
             {
                 value = null;
-                if (attribute.ArgumentList == null || attribute.ArgumentList.Arguments.Count == 0)
-                    return false;
-
-                var arg = attribute.ArgumentList.Arguments[0];
-                if (arg.Expression is LiteralExpressionSyntax literal &&
-                    literal.IsKind(SyntaxKind.StringLiteralExpression))
-                {
-                    value = literal.Token.ValueText;
-                    return true;
-                }
-
-                return false;
-            }
-
-            private static bool TryGetNamedBoolArgument(AttributeSyntax attribute, string name, out bool value)
-            {
-                value = false;
-                if (attribute.ArgumentList == null)
-                    return false;
-
-                foreach (var arg in attribute.ArgumentList.Arguments)
-                {
-                    if (arg.NameEquals == null)
-                        continue;
-
-                    if (!string.Equals(arg.NameEquals.Name.Identifier.ValueText, name, StringComparison.Ordinal))
-                        continue;
-
-                    if (arg.Expression is LiteralExpressionSyntax literal &&
-                        literal.IsKind(SyntaxKind.TrueLiteralExpression))
-                    {
-                        value = true;
-                        return true;
-                    }
-
-                    if (arg.Expression is LiteralExpressionSyntax literalFalse &&
-                        literalFalse.IsKind(SyntaxKind.FalseLiteralExpression))
-                    {
-                        value = false;
-                        return true;
-                    }
-                }
-
-                return false;
-            }
-
-            private static bool TryGetNamedIntArgument(AttributeSyntax attribute, string name, out int value)
-            {
-                value = 0;
-                if (attribute.ArgumentList == null)
-                    return false;
-
-                foreach (var arg in attribute.ArgumentList.Arguments)
-                {
-                    if (arg.NameEquals == null)
-                        continue;
-
-                    if (!string.Equals(arg.NameEquals.Name.Identifier.ValueText, name, StringComparison.Ordinal))
-                        continue;
-
-                    if (arg.Expression is LiteralExpressionSyntax literal &&
-                        literal.IsKind(SyntaxKind.NumericLiteralExpression))
-                    {
-                        if (int.TryParse(literal.Token.ValueText, out value))
-                            return true;
-                    }
-                }
-
-                return false;
-            }
-
-            private static bool TryGetNamedArgumentExpression(AttributeSyntax attribute, string name, out string expression)
-            {
-                expression = null;
-                if (attribute.ArgumentList == null)
-                    return false;
-
-                foreach (var arg in attribute.ArgumentList.Arguments)
-                {
-                    if (arg.NameEquals == null)
-                        continue;
-
-                    if (!string.Equals(arg.NameEquals.Name.Identifier.ValueText, name, StringComparison.Ordinal))
-                        continue;
-
-                    if (arg.Expression is LiteralExpressionSyntax literal)
-                    {
-                        expression = literal.ToString();
-                        return true;
-                    }
-
-                    if (arg.Expression.IsKind(SyntaxKind.DefaultLiteralExpression))
-                    {
-                        expression = "default";
-                        return true;
-                    }
-                }
-
-                return false;
-            }
-
-            private static bool TryGetRange(AttributeSyntax attribute, out double min, out double max)
-            {
-                min = 0;
-                max = 0;
-                if (attribute.ArgumentList == null || attribute.ArgumentList.Arguments.Count < 2)
-                    return false;
-
-                if (!TryGetNumericLiteral(attribute.ArgumentList.Arguments[0].Expression, out min))
-                    return false;
-
-                if (!TryGetNumericLiteral(attribute.ArgumentList.Arguments[1].Expression, out max))
-                    return false;
-
+                if (attribute.ArgumentList == null || attribute.ArgumentList.Arguments.Count == 0) return false;
+                var expression = attribute.ArgumentList.Arguments[0].Expression;
+                value = Constant(expression) as string;
+                if (value == null) throw Invalid(expression, "Persistence keys must be constant strings.");
                 return true;
             }
 
-            private static bool TryGetMaxLength(AttributeSyntax attribute, out int maxLength)
+            private ExpressionSyntax NamedArgument(AttributeSyntax attribute, string name)
+                => attribute.ArgumentList?.Arguments.FirstOrDefault(a => a.NameEquals?.Name.Identifier.ValueText == name)?.Expression;
+
+            private bool TryGetNamedBoolArgument(AttributeSyntax attribute, string name, out bool value)
             {
-                maxLength = 0;
-                if (attribute.ArgumentList == null || attribute.ArgumentList.Arguments.Count == 0)
-                    return false;
-
-                if (attribute.ArgumentList.Arguments[0].Expression is LiteralExpressionSyntax literal &&
-                    literal.IsKind(SyntaxKind.NumericLiteralExpression))
-                {
-                    return int.TryParse(literal.Token.ValueText, out maxLength);
-                }
-
-                return false;
+                value = false;
+                var expression = NamedArgument(attribute, name);
+                if (expression == null) return false;
+                if (!(Constant(expression) is bool result)) throw Invalid(expression, name + " must be a constant bool.");
+                value = result;
+                return true;
             }
 
-            private static bool TryGetNumericLiteral(ExpressionSyntax expression, out double value)
+            private bool TryGetNamedIntArgument(AttributeSyntax attribute, string name, out int value)
             {
                 value = 0;
-                if (expression is LiteralExpressionSyntax literal &&
-                    literal.IsKind(SyntaxKind.NumericLiteralExpression))
+                var expression = NamedArgument(attribute, name);
+                if (expression == null) return false;
+                if (!(Constant(expression) is int result)) throw Invalid(expression, name + " must be a constant int.");
+                value = result;
+                return true;
+            }
+
+            /// <summary>
+            /// The C# expression the generated FromData assigns when an Optional field's key is missing.
+            /// </summary>
+            /// <remarks>
+            /// DefaultValue is typed object, so nothing at the attribute stops a constant the field cannot hold.
+            /// Emitted as written, such a value turned into a compile error inside the generated file -- '(int)(null)'
+            /// for DefaultValue = default, '(byte)(300)', a string on a number -- pointing at code the author
+            /// never wrote. Each value is checked against the field here and either emitted in a form that
+            /// compiles or rejected naming the argument. A non-integral value for an integer field is rejected
+            /// rather than truncated, since a default that silently changes is worse than one that fails.
+            /// </remarks>
+            private string DefaultValueExpression(ExpressionSyntax argument, PersistenceFieldTypeInfo type, string fieldName, PersistenceModelInfo model)
+            {
+                object value = Constant(argument);
+
+                if (value == null)
+                    return type.Kind == PersistenceFieldKind.Primitive ? "default(" + type.TypeName + ")" : "null";
+
+                string literal = null;
+                switch (type.Kind)
                 {
-                    if (double.TryParse(literal.Token.ValueText, out value))
-                        return true;
+                    case PersistenceFieldKind.String:
+                        if (value is string text)
+                            literal = SyntaxFactory.Literal(text).ToString();
+                        break;
+
+                    case PersistenceFieldKind.Primitive:
+                        if (type.TypeName == "bool")
+                        {
+                            if (value is bool flag)
+                                literal = flag ? "true" : "false";
+                        }
+                        else if (type.TypeName == "float" || type.TypeName == "double")
+                        {
+                            literal = FloatingDefaultLiteral(value, type.TypeName);
+                        }
+                        else
+                        {
+                            literal = IntegerDefaultLiteral(value, type.TypeName);
+                        }
+                        break;
                 }
 
-                return false;
+                if (literal == null)
+                    throw Invalid(argument,
+                        $"DefaultValue = {argument} on '{model.DisplayName}.{fieldName}' cannot be stored in its {type.TypeName} field. " +
+                        "Use a constant of the field's type, or null for the type's default.");
+
+                return literal;
+            }
+
+            private static bool IsNumericConstant(object value)
+            {
+                return value is sbyte || value is byte || value is short || value is ushort || value is int ||
+                       value is uint || value is long || value is ulong || value is float || value is double;
+            }
+
+            private static string FloatingDefaultLiteral(object value, string typeName)
+            {
+                if (!IsNumericConstant(value))
+                    return null;
+
+                // A float constant widens exactly, so the double literal below narrows back to the same float.
+                double number = Convert.ToDouble(value, CultureInfo.InvariantCulture);
+                if (double.IsNaN(number) || double.IsInfinity(number))
+                    return null;
+
+                if (typeName == "float" && Math.Abs(number) > float.MaxValue)
+                    return null;
+
+                return number.ToString("R", CultureInfo.InvariantCulture) + "d";
+            }
+
+            private static string IntegerDefaultLiteral(object value, string typeName)
+            {
+                if (!IsNumericConstant(value))
+                    return null;
+
+                decimal number;
+                if (value is float || value is double)
+                {
+                    double floating = Convert.ToDouble(value, CultureInfo.InvariantCulture);
+                    if (double.IsNaN(floating) || double.IsInfinity(floating) || Math.Abs(floating) > 1e20)
+                        return null;
+
+                    number = (decimal)floating;
+                }
+                else
+                {
+                    number = Convert.ToDecimal(value, CultureInfo.InvariantCulture);
+                }
+
+                if (number != decimal.Truncate(number))
+                    return null;
+
+                decimal min, max;
+                switch (typeName)
+                {
+                    case "byte": min = byte.MinValue; max = byte.MaxValue; break;
+                    case "sbyte": min = sbyte.MinValue; max = sbyte.MaxValue; break;
+                    case "short": min = short.MinValue; max = short.MaxValue; break;
+                    case "ushort": min = ushort.MinValue; max = ushort.MaxValue; break;
+                    case "int": min = int.MinValue; max = int.MaxValue; break;
+                    case "uint": min = uint.MinValue; max = uint.MaxValue; break;
+                    case "long": min = long.MinValue; max = long.MaxValue; break;
+                    case "ulong": min = ulong.MinValue; max = ulong.MaxValue; break;
+                    default: return null;
+                }
+
+                if (number < min || number > max)
+                    return null;
+
+                return number.ToString(CultureInfo.InvariantCulture);
+            }
+
+            /// <summary>
+            /// Rejects a model class the generated overloads could not reach or construct, and records whether
+            /// they have to be internal.
+            /// </summary>
+            /// <remarks>
+            /// The overloads live in CEPersistence, outside the model, and FromData builds the model with
+            /// 'new T()'. A model that is private or protected (or nested in such a class), nested in a struct,
+            /// abstract, static, or without an accessible parameterless constructor therefore produced code that
+            /// failed to compile -- and since every [PlayerData] model shares one generated file, it failed the
+            /// whole project's compile from a file the author never wrote. An internal model (a top-level class
+            /// with no modifier is one) compiled no better: a public overload taking an internal type is CS0051,
+            /// so its overloads are emitted internal instead.
+            /// </remarks>
+            private void ValidateModelType(ClassDeclarationSyntax declaration, PersistenceModelInfo model)
+            {
+                if (!(_constants.GetSemanticModel(declaration.SyntaxTree).GetDeclaredSymbol(declaration) is INamedTypeSymbol symbol))
+                    return;
+
+                string name = model.QualifiedName;
+
+                if (symbol.IsAbstract || symbol.IsStatic)
+                    throw Invalid(declaration,
+                        $"[PlayerData] model '{name}' is {(symbol.IsStatic ? "static" : "abstract")}. The generated FromData constructs the model, so it has to be a concrete, non-static class.");
+
+                bool internalOnly = false;
+                for (INamedTypeSymbol type = symbol; type != null; type = type.ContainingType)
+                {
+                    if (type.TypeKind != TypeKind.Class)
+                        throw Invalid(declaration,
+                            $"[PlayerData] model '{name}' is nested in {type.TypeKind.ToString().ToLowerInvariant()} '{type.Name}'. Declare it at namespace level or nested only in classes.");
+
+                    switch (type.DeclaredAccessibility)
+                    {
+                        case Accessibility.Public:
+                            break;
+                        case Accessibility.Internal:
+                        case Accessibility.ProtectedOrInternal:
+                            internalOnly = true;
+                            break;
+                        default:
+                            throw Invalid(declaration,
+                                $"[PlayerData] model '{name}' cannot be reached by its generated overloads: '{type.Name}' is {DescribeAccessibility(type.DeclaredAccessibility)}. " +
+                                "Make the model, and every class it is nested in, public or internal.");
+                    }
+                }
+
+                bool constructible = false;
+                foreach (IMethodSymbol constructor in symbol.InstanceConstructors)
+                {
+                    bool reachable = constructor.DeclaredAccessibility == Accessibility.Public ||
+                                     constructor.DeclaredAccessibility == Accessibility.Internal ||
+                                     constructor.DeclaredAccessibility == Accessibility.ProtectedOrInternal;
+
+                    if (reachable && constructor.Parameters.All(parameter => parameter.IsOptional || parameter.IsParams))
+                    {
+                        constructible = true;
+                        break;
+                    }
+                }
+
+                if (!constructible)
+                    throw Invalid(declaration,
+                        $"[PlayerData] model '{name}' has no public or internal parameterless constructor. The generated FromData constructs the model with 'new {symbol.Name}()', so add one.");
+
+                model.IsInternal = internalOnly;
+            }
+
+            private static string DescribeAccessibility(Accessibility accessibility)
+            {
+                switch (accessibility)
+                {
+                    case Accessibility.Private: return "private";
+                    case Accessibility.Protected: return "protected";
+                    case Accessibility.ProtectedAndInternal: return "private protected";
+                    default: return accessibility.ToString().ToLowerInvariant();
+                }
+            }
+
+            private bool TryGetRange(AttributeSyntax attribute, out double min, out double max)
+            {
+                min = max = 0;
+                if (attribute.ArgumentList == null || attribute.ArgumentList.Arguments.Count < 2)
+                    throw Invalid(attribute, "Range requires two constant numeric arguments.");
+                min = Convert.ToDouble(Constant(attribute.ArgumentList.Arguments[0].Expression), CultureInfo.InvariantCulture);
+                max = Convert.ToDouble(Constant(attribute.ArgumentList.Arguments[1].Expression), CultureInfo.InvariantCulture);
+                if (double.IsNaN(min) || double.IsInfinity(min) || double.IsNaN(max) || double.IsInfinity(max) || min > max)
+                    throw Invalid(attribute, "Range bounds must be finite and ordered.");
+                return true;
+            }
+
+            private bool TryGetMaxLength(AttributeSyntax attribute, out int maxLength)
+            {
+                maxLength = 0;
+                if (attribute.ArgumentList == null || attribute.ArgumentList.Arguments.Count == 0 || !(Constant(attribute.ArgumentList.Arguments[0].Expression) is int length) || length < 0)
+                    throw Invalid(attribute, "MaxLength requires a non-negative constant int.");
+                maxLength = length;
+                return true;
             }
 
             private static string GetQualifiedModelName(ClassDeclarationSyntax classDeclaration)
@@ -823,12 +1025,12 @@ namespace UdonSharp.CE.Editor.Persistence
                     return null;
 
                 var nameParts = new Stack<string>();
-                nameParts.Push(classDeclaration.Identifier.ValueText);
+                nameParts.Push(classDeclaration.Identifier.Text);
 
                 SyntaxNode current = classDeclaration.Parent;
                 while (current is ClassDeclarationSyntax parentClass)
                 {
-                    nameParts.Push(parentClass.Identifier.ValueText);
+                    nameParts.Push(parentClass.Identifier.Text);
                     current = parentClass.Parent;
                 }
 
@@ -841,14 +1043,13 @@ namespace UdonSharp.CE.Editor.Persistence
 
             private static string GetNamespaceName(SyntaxNode node)
             {
+                var parts = new Stack<string>();
                 while (node != null)
                 {
-                    if (node is NamespaceDeclarationSyntax namespaceDecl)
-                        return namespaceDecl.Name.ToString();
+                    if (node is NamespaceDeclarationSyntax ns) parts.Push(ns.Name.ToString());
                     node = node.Parent;
                 }
-
-                return null;
+                return string.Join(".", parts);
             }
 
             private static bool TryClassifyFieldType(TypeSyntax typeSyntax, out PersistenceFieldTypeInfo info)
@@ -859,6 +1060,8 @@ namespace UdonSharp.CE.Editor.Persistence
 
                 if (typeSyntax is ArrayTypeSyntax arrayType)
                 {
+                    if (arrayType.RankSpecifiers.Count != 1 || arrayType.RankSpecifiers[0].Rank != 1 || arrayType.ElementType is ArrayTypeSyntax)
+                        return false;
                     if (!TryClassifyFieldType(arrayType.ElementType, out var elementInfo))
                         return false;
 
@@ -956,13 +1159,17 @@ namespace UdonSharp.CE.Editor.Persistence
             private static string GenerateModelMethods(PersistenceModelInfo model)
             {
                 var sb = new StringBuilder(2048);
-                string typeName = model.QualifiedName;
+                string typeName = "global::" + model.QualifiedName;
                 string safeName = model.SafeName;
                 string displayName = EscapeString(model.DisplayName);
                 string keyLiteral = EscapeString(model.Key);
 
+                // A public method taking an internal model is CS0051, so an internal model gets internal
+                // overloads. Every behaviour can still call them: the U# compile is one compilation.
+                string access = model.IsInternal ? "internal" : "public";
+
                 sb.AppendLine($"        // Auto-generated persistence for {displayName}");
-                sb.AppendLine($"        public static SaveResult Save({typeName} model)");
+                sb.AppendLine($"        {access} static SaveResult Save({typeName} model)");
                 sb.AppendLine("        {");
                 sb.AppendLine($"            const string key = \"{keyLiteral}\";");
                 sb.AppendLine($"            const int version = {model.Version};");
@@ -1032,7 +1239,7 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("        }");
                 sb.AppendLine();
 
-                sb.AppendLine($"        public static DataDictionary ToData({typeName} model)");
+                sb.AppendLine($"        {access} static DataDictionary ToData({typeName} model)");
                 sb.AppendLine("        {");
                 sb.AppendLine($"            const string key = \"{keyLiteral}\";");
                 sb.AppendLine($"            const int version = {model.Version};");
@@ -1052,7 +1259,7 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("        }");
                 sb.AppendLine();
 
-                sb.AppendLine($"        public static string ToJson({typeName} model, bool beautify = false)");
+                sb.AppendLine($"        {access} static string ToJson({typeName} model, bool beautify = false)");
                 sb.AppendLine("        {");
                 sb.AppendLine($"            DataDictionary data = ToData(model);");
                 sb.AppendLine("            JsonExportType exportType = beautify ? JsonExportType.Beautify : JsonExportType.Minify;");
@@ -1067,7 +1274,7 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("        }");
                 sb.AppendLine();
 
-                sb.AppendLine($"        public static RestoreResult Restore(out {typeName} model)");
+                sb.AppendLine($"        {access} static RestoreResult Restore(out {typeName} model)");
                 sb.AppendLine("        {");
                 sb.AppendLine("            model = default;");
                 sb.AppendLine($"            const string key = \"{keyLiteral}\";");
@@ -1094,7 +1301,7 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("        }");
                 sb.AppendLine();
 
-                sb.AppendLine($"        public static RestoreResult FromData(DataDictionary data, out {typeName} model)");
+                sb.AppendLine($"        {access} static RestoreResult FromData(DataDictionary data, out {typeName} model)");
                 sb.AppendLine("        {");
                 sb.AppendLine("            model = default;");
                 sb.AppendLine($"            const string key = \"{keyLiteral}\";");
@@ -1135,7 +1342,9 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("                    return RestoreResult.ParseError;");
                 sb.AppendLine("                }");
                 sb.AppendLine();
-                sb.AppendLine("                int storedVersion = (int)versionToken.Double;");
+                sb.AppendLine("                double versionNumber = versionToken.Number;");
+                sb.AppendLine("                if (double.IsNaN(versionNumber) || versionNumber < int.MinValue || versionNumber > int.MaxValue || versionNumber != System.Math.Truncate(versionNumber)) return RestoreResult.ParseError;");
+                sb.AppendLine("                int storedVersion = (int)versionNumber;");
                 sb.AppendLine("                if (storedVersion != version)");
                 sb.AppendLine("                {");
                 sb.AppendLine($"                    Debug.LogWarning(\"[CE.Persistence] FromData<{displayName}>: version mismatch (stored: \" + storedVersion + \", expected: \" + version + \")\");");
@@ -1143,12 +1352,17 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("                }");
                 sb.AppendLine("            }");
                 sb.AppendLine();
-                sb.AppendLine($"            model = FromData__{safeName}(data);");
+                sb.AppendLine($"            model = FromData__{safeName}(data, out string invalidField);");
+                sb.AppendLine("            if (invalidField != null)");
+                sb.AppendLine("            {");
+                sb.AppendLine("                PersistenceLifecycle.RecordCorruption(new CorruptionInfo(key, invalidField, CorruptionType.InvalidType, \"Invalid persisted field value\"));");
+                sb.AppendLine("                return RestoreResult.ParseError;");
+                sb.AppendLine("            }");
                 sb.AppendLine("            return RestoreResult.Success;");
                 sb.AppendLine("        }");
                 sb.AppendLine();
 
-                sb.AppendLine($"        public static RestoreResult FromJson(string json, out {typeName} model)");
+                sb.AppendLine($"        {access} static RestoreResult FromJson(string json, out {typeName} model)");
                 sb.AppendLine("        {");
                 sb.AppendLine("            model = default;");
                 sb.AppendLine($"            const string key = \"{keyLiteral}\";");
@@ -1176,7 +1390,7 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("        }");
                 sb.AppendLine();
 
-                sb.AppendLine($"        public static bool Validate({typeName} model, out List<ValidationError> errors)");
+                sb.AppendLine($"        {access} static bool Validate({typeName} model, out List<ValidationError> errors)");
                 sb.AppendLine("        {");
                 sb.AppendLine("            errors = new List<ValidationError>();");
                 sb.AppendLine();
@@ -1196,7 +1410,7 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("        }");
                 sb.AppendLine();
 
-                sb.AppendLine($"        public static int EstimateSize({typeName} model)");
+                sb.AppendLine($"        {access} static int EstimateSize({typeName} model)");
                 sb.AppendLine("        {");
                 sb.AppendLine($"            const string key = \"{keyLiteral}\";");
                 sb.AppendLine($"            const int version = {model.Version};");
@@ -1225,8 +1439,9 @@ namespace UdonSharp.CE.Editor.Persistence
                     sb.AppendLine($"            return model != null && model.{model.RawDataFieldName} != null ? model.{model.RawDataFieldName} : new DataDictionary();");
                     sb.AppendLine("        }");
                     sb.AppendLine();
-                    sb.AppendLine($"        private static {typeName} FromData__{safeName}(DataDictionary data)");
+                    sb.AppendLine($"        private static {typeName} FromData__{safeName}(DataDictionary data, out string invalidField)");
                     sb.AppendLine("        {");
+                    sb.AppendLine("            invalidField = null;");
                     sb.AppendLine($"            return new {typeName} {{ {model.RawDataFieldName} = data }};");
                     sb.AppendLine("        }");
                     sb.AppendLine();
@@ -1234,9 +1449,9 @@ namespace UdonSharp.CE.Editor.Persistence
                     sb.AppendLine("        {");
                     sb.AppendLine("            if (model == null)");
                     sb.AppendLine("            {");
-                    sb.AppendLine("                var errors = new List<ValidationError>();");
-                    sb.AppendLine("                errors.Add(new ValidationError(\"_model\", \"_model\", \"Model cannot be null\"));");
-                    sb.AppendLine("                return errors;");
+                    sb.AppendLine("                var nullErrors = new List<ValidationError>();");
+                    sb.AppendLine("                nullErrors.Add(new ValidationError(\"_model\", \"_model\", \"Model cannot be null\"));");
+                    sb.AppendLine("                return nullErrors;");
                     sb.AppendLine("            }");
                     sb.AppendLine();
                     sb.AppendLine("            return null;");
@@ -1256,8 +1471,9 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("            return dict;");
                 sb.AppendLine("        }");
                 sb.AppendLine();
-                sb.AppendLine($"        private static {typeName} FromData__{safeName}(DataDictionary data)");
+                sb.AppendLine($"        private static {typeName} FromData__{safeName}(DataDictionary data, out string invalidField)");
                 sb.AppendLine("        {");
+                sb.AppendLine("            invalidField = null;");
                 sb.AppendLine($"            var model = new {typeName}();");
                 sb.AppendLine("            if (data == null) return model;");
                 sb.AppendLine("            DataToken token;");
@@ -1275,9 +1491,9 @@ namespace UdonSharp.CE.Editor.Persistence
                 sb.AppendLine("        {");
                 sb.AppendLine("            if (model == null)");
                 sb.AppendLine("            {");
-                sb.AppendLine("                var errors = new List<ValidationError>();");
-                sb.AppendLine("                errors.Add(new ValidationError(\"_model\", \"_model\", \"Model cannot be null\"));");
-                sb.AppendLine("                return errors;");
+                sb.AppendLine("                var nullErrors = new List<ValidationError>();");
+                sb.AppendLine("                nullErrors.Add(new ValidationError(\"_model\", \"_model\", \"Model cannot be null\"));");
+                sb.AppendLine("                return nullErrors;");
                 sb.AppendLine("            }");
 
                 if (!model.HasValidation)
@@ -1303,71 +1519,111 @@ namespace UdonSharp.CE.Editor.Persistence
                 return sb.ToString();
             }
 
+            private static string WriteValue(PersistenceFieldTypeInfo type, string expression)
+                => type.TypeName == "long" || type.TypeName == "ulong"
+                    ? expression + ".ToString(System.Globalization.CultureInfo.InvariantCulture)"
+                    : expression;
+
+            private static bool IsReference(PersistenceFieldTypeInfo type)
+                => type.Kind != PersistenceFieldKind.Primitive;
+
             private static void AppendToDataField(StringBuilder sb, PersistenceFieldInfo field)
             {
-                string fieldAccess = $"model.{field.Name}";
-                string keyLiteral = $"\"{EscapeString(field.PersistKey)}\"";
-
+                string access = "model." + field.Name;
+                string key = SyntaxFactory.Literal(field.PersistKey).ToString();
                 if (field.Type.Kind == PersistenceFieldKind.Array)
                 {
-                    sb.AppendLine($"            if ({fieldAccess} != null)");
+                    sb.AppendLine($"            if ({access} != null)");
                     sb.AppendLine("            {");
                     sb.AppendLine("                var list = new DataList();");
-                    sb.AppendLine($"                for (int i = 0; i < {fieldAccess}.Length; i++)");
+                    sb.AppendLine($"                for (int i = 0; i < {access}.Length; i++)");
                     sb.AppendLine("                {");
-                    sb.AppendLine($"                    list.Add({fieldAccess}[i]);");
+                    string item = access + "[i]";
+                    if (IsReference(field.Type.ElementType))
+                        sb.AppendLine($"                    if ({item} == null) list.Add(new DataToken()); else list.Add({WriteValue(field.Type.ElementType, item)});");
+                    else
+                        sb.AppendLine($"                    list.Add({WriteValue(field.Type.ElementType, item)});");
                     sb.AppendLine("                }");
-                    sb.AppendLine($"                dict[{keyLiteral}] = list;");
+                    sb.AppendLine($"                dict[{key}] = list;");
                     sb.AppendLine("            }");
-                    sb.AppendLine("            else");
-                    sb.AppendLine("            {");
-                    sb.AppendLine($"                dict[{keyLiteral}] = null;");
-                    sb.AppendLine("            }");
+                }
+                else
+                {
+                    string guard = IsReference(field.Type) ? $"if ({access} != null) " : "";
+                    sb.AppendLine($"            {guard}dict[{key}] = {WriteValue(field.Type, access)};");
+                }
+            }
+
+            private static void AppendRead(StringBuilder sb, PersistenceFieldTypeInfo type, string token, string target, string key)
+            {
+                string fail = "{ invalidField = " + key + "; return null; }";
+                if (type.Kind == PersistenceFieldKind.Primitive && (type.TypeName == "long" || type.TypeName == "ulong"))
+                {
+                    string primitive = type.TypeName;
+                    sb.AppendLine($"                    if ({token}.TokenType == TokenType.String)");
+                    sb.AppendLine("                    {");
+                    sb.AppendLine($"                        if (!{primitive}.TryParse({token}.String, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out {primitive} parsed)) {fail}");
+                    sb.AppendLine($"                        {target} = parsed;");
+                    sb.AppendLine("                    }");
+                    sb.AppendLine($"                    else if ({token}.TokenType == TokenType.{(primitive == "long" ? "Long" : "ULong")}) {target} = {token}.{(primitive == "long" ? "Long" : "ULong")};");
+                    sb.AppendLine("                    else");
+                    sb.AppendLine("                    {");
+                    string min = primitive == "long" ? "-9223372036854775808d" : "0d";
+                    string max = primitive == "long" ? "9223372036854775808d" : "18446744073709551616d";
+                    sb.AppendLine($"                        if (!IsNumericToken({token}.TokenType)) {fail}");
+                    sb.AppendLine($"                        double number = {token}.Number;");
+                    sb.AppendLine($"                        if (double.IsNaN(number) || number < {min} || number >= {max} || number != System.Math.Truncate(number)) {fail}");
+                    sb.AppendLine($"                        {target} = ({primitive})number;");
+                    sb.AppendLine("                    }");
                     return;
                 }
 
-                sb.AppendLine($"            dict[{keyLiteral}] = {fieldAccess};");
+                string valid;
+                switch (type.Kind)
+                {
+                    case PersistenceFieldKind.String: valid = token + ".TokenType == TokenType.String"; break;
+                    case PersistenceFieldKind.DataDictionary: valid = token + ".TokenType == TokenType.DataDictionary"; break;
+                    case PersistenceFieldKind.DataList: valid = token + ".TokenType == TokenType.DataList"; break;
+                    default:
+                        if (type.TypeName == "bool") valid = token + ".TokenType == TokenType.Boolean";
+                        else
+                        {
+                            valid = $"IsNumericToken({token}.TokenType) && !double.IsNaN({token}.Number) && !double.IsInfinity({token}.Number)";
+                            if (type.TypeName != "double") valid += $" && {token}.Number >= {type.TypeName}.MinValue && {token}.Number <= {type.TypeName}.MaxValue";
+                            if (type.TypeName != "float" && type.TypeName != "double") valid += $" && {token}.Number == System.Math.Truncate({token}.Number)";
+                        }
+                        break;
+                }
+                if (IsReference(type)) sb.AppendLine($"                    if ({token}.TokenType == TokenType.Null) {target} = null; else");
+                sb.AppendLine($"                    if ({valid}) {target} = {type.GetReadExpression(token)}; else {fail}");
             }
 
             private static void AppendFromDataField(StringBuilder sb, PersistenceFieldInfo field)
             {
-                string keyLiteral = $"\"{EscapeString(field.PersistKey)}\"";
-                string fieldAccess = $"model.{field.Name}";
-
-                sb.AppendLine($"            if (data.TryGetValue({keyLiteral}, out token))");
+                string key = SyntaxFactory.Literal(field.PersistKey).ToString();
+                string target = "model." + field.Name;
+                sb.AppendLine($"            if (data.TryGetValue({key}, out token))");
                 sb.AppendLine("            {");
-
                 if (field.Type.Kind == PersistenceFieldKind.Array)
                 {
+                    sb.AppendLine($"                if (token.TokenType == TokenType.Null) {target} = null; else");
                     sb.AppendLine("                if (token.TokenType == TokenType.DataList)");
                     sb.AppendLine("                {");
                     sb.AppendLine("                    var list = token.DataList;");
                     sb.AppendLine($"                    var array = new {field.Type.ElementType.TypeName}[list.Count];");
-                    sb.AppendLine("                    DataToken itemToken;");
                     sb.AppendLine("                    for (int i = 0; i < list.Count; i++)");
                     sb.AppendLine("                    {");
-                    sb.AppendLine("                        if (list.TryGetValue(i, out itemToken))");
-                    sb.AppendLine("                        {");
-                    sb.AppendLine($"                            array[i] = {field.Type.ElementType.GetReadExpression("itemToken")};");
-                    sb.AppendLine("                        }");
+                    sb.AppendLine("                        DataToken itemToken = list[i];");
+                    AppendRead(sb, field.Type.ElementType, "itemToken", "array[i]", key);
                     sb.AppendLine("                    }");
-                    sb.AppendLine($"                    {fieldAccess} = array;");
+                    sb.AppendLine($"                    {target} = array;");
                     sb.AppendLine("                }");
+                    sb.AppendLine($"                else {{ invalidField = {key}; return null; }}");
                 }
-                else
-                {
-                    sb.AppendLine($"                {fieldAccess} = {field.Type.GetReadExpression("token")};");
-                }
-
+                else AppendRead(sb, field.Type, "token", target, key);
                 sb.AppendLine("            }");
-
                 if (field.Optional && !string.IsNullOrEmpty(field.DefaultValueExpression))
-                {
-                    sb.AppendLine("            else");
-                    sb.AppendLine("            {");
-                    sb.AppendLine($"                {fieldAccess} = {field.DefaultValueExpression};");
-                    sb.AppendLine("            }");
-                }
+                    sb.AppendLine($"            else {target} = ({field.Type.TypeName})({field.DefaultValueExpression});");
             }
 
             private static void AppendValidation(StringBuilder sb, PersistenceFieldInfo field)
@@ -1403,8 +1659,15 @@ namespace UdonSharp.CE.Editor.Persistence
                 {
                     if (field.Type.Kind == PersistenceFieldKind.Primitive && !string.Equals(field.Type.TypeName, "bool", StringComparison.Ordinal))
                     {
-                        sb.AppendLine($"            if ({fieldAccess} < {field.RangeMin.Value} || {fieldAccess} > {field.RangeMax.Value})");
-                        AppendValidationError(sb, field, persistKeyLiteral, $"\"Value must be between {field.RangeMin.Value} and {field.RangeMax.Value}\"", fieldAccess);
+                        string min = field.RangeMin.Value.ToString("R", CultureInfo.InvariantCulture);
+                        string max = field.RangeMax.Value.ToString("R", CultureInfo.InvariantCulture);
+
+                        // The bounds are emitted as double literals. "R" prints an integral bound without a
+                        // decimal point, and a bare negative int literal cannot be compared with a ulong
+                        // (CS0034), so Range(-1, 10) on a ulong field failed the compile; against a double every
+                        // field type compares, exactly as RangeAttribute.IsValid compares them.
+                        sb.AppendLine($"            if ({fieldAccess} < {min}d || {fieldAccess} > {max}d)");
+                        AppendValidationError(sb, field, persistKeyLiteral, $"\"Value must be between {min} and {max}\"", fieldAccess);
                     }
                 }
 
@@ -1433,7 +1696,8 @@ namespace UdonSharp.CE.Editor.Persistence
 
             private static string EscapeString(string value)
             {
-                return value?.Replace("\\", "\\\\").Replace("\"", "\\\"") ?? string.Empty;
+                string literal = SyntaxFactory.Literal(value ?? string.Empty).ToString();
+                return literal.Substring(1, literal.Length - 2);
             }
         }
 
@@ -1444,11 +1708,20 @@ namespace UdonSharp.CE.Editor.Persistence
             public string Namespace { get; set; } = string.Empty;
             public string DeclaredFile { get; set; }
             public string Key { get; set; }
+            public Location KeyLocation { get; set; }
             public int Version { get; set; } = 1;
             public bool HasRawDataDictionary { get; set; }
             public string RawDataFieldName { get; set; }
+            public bool HasDeclaredPersistFields { get; set; }
             public bool HasPersistFields => Fields.Count > 0;
             public bool HasUnsupportedFields { get; set; }
+
+            /// <summary>True when the model is only internally visible, so its overloads must be internal too.</summary>
+            public bool IsInternal { get; set; }
+
+            /// <summary>First DataDictionary field that could not be the raw payload, kept to explain a skip.</summary>
+            public SyntaxNode InaccessibleRawCandidate { get; set; }
+
             public List<PersistenceFieldInfo> Fields { get; } = new List<PersistenceFieldInfo>();
             public string SafeName => SanitizeTypeName(string.IsNullOrEmpty(QualifiedName) ? DisplayName : QualifiedName);
 
@@ -1458,6 +1731,19 @@ namespace UdonSharp.CE.Editor.Persistence
             {
                 if (Fields.Any(existing => string.Equals(existing.Name, field.Name, StringComparison.Ordinal)))
                     return;
+
+                // __ce_version and __ce_model are written into the same dictionary after the fields, so a field
+                // under either name was silently overwritten on every save.
+                if (field.PersistKey.StartsWith("__ce_", StringComparison.Ordinal))
+                    throw new CodeGenerationException("CEPERSIST001", field.Location ?? Location.None,
+                        $"[PersistKey(\"{field.PersistKey}\")] on '{DisplayName}.{field.Name}' is reserved: keys starting with __ce_ belong to CE.");
+
+                // Two fields under one key write over each other on save and both read the survivor back,
+                // through two converters that disagree about its type.
+                PersistenceFieldInfo clash = Fields.FirstOrDefault(existing => existing.PersistKey == field.PersistKey);
+                if (clash != null)
+                    throw new CodeGenerationException("CEPERSIST001", field.Location ?? Location.None,
+                        $"[PersistKey(\"{field.PersistKey}\")] is used by both '{DisplayName}.{clash.Name}' and '{DisplayName}.{field.Name}'. Give each field its own key.");
 
                 Fields.Add(field);
                 if (HasRawDataDictionary)
@@ -1479,7 +1765,9 @@ namespace UdonSharp.CE.Editor.Persistence
                     else
                         sb.Append('_');
                 }
-                return sb.ToString();
+                uint hash = 2166136261;
+                foreach (char c in name) hash = unchecked((hash ^ c) * 16777619);
+                return sb.ToString() + "_" + hash.ToString("x8", CultureInfo.InvariantCulture);
             }
         }
 
@@ -1488,6 +1776,7 @@ namespace UdonSharp.CE.Editor.Persistence
             public string Name { get; set; }
             public string PersistKey { get; set; }
             public PersistenceFieldTypeInfo Type { get; set; }
+            public Location Location { get; set; }
             public bool Optional { get; set; }
             public string DefaultValueExpression { get; set; }
             public bool Required { get; set; }
@@ -1574,27 +1863,27 @@ namespace UdonSharp.CE.Editor.Persistence
                     case "bool":
                         return $"{tokenName}.Boolean";
                     case "float":
-                        return $"(float){tokenName}.Double";
+                        return $"(float){tokenName}.Number";
                     case "double":
-                        return $"{tokenName}.Double";
+                        return $"{tokenName}.Number";
                     case "byte":
-                        return $"(byte){tokenName}.Double";
+                        return $"(byte){tokenName}.Number";
                     case "sbyte":
-                        return $"(sbyte){tokenName}.Double";
+                        return $"(sbyte){tokenName}.Number";
                     case "short":
-                        return $"(short){tokenName}.Double";
+                        return $"(short){tokenName}.Number";
                     case "ushort":
-                        return $"(ushort){tokenName}.Double";
+                        return $"(ushort){tokenName}.Number";
                     case "int":
-                        return $"(int){tokenName}.Double";
+                        return $"(int){tokenName}.Number";
                     case "uint":
-                        return $"(uint){tokenName}.Double";
+                        return $"(uint){tokenName}.Number";
                     case "long":
-                        return $"(long){tokenName}.Double";
+                        return $"(long){tokenName}.Number";
                     case "ulong":
-                        return $"(ulong){tokenName}.Double";
+                        return $"(ulong){tokenName}.Number";
                     default:
-                        return $"{tokenName}.Double";
+                        return $"{tokenName}.Number";
                 }
             }
         }

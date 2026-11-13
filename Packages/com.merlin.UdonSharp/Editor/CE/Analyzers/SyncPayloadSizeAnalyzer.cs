@@ -4,6 +4,7 @@ using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using UdonSharp;
+using UdonSharp.CE.Net;
 using UdonSharp.Compiler;
 using UdonSharp.Compiler.Binder;
 using UdonSharp.Compiler.Symbols;
@@ -18,20 +19,28 @@ namespace UdonSharp.CE.Editor.Analyzers
     /// VRChat limits continuous sync payloads to approximately 200 bytes.
     /// Exceeding this limit causes sync issues and potential data loss.
     /// Consider using Manual sync mode for larger data payloads.
+    ///
+    /// In a normal compile the only payloads this sees are made of fixed-size fields. A Continuous
+    /// behaviour that declares a synced array or string never gets here: BehaviourSyncModeEmitter raises
+    /// CE0034 for it during Phase A codegen, as an error, before Bind. The array and string estimates
+    /// below are kept as a backstop for the day that gate is narrowed, not because they are reachable --
+    /// which is why the example is thirteen quaternions rather than one array.
     /// </summary>
     /// <example>
-    /// // Warning - approximately 256 bytes of sync data
+    /// // Warning - approximately 208 bytes of sync data (13 x 16)
     /// [UdonBehaviourSyncMode(BehaviourSyncMode.Continuous)]
-    /// public class LargeSync : UdonSharpBehaviour
+    /// public class RagdollPose : UdonSharpBehaviour   // CE0003
     /// {
-    ///     [UdonSynced] private Vector3[] positions = new Vector3[20]; // CE0003
+    ///     [UdonSynced] private Quaternion _hips;
+    ///     [UdonSynced] private Quaternion _spine;
+    ///     // ... eleven more joints
     /// }
     ///
     /// // Better - use Manual sync for large payloads
     /// [UdonBehaviourSyncMode(BehaviourSyncMode.Manual)]
-    /// public class LargeSync : UdonSharpBehaviour
+    /// public class RagdollPose : UdonSharpBehaviour
     /// {
-    ///     [UdonSynced] private Vector3[] positions = new Vector3[20];
+    ///     [UdonSynced] private Quaternion[] _joints = new Quaternion[13];
     /// }
     /// </example>
     internal class SyncPayloadSizeAnalyzer : ICompileTimeAnalyzer
@@ -44,15 +53,23 @@ namespace UdonSharp.CE.Editor.Analyzers
         /// <summary>
         /// Maximum recommended size for continuous sync in bytes.
         /// </summary>
-        private const int CONTINUOUS_SYNC_LIMIT = 200;
+        private const int CONTINUOUS_SYNC_LIMIT = NetworkLimits.ContinuousSyncMaxBytes;
 
         /// <summary>
         /// Warning threshold (percentage of limit).
         /// </summary>
-        private const float WARNING_THRESHOLD = 0.8f;
+        private const float WARNING_THRESHOLD = NetworkLimits.WarningThreshold;
 
         /// <summary>
-        /// Type sizes for common types in bytes.
+        /// What a synced string is counted as when nothing bounds its length: the same default every other
+        /// CE estimate uses, so this report and NetworkLimits cannot quote two different sizes for one
+        /// field.
+        /// </summary>
+        private const int ESTIMATED_STRING_BYTES =
+            NetworkLimits.DefaultEstimatedSyncedStringLength * NetworkLimits.SyncedStringBytesPerCharacter;
+
+        /// <summary>
+        /// Type sizes for common types in bytes, keyed by CLR type name.
         /// </summary>
         private static readonly Dictionary<string, int> TypeSizes = new Dictionary<string, int>
         {
@@ -83,30 +100,41 @@ namespace UdonSharp.CE.Editor.Analyzers
         {
             var diagnostics = new List<AnalyzerDiagnostic>();
 
-            // Check if the type has Continuous sync mode
-            var syncModeAttr = type.GetAttribute<UdonBehaviourSyncModeAttribute>();
-            if (syncModeAttr == null || syncModeAttr.behaviourSyncMode != BehaviourSyncMode.Continuous)
-            {
-                // Not Continuous mode, skip analysis
+            // Both the mode and the payload come from the whole class chain. A mode declared on a base class
+            // applies to every subclass, and UdonSharp emits each base class's synced fields into the
+            // subclass's program. Reading only this type's own attribute and fields skipped a Continuous
+            // behaviour whose mode sits on its base, and under-counted a subclass by everything its base syncs.
+            if (CENetworkAnalysis.GetDeclaredSyncMode(type) != BehaviourSyncMode.Continuous)
                 return diagnostics;
-            }
 
             // Calculate total sync payload size
             int totalBytes = 0;
-            var syncedFields = new List<(FieldSymbol field, int size)>();
+            var syncedFields = new List<(string name, int size)>();
 
-            if (type.FieldSymbols.IsDefaultOrEmpty)
-                return diagnostics;
-
-            foreach (FieldSymbol field in type.FieldSymbols)
+            if (!type.FieldSymbols.IsDefaultOrEmpty)
             {
-                if (!field.IsSynced)
-                    continue;
+                foreach (FieldSymbol field in type.FieldSymbols)
+                {
+                    if (!field.IsSynced)
+                        continue;
 
-                int fieldSize = EstimateFieldSize(field, context);
+                    int fieldSize = EstimateFieldSize(field, context);
+                    if (fieldSize > 0)
+                    {
+                        syncedFields.Add((field.Name, fieldSize));
+                        totalBytes += fieldSize;
+                    }
+                }
+            }
+
+            // Inherited synced fields come from the Roslyn symbols, not the bases' FieldSymbols: those only
+            // exist once a base has itself been bound, and an unbound base read that way contributes nothing.
+            foreach (IFieldSymbol inherited in CENetworkAnalysis.GetInheritedSyncedFields(type))
+            {
+                int fieldSize = EstimateInheritedFieldSize(inherited);
                 if (fieldSize > 0)
                 {
-                    syncedFields.Add((field, fieldSize));
+                    syncedFields.Add((inherited.Name, fieldSize));
                     totalBytes += fieldSize;
                 }
             }
@@ -176,10 +204,34 @@ namespace UdonSharp.CE.Editor.Analyzers
             // Handle strings (variable length, estimate)
             if (fieldType.RoslynSymbol.SpecialType == SpecialType.System_String)
             {
-                return 32; // Estimate average string length
+                return ESTIMATED_STRING_BYTES;
             }
 
             return GetTypeSize(fieldType);
+        }
+
+        /// <summary>
+        /// The same estimate as <see cref="EstimateFieldSize"/>, for a field declared on a base class and so
+        /// known here only as a Roslyn symbol.
+        /// </summary>
+        private int EstimateInheritedFieldSize(IFieldSymbol field)
+        {
+            if (field.Type is IArrayTypeSymbol arrayType)
+            {
+                int elementSize = GetTypeSize(arrayType.ElementType);
+
+                var declarator = field.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax()
+                    as Microsoft.CodeAnalysis.CSharp.Syntax.VariableDeclaratorSyntax;
+                string initializer = declarator?.Initializer?.Value?.ToString();
+                int arrayLength = initializer != null ? TryGetArrayLength(initializer) : -1;
+
+                return elementSize * (arrayLength > 0 ? arrayLength : 16);
+            }
+
+            if (field.Type.SpecialType == SpecialType.System_String)
+                return ESTIMATED_STRING_BYTES;
+
+            return GetTypeSize(field.Type);
         }
 
         /// <summary>
@@ -187,7 +239,16 @@ namespace UdonSharp.CE.Editor.Analyzers
         /// </summary>
         private int GetTypeSize(TypeSymbol type)
         {
-            string typeName = type.RoslynSymbol.ToString();
+            return GetTypeSize(type.RoslynSymbol);
+        }
+
+        private int GetTypeSize(ITypeSymbol type)
+        {
+            // The CLR name, not ToString(). ToString() renders C# keywords -- 'int', 'bool', 'double' -- so
+            // against a table keyed "System.Int32" it never matched a primitive, and every one of them fell
+            // through to the 4-byte guess at the bottom: a bool counted four times over, a long and a
+            // double at half their size.
+            string typeName = TypeSymbol.GetFullTypeName(type);
 
             if (TypeSizes.TryGetValue(typeName, out int size))
             {
@@ -195,9 +256,9 @@ namespace UdonSharp.CE.Editor.Analyzers
             }
 
             // Check for special types
-            if (type.RoslynSymbol.SpecialType == SpecialType.System_String)
+            if (type.SpecialType == SpecialType.System_String)
             {
-                return 32; // Estimate
+                return ESTIMATED_STRING_BYTES;
             }
 
             // Unknown type - make a conservative estimate
@@ -266,13 +327,13 @@ namespace UdonSharp.CE.Editor.Analyzers
         /// <summary>
         /// Creates a breakdown string of synced fields and their sizes.
         /// </summary>
-        private string GetFieldBreakdown(List<(FieldSymbol field, int size)> fields)
+        private string GetFieldBreakdown(List<(string name, int size)> fields)
         {
             var parts = new List<string>();
 
-            foreach (var (field, size) in fields.OrderByDescending(f => f.size).Take(5))
+            foreach (var (name, size) in fields.OrderByDescending(f => f.size).Take(5))
             {
-                parts.Add($"{field.Name}({size}B)");
+                parts.Add($"{name}({size}B)");
             }
 
             if (fields.Count > 5)

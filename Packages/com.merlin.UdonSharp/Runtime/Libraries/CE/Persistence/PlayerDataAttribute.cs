@@ -58,9 +58,9 @@ namespace UdonSharp.CE.Persistence
         public int Version { get; set; } = 1;
 
         /// <summary>
-        /// Whether to automatically save when fields are modified.
-        /// Default is false (manual save required via CEPersistence.Save).
-        /// Note: Auto-save may increase network traffic and should be used carefully.
+        /// Reserved; nothing reads it. Setting it to true does not make anything save on its own: neither the
+        /// generated code nor the runtime schedules a save from this value, so every save still has to be an
+        /// explicit CEPersistence.Save call.
         /// </summary>
         public bool AutoSave { get; set; } = false;
 

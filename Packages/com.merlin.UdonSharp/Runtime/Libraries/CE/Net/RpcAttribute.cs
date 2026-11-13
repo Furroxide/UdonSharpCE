@@ -44,6 +44,11 @@ namespace UdonSharp.CE.Net
     /// SendCustomNetworkEvent with the declared target, so calling the method normally sends it.
     /// Use RpcTarget.Self when you want a plain local call.
     ///
+    /// The method has to be an instance method that returns void (CE0011, CE0043): a network event is
+    /// delivered to a behaviour instance and carries nothing back. Arguments are sent as the declared
+    /// parameter types -- a call that relies on an implicit conversion, such as passing 1 to a float
+    /// parameter, is converted before it is sent, exactly as a direct call would convert it.
+    ///
     /// Calling one [Rpc] from inside another is CE0045: every client that received the first would send
     /// the second, so the traffic multiplies by the player count on each hop. Two shapes are still open.
     /// A method calling itself is left as an ordinary local call, so a recursive [Rpc] unwinds on each
@@ -60,32 +65,42 @@ namespace UdonSharp.CE.Net
         public RpcTarget Target { get; set; } = RpcTarget.All;
 
         /// <summary>
-        /// Maximum calls per second (0 = unlimited).
-        /// Excess calls are dropped by VRChat before they leave the sending client.
+        /// Maximum events per second, as a whole number from 1 to 100. Leaving it at 0 does not mean
+        /// unlimited: it means "not declared", and the method gets the [NetworkCallable] default of 5.
+        /// VRChat enforces the limit on the sending client.
         /// </summary>
         /// <remarks>
         /// Compiled into [NetworkCallable(maxEventsPerSecond)], so VRChat enforces the limit itself.
-        /// That attribute takes a whole number of events per second between 1 and 100 for a method with
-        /// parameters, and defaults to 5; parameterless events are unthrottled. A value outside that
-        /// range, or one with a fractional part, cannot be expressed and is reported at compile time
-        /// rather than quietly adjusted -- a RateLimit of 500 that becomes 100 is a cap the author never
-        /// agreed to, and one of 0.2 that becomes 1 is five times the traffic they asked for.
+        /// That attribute takes a whole number of events per second between 1 and 100 and defaults to 5,
+        /// and the SDK rejects anything outside that range for every network-callable method, with or
+        /// without parameters -- there is no unthrottled [Rpc]. This comment used to say that 0 meant
+        /// unlimited and that parameterless events were unthrottled; the emitter believed it, and a
+        /// parameterless [Rpc] with no RateLimit did not compile.
+        ///
+        /// A declared value outside 1..100, or one with a fractional part, cannot be expressed. It is
+        /// rounded up and held to that range, and the compile says so with a console warning naming the
+        /// rate VRChat will actually enforce, rather than adjusting it in silence -- a RateLimit of 500
+        /// that becomes 100 is a cap the author never agreed to, and one of 0.2 that becomes 1 is five
+        /// times the traffic they asked for.
         /// </remarks>
         public float RateLimit { get; set; } = 0f;
 
         /// <summary>
-        /// Removed. VRChat drops network events past the per-method rate limit inside its own networking
-        /// layer and exposes no queueing API, so neither value on this property could ever have changed
-        /// what happens.
+        /// Removed. What happens to a network event past its method's rate limit is decided inside
+        /// VRChat's own networking layer, and [NetworkCallable] has no setting for it, so neither value on
+        /// this property could ever have changed what happens.
         /// </summary>
         /// <remarks>
         /// This errors rather than warns because the only reason to write it was DropOnRateLimit = false,
-        /// and that read as "queue the excess instead of losing it" -- a guarantee nothing was making.
-        /// If you need calls to survive a burst, pace them before they are sent, with a RateLimiter.
+        /// and that read as a guarantee CE was making about the excess -- one nothing here could keep.
+        /// The SDK does let a behaviour read how many of its events are still waiting to be sent
+        /// (NetworkCalling.GetQueuedEvents and GetAllQueuedEvents); it offers nothing to choose between
+        /// outcomes. If the timing of a burst matters, pace the calls before they are sent, with a
+        /// RateLimiter.
         /// </remarks>
-        [Obsolete("DropOnRateLimit cannot be honoured: VRChat drops rate-limited network events itself and " +
-                  "has no queueing API. Delete this argument and pace calls with a RateLimiter if you need " +
-                  "them to survive a burst.", true)]
+        [Obsolete("DropOnRateLimit cannot be honoured: what happens to a network event past its rate limit " +
+                  "is decided by VRChat, and [NetworkCallable] has no setting for it. Delete this argument " +
+                  "and pace calls with a RateLimiter if the timing of a burst matters.", true)]
         public bool DropOnRateLimit { get; set; } = true;
 
         /// <summary>

@@ -21,6 +21,14 @@ on:
       - '.github/workflows/publish-site.yml'
   release:
     types: [published, edited, deleted]
+  # The `release` trigger above only fires for releases made by a person or a PAT. release.yml
+  # publishes with the default GITHUB_TOKEN, and GitHub deliberately does not start new workflow runs
+  # for events that token causes -- so a release cut by CI never rebuilt the listing, and the new
+  # version stayed invisible to VCC until the next unrelated docs push. `workflow_run` is exempt from
+  # that rule, so chain off the release workflow directly.
+  workflow_run:
+    workflows: ["Build Release"]
+    types: [completed]
 
 permissions:
   contents: read
@@ -34,12 +42,16 @@ concurrency:
 
 jobs:
   publish:
+    # A failed or cancelled release run published nothing, so there is nothing new to list.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
 
       - uses: actions/setup-node@v4
         with:

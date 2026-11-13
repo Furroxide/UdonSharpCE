@@ -37,7 +37,6 @@ namespace UdonSharp.Lib.Internal.Collections
     {
         internal T[] _items = new T[8];
         internal int _size;
-        private StackIterator<T> _cachedIterator;
         
         public int Count => _size;
         
@@ -48,7 +47,7 @@ namespace UdonSharp.Lib.Internal.Collections
             
             if (size == itemArr.Length)
             {
-                T[] newItems = new T[itemArr.Length * 2];
+                T[] newItems = new T[itemArr.Length == 0 ? 4 : itemArr.Length * 2];
                 System.Array.Copy(itemArr, newItems, itemArr.Length);
                 _items = newItems;
                 itemArr = newItems;
@@ -95,7 +94,8 @@ namespace UdonSharp.Lib.Internal.Collections
         public T[] ToArray()
         {
             T[] itemArr = new T[_size];
-            System.Array.Copy(_items, itemArr, _size);
+            for (int i = 0; i < _size; i++)
+                itemArr[i] = _items[_size - 1 - i];
             return itemArr;
         }
         
@@ -161,8 +161,10 @@ namespace UdonSharp.Lib.Internal.Collections
                 return false;
             }
 
-            _size = size - 1;
+            size -= 1;
+            _size = size;
             item = _items[size];
+            _items[size] = default;
             return true;
         }
         
@@ -174,12 +176,8 @@ namespace UdonSharp.Lib.Internal.Collections
         
         public StackIterator<T> GetEnumerator()
         {
-            if (_cachedIterator == null)
-                _cachedIterator = new StackIterator<T>(this);
-            else
-                _cachedIterator.Reset();
-
-            return _cachedIterator;
+            // Nested enumerations need independent cursors, even on a single-threaded VM.
+            return new StackIterator<T>(this);
         }
 
         #region Performance Helpers

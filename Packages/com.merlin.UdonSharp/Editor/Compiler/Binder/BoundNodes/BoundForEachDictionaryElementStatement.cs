@@ -49,14 +49,12 @@ namespace UdonSharp.Compiler.Binder
             BoundAccessExpression iteratorAccess = BoundAccessExpression.BindAccess(sourceDictValue);
             
             BoundInvocationExpression getIteratorExpression = BoundInvocationExpression.CreateBoundInvocation(context, SyntaxNode, IteratorMethod, iteratorAccess, Array.Empty<BoundExpression>());
-            Value iteratorValue = context.EmitValue(getIteratorExpression);
+            Value iteratorValue = context.CreateInternalValue(IteratorMethod.ReturnType);
+            context.EmitValueAssignment(iteratorValue, getIteratorExpression);
             iteratorValue.MarkUsedRecursively();
             BoundAccessExpression iteratorValueAccess = BoundAccessExpression.BindAccess(iteratorValue);
             
             BoundExpression getCurrentExpression = BoundInvocationExpression.CreateBoundInvocation(context, SyntaxNode, IteratorCurrentPropertyGet, iteratorValueAccess, Array.Empty<BoundExpression>());
-            // Set the KeyValuePair reference to the specified element value, this isn't technically in spec but since the KeyValuePair is a struct we can't really easily properly support it either way so we may as well avoid extra allocations
-            Value iteratorCurrentValue = context.EmitValue(getCurrentExpression);
-            iteratorCurrentValue.MarkUsedRecursively();
             
             BoundExpression moveNext = BoundInvocationExpression.CreateBoundInvocation(context, SyntaxNode, IteratorMoveNextMethod, iteratorValueAccess, Array.Empty<BoundExpression>());
             
@@ -71,7 +69,7 @@ namespace UdonSharp.Compiler.Binder
             context.Module.AddJumpIfFalse(exitLoopLabel, moveNextResult);
             
             // Copy the Current reference to the user value, just in case the user modifies the value in the loop
-            context.EmitValueAssignment(context.GetUserValue(ValueSymbol), BoundAccessExpression.BindAccess(iteratorCurrentValue));
+            context.EmitValueAssignment(context.GetUserValue(ValueSymbol), getCurrentExpression);
             
             context.Emit(BodyStatement);
             

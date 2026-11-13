@@ -10,7 +10,8 @@ using UdonSharp.Compiler.Symbols;
 namespace UdonSharp.CE.Editor.Analyzers
 {
     /// <summary>
-    /// Warns when SyncOnJoin fields require a custom serializer instead of generated glue.
+    /// Warns about every [SyncOnJoin] field the glue emitter leaves out of the payload: a field whose
+    /// type requires a custom serializer, and a static or const field, which has no per-instance state.
     /// </summary>
     internal class SyncOnJoinSupportAnalyzer : ICompileTimeAnalyzer
     {
@@ -31,6 +32,22 @@ namespace UdonSharp.CE.Editor.Analyzers
             {
                 if (field.GetAttribute<SyncOnJoinAttribute>() == null)
                     continue;
+
+                // Checked before [SyncSerializer], because the emitter drops these before it ever reads the
+                // serializer: a static or const field holds no per-instance state to send. Without this the
+                // field was left out of the payload with nothing anywhere to say so -- its type is usually
+                // a perfectly supported one, so the type check below never fired for it.
+                if (field.IsStatic || field.IsConst)
+                {
+                    yield return AnalyzerDiagnostic.Warning(
+                        GetFieldLocation(field),
+                        $"[SyncOnJoin] field '{field.Name}' is {(field.IsConst ? "const" : "static")}, so it holds no per-instance state and will be omitted from generated late-join glue.",
+                        AnalyzerId,
+                        AnalyzerId,
+                        "Remove [SyncOnJoin] from this field, or make it an instance field."
+                    );
+                    continue;
+                }
 
                 if (field.GetAttribute<SyncSerializerAttribute>() != null)
                     continue;

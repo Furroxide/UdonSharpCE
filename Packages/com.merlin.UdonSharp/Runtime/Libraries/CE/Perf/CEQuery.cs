@@ -20,6 +20,15 @@ namespace UdonSharp.CE.Perf
     /// - You need to filter by component presence
     /// - You're prototyping and want cleaner code
     /// - The query runs infrequently
+    ///
+    /// From an UdonSharpBehaviour, use <see cref="Execute"/>, <see cref="Count"/>, <see cref="First"/>,
+    /// <see cref="Any"/> and the cached accessors. <see cref="ForEach"/>, <see cref="ForEachWhile"/> and
+    /// <see cref="ForEachCached"/> take a delegate, which Udon has no way to represent, and CE inlines a
+    /// lambda only where it is passed to List&lt;T&gt;.ForEach or one of CEList's ForEach helpers -- so
+    /// those three are for editor and plain C# callers.
+    ///
+    /// Execute fills the caller's buffer with a copy of the matching ids, which also makes it the
+    /// safe way to drive a loop that destroys entities: see the remarks on CEWorld.ActiveEntities.
     /// </remarks>
     /// <example>
     /// <code>
@@ -33,10 +42,11 @@ namespace UdonSharp.CE.Perf
     /// int[] entities = new int[100];
     /// int count = query.Execute(entities);
     ///
-    /// // Or iterate directly
-    /// query.ForEach((entityId) => {
+    /// for (int i = 0; i &lt; count; i++)
+    /// {
+    ///     int entityId = entities[i];
     ///     // Process entity
-    /// });
+    /// }
     /// </code>
     /// </example>
     [PublicAPI]

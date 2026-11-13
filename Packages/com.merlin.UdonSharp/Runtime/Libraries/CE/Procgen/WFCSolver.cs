@@ -20,7 +20,8 @@ namespace UdonSharp.CE.Procgen
         Completed,
 
         /// <summary>
-        /// Encountered a contradiction (no valid tiles for a cell).
+        /// Encountered a contradiction (no valid tiles for a cell), or the configuration cannot be solved
+        /// at all (no tiles, more than 64 tiles, a null tile, or a negative grid size).
         /// </summary>
         Failed,
 
@@ -37,12 +38,14 @@ namespace UdonSharp.CE.Procgen
     public class WFCTile
     {
         /// <summary>
-        /// Unique identifier for this tile.
+        /// Unique identifier for this tile. Any int is allowed, including negative values.
         /// </summary>
         public int Id;
 
         /// <summary>
         /// Selection weight (higher = more likely to be chosen).
+        /// A weight of zero or less is never chosen while a weighted tile is still possible; such a tile is
+        /// only placed in a cell where the constraints have ruled out every weighted one.
         /// </summary>
         public float Weight = 1f;
 
@@ -79,7 +82,7 @@ namespace UdonSharp.CE.Procgen
     public class WFCConfig
     {
         /// <summary>
-        /// Available tile definitions.
+        /// Available tile definitions. Between 1 and 64 tiles, none of them null.
         /// </summary>
         public WFCTile[] Tiles;
 
@@ -94,7 +97,7 @@ namespace UdonSharp.CE.Procgen
         public int Height = 16;
 
         /// <summary>
-        /// Maximum iterations per Tick() call for time-slicing.
+        /// Maximum iterations per Tick() call for time-slicing. Values below 1 are treated as 1.
         /// </summary>
         public int MaxIterationsPerFrame = 100;
 
@@ -119,6 +122,14 @@ namespace UdonSharp.CE.Procgen
     /// 5. Repeat until fully solved or contradiction detected
     ///
     /// Supports time-slicing via Tick() for frame budget management.
+    ///
+    /// A contradiction ends the solve with <see cref="WFCStatus.Failed"/>; there is no backtracking, and
+    /// Reset() replays the same seed into the same contradiction. To try again, build a solver with a
+    /// different seed or loosen the adjacency rules.
+    ///
+    /// The grid is exposed as one flat array, column by column: cell (x, y) is at index
+    /// <c>x * Height + y</c>. UdonSharp cannot compile multidimensional arrays, so a solver that held or
+    /// returned an <c>int[,]</c> could not be built into any behaviour.
     /// </remarks>
     /// <example>
     /// <code>
@@ -158,8 +169,8 @@ namespace UdonSharp.CE.Procgen
     /// }
     /// else if (solver.Status == WFCStatus.Completed)
     /// {
-    ///     int[,] result = solver.GetResult();
-    ///     SpawnTiles(result);
+    ///     int[] result = solver.GetResult();   // tile at (x, y) is result[x * solver.Height + y]
+    ///     SpawnTiles(result, solver.Width, solver.Height);
     /// }
     /// </code>
     /// </example>
@@ -171,31 +182,58 @@ namespace UdonSharp.CE.Procgen
         /// <summary>
         /// Current solver status.
         /// </summary>
-        public WFCStatus Status { get; private set; }
+        public WFCStatus Status => _status;
 
         /// <summary>
         /// Number of cells that have been collapsed.
         /// </summary>
-        public int CollapsedCount { get; private set; }
+        public int CollapsedCount => _collapsedCount;
 
         /// <summary>
         /// Total number of cells in the grid.
         /// </summary>
-        public int TotalCells { get; private set; }
+        public int TotalCells => _totalCells;
 
         /// <summary>
         /// Progress as a value from 0 to 1.
         /// </summary>
-        public float Progress => TotalCells > 0 ? (float)CollapsedCount / TotalCells : 0f;
+        public float Progress => _totalCells > 0 ? (float)_collapsedCount / _totalCells : 0f;
+
+        /// <summary>
+        /// Width of the grid being solved, as read from the configuration at the last Reset().
+        /// </summary>
+        public int Width => _width;
+
+        /// <summary>
+        /// Height of the grid being solved, as read from the configuration at the last Reset().
+        /// </summary>
+        public int Height => _height;
+
+        private WFCStatus _status;
+        private int _collapsedCount;
+        private int _totalCells;
 
         private readonly WFCConfig _config;
         private readonly CERandom _rng;
 
-        // Grid state: possibilities[x, y] is a bitmask of valid tile indices
-        private ulong[,] _possibilities;
+        // Everything the solve reads is copied out of the caller-owned config at Reset(), so editing the
+        // config mid-solve cannot leave the grid arrays and the loops that index them disagreeing on size.
+        private WFCTile[] _tiles;
+        private int _width;
+        private int _height;
+        private bool _wrapEdges;
 
-        // Result grid: result[x, y] is the chosen tile ID (-1 if uncollapsed)
-        private int[,] _result;
+        // Grid state, one entry per cell at index x * _height + y.
+        // _possibilities is a bitmask of valid tile indices.
+        private ulong[] _possibilities;
+
+        // Chosen tile ID per cell (-1 until the cell is collapsed)
+        private int[] _result;
+
+        // Whether each cell has been collapsed. This is a separate flag rather than "_result >= 0": tile
+        // IDs are caller-chosen ints, and a tile with a negative ID used to look uncollapsed for ever. It
+        // was picked and re-collapsed on every iteration, so Solve() never returned.
+        private bool[] _collapsed;
 
         // Number of tiles (max 64 for bitmask)
         private int _tileCount;
@@ -206,9 +244,12 @@ namespace UdonSharp.CE.Procgen
         private ulong[] _validEast;
         private ulong[] _validWest;
 
-        // Propagation stack
-        private int[] _propagateStackX;
-        private int[] _propagateStackY;
+        // Cells waiting for their constraints to be pushed out to their neighbours. A cell is queued at
+        // most once (_queued), so one slot per cell is always enough. Without that guard a cell was pushed
+        // again for every bit it lost, the fixed-size stack could fill, and the overflow was dropped
+        // silently -- leaving neighbours that were never told about a constraint.
+        private int[] _propagateStack;
+        private bool[] _queued;
         private int _propagateStackSize;
 
         #endregion
@@ -224,17 +265,55 @@ namespace UdonSharp.CE.Procgen
         {
             _config = config;
             _rng = new CERandom(seed);
-            _tileCount = config.Tiles?.Length ?? 0;
-            TotalCells = config.Width * config.Height;
 
-            if (_tileCount == 0 || _tileCount > 64)
+            Reset();
+        }
+
+        /// <summary>
+        /// Copies the configuration into the solver and reports whether it can be solved at all.
+        /// </summary>
+        private bool ReadConfig()
+        {
+            _tiles = null;
+            _tileCount = 0;
+            _width = 0;
+            _height = 0;
+            _totalCells = 0;
+            _wrapEdges = false;
+
+            if (_config == null)
+                return false;
+
+            int width = _config.Width;
+            int height = _config.Height;
+
+            // A negative size cannot be allocated, and neither can a cell count that overflows int. Failing
+            // here keeps both a status the caller can read rather than an exception that halts the behaviour.
+            if (width < 0 || height < 0)
+                return false;
+
+            if (width > 0 && height > int.MaxValue / width)
+                return false;
+
+            _width = width;
+            _height = height;
+            _totalCells = width * height;
+            _wrapEdges = _config.WrapEdges;
+
+            WFCTile[] tiles = _config.Tiles;
+            if (tiles == null || tiles.Length == 0 || tiles.Length > 64)
+                return false;
+
+            for (int i = 0; i < tiles.Length; i++)
             {
-                Status = WFCStatus.Failed;
-                return;
+                if (tiles[i] == null)
+                    return false;
             }
 
-            PrecomputeConstraints();
-            Reset();
+            _tiles = tiles;
+            _tileCount = tiles.Length;
+
+            return true;
         }
 
         /// <summary>
@@ -249,48 +328,33 @@ namespace UdonSharp.CE.Procgen
 
             for (int i = 0; i < _tileCount; i++)
             {
-                var tile = _config.Tiles[i];
+                WFCTile tile = _tiles[i];
 
-                if (tile.ValidNorth != null)
-                {
-                    for (int j = 0; j < tile.ValidNorth.Length; j++)
-                    {
-                        int validIdx = TileIdToIndex(tile.ValidNorth[j]);
-                        if (validIdx >= 0)
-                            _validNorth[i] |= 1UL << validIdx;
-                    }
-                }
-
-                if (tile.ValidSouth != null)
-                {
-                    for (int j = 0; j < tile.ValidSouth.Length; j++)
-                    {
-                        int validIdx = TileIdToIndex(tile.ValidSouth[j]);
-                        if (validIdx >= 0)
-                            _validSouth[i] |= 1UL << validIdx;
-                    }
-                }
-
-                if (tile.ValidEast != null)
-                {
-                    for (int j = 0; j < tile.ValidEast.Length; j++)
-                    {
-                        int validIdx = TileIdToIndex(tile.ValidEast[j]);
-                        if (validIdx >= 0)
-                            _validEast[i] |= 1UL << validIdx;
-                    }
-                }
-
-                if (tile.ValidWest != null)
-                {
-                    for (int j = 0; j < tile.ValidWest.Length; j++)
-                    {
-                        int validIdx = TileIdToIndex(tile.ValidWest[j]);
-                        if (validIdx >= 0)
-                            _validWest[i] |= 1UL << validIdx;
-                    }
-                }
+                _validNorth[i] = BuildMask(tile.ValidNorth);
+                _validSouth[i] = BuildMask(tile.ValidSouth);
+                _validEast[i] = BuildMask(tile.ValidEast);
+                _validWest[i] = BuildMask(tile.ValidWest);
             }
+        }
+
+        /// <summary>
+        /// Converts a list of tile IDs into a bitmask of tile indices. Unknown IDs are ignored.
+        /// </summary>
+        private ulong BuildMask(int[] tileIds)
+        {
+            ulong mask = 0;
+
+            if (tileIds == null)
+                return mask;
+
+            for (int j = 0; j < tileIds.Length; j++)
+            {
+                int validIdx = TileIdToIndex(tileIds[j]);
+                if (validIdx >= 0)
+                    mask |= 1UL << validIdx;
+            }
+
+            return mask;
         }
 
         /// <summary>
@@ -300,7 +364,7 @@ namespace UdonSharp.CE.Procgen
         {
             for (int i = 0; i < _tileCount; i++)
             {
-                if (_config.Tiles[i].Id == tileId)
+                if (_tiles[i].Id == tileId)
                     return i;
             }
             return -1;
@@ -311,33 +375,49 @@ namespace UdonSharp.CE.Procgen
         #region Public API
 
         /// <summary>
-        /// Resets the solver to initial state for re-solving.
+        /// Resets the solver to initial state for re-solving. The configuration is read again, so a
+        /// solver that failed on an unusable configuration can be reset once the configuration is fixed.
         /// </summary>
         public void Reset()
         {
-            int width = _config.Width;
-            int height = _config.Height;
-
-            _possibilities = new ulong[width, height];
-            _result = new int[width, height];
-
-            // Initialize all cells with all possibilities
-            ulong allPossible = (1UL << _tileCount) - 1;
-            for (int x = 0; x < width; x++)
-            {
-                for (int y = 0; y < height; y++)
-                {
-                    _possibilities[x, y] = allPossible;
-                    _result[x, y] = -1;
-                }
-            }
-
-            _propagateStackX = new int[width * height * 4];
-            _propagateStackY = new int[width * height * 4];
+            _collapsedCount = 0;
             _propagateStackSize = 0;
 
-            CollapsedCount = 0;
-            Status = WFCStatus.InProgress;
+            if (!ReadConfig())
+            {
+                // Dropping the grid makes every accessor below take its "no grid" path. They used to
+                // dereference arrays that an unusable configuration had never allocated.
+                _possibilities = null;
+                _result = null;
+                _collapsed = null;
+                _propagateStack = null;
+                _queued = null;
+                _status = WFCStatus.Failed;
+                return;
+            }
+
+            PrecomputeConstraints();
+
+            int cellCount = _totalCells;
+
+            _possibilities = new ulong[cellCount];
+            _result = new int[cellCount];
+            _collapsed = new bool[cellCount];
+
+            // Initialize all cells with all possibilities. A shift count is taken modulo 64, so
+            // (1UL << 64) - 1 is 0, not "all bits": with exactly 64 tiles -- the documented maximum --
+            // every cell started with nothing possible and the first step failed.
+            ulong allPossible = _tileCount >= 64 ? 0xFFFFFFFFFFFFFFFFUL : (1UL << _tileCount) - 1;
+            for (int i = 0; i < cellCount; i++)
+            {
+                _possibilities[i] = allPossible;
+                _result[i] = -1;
+            }
+
+            _propagateStack = new int[cellCount];
+            _queued = new bool[cellCount];
+
+            _status = WFCStatus.InProgress;
 
             _rng.Reset();
         }
@@ -349,37 +429,22 @@ namespace UdonSharp.CE.Procgen
         /// <returns>Current status after tick.</returns>
         public WFCStatus Tick()
         {
-            if (Status != WFCStatus.InProgress)
-                return Status;
+            if (_status != WFCStatus.InProgress)
+                return _status;
 
+            // A budget of zero or less ran no iteration at all, so the status stayed InProgress for ever
+            // and an Update() loop waiting on it never finished.
             int iterations = _config.MaxIterationsPerFrame;
+            if (iterations < 1)
+                iterations = 1;
 
             for (int i = 0; i < iterations; i++)
             {
-                // Find cell with minimum entropy
-                if (!FindMinEntropyCell(out int x, out int y))
-                {
-                    // All cells collapsed
-                    Status = WFCStatus.Completed;
-                    return Status;
-                }
-
-                // Collapse that cell
-                if (!CollapseCell(x, y))
-                {
-                    Status = WFCStatus.Failed;
-                    return Status;
-                }
-
-                // Propagate constraints
-                if (!Propagate())
-                {
-                    Status = WFCStatus.Failed;
-                    return Status;
-                }
+                if (!Step())
+                    return _status;
             }
 
-            return Status;
+            return _status;
         }
 
         /// <summary>
@@ -389,22 +454,14 @@ namespace UdonSharp.CE.Procgen
         /// <returns>Final status.</returns>
         public WFCStatus Solve()
         {
-            while (Status == WFCStatus.InProgress)
+            // Every step either collapses a cell that was not collapsed before or ends the solve, so this
+            // runs at most TotalCells + 1 times.
+            while (_status == WFCStatus.InProgress)
             {
-                if (!FindMinEntropyCell(out int x, out int y))
-                {
-                    Status = WFCStatus.Completed;
-                    return Status;
-                }
-
-                if (!CollapseCell(x, y) || !Propagate())
-                {
-                    Status = WFCStatus.Failed;
-                    return Status;
-                }
+                Step();
             }
 
-            return Status;
+            return _status;
         }
 
         /// <summary>
@@ -412,58 +469,100 @@ namespace UdonSharp.CE.Procgen
         /// </summary>
         public void Abort()
         {
-            Status = WFCStatus.Aborted;
+            _status = WFCStatus.Aborted;
         }
 
         /// <summary>
         /// Gets the result grid as tile IDs.
         /// </summary>
-        /// <returns>2D array of tile IDs (-1 for uncollapsed cells).</returns>
-        public int[,] GetResult()
+        /// <returns>
+        /// A copy of the grid, <see cref="Width"/> * <see cref="Height"/> long, with cell (x, y) at index
+        /// <c>x * Height + y</c>. Uncollapsed cells hold -1; use <see cref="IsCollapsed"/> to tell them
+        /// apart from a tile whose ID is -1. Empty when the configuration could not be solved.
+        /// </returns>
+        public int[] GetResult()
         {
-            int width = _config.Width;
-            int height = _config.Height;
-            int[,] result = new int[width, height];
+            if (_result == null)
+                return new int[0];
 
-            for (int x = 0; x < width; x++)
+            int[] result = new int[_result.Length];
+
+            for (int i = 0; i < result.Length; i++)
             {
-                for (int y = 0; y < height; y++)
-                {
-                    result[x, y] = _result[x, y];
-                }
+                result[i] = _result[i];
             }
 
             return result;
         }
 
         /// <summary>
-        /// Gets the tile ID at a specific position.
+        /// Gets the tile ID at a specific position (-1 if the cell is uncollapsed or out of range).
         /// </summary>
         public int GetTileAt(int x, int y)
         {
-            if (x < 0 || x >= _config.Width || y < 0 || y >= _config.Height)
+            if (_result == null || x < 0 || x >= _width || y < 0 || y >= _height)
                 return -1;
-            return _result[x, y];
+            return _result[x * _height + y];
+        }
+
+        /// <summary>
+        /// Gets whether the cell at a position has been collapsed to a tile.
+        /// </summary>
+        public bool IsCollapsed(int x, int y)
+        {
+            if (_collapsed == null || x < 0 || x >= _width || y < 0 || y >= _height)
+                return false;
+            return _collapsed[x * _height + y];
         }
 
         /// <summary>
         /// Forces a specific tile at a position before solving.
         /// </summary>
+        /// <returns>
+        /// True when the cell now holds the tile. False when the request was refused -- the position or
+        /// tile ID is unknown, the solver is not in progress, or earlier constraints have already ruled the
+        /// tile out for that cell -- in which case the grid is left exactly as it was. Also false when the
+        /// tile was placed but propagating it ran into a contradiction, in which case Status is Failed.
+        /// </returns>
         public bool SetTile(int x, int y, int tileId)
         {
-            if (x < 0 || x >= _config.Width || y < 0 || y >= _config.Height)
+            if (_status != WFCStatus.InProgress || _result == null)
+                return false;
+
+            if (x < 0 || x >= _width || y < 0 || y >= _height)
                 return false;
 
             int tileIndex = TileIdToIndex(tileId);
             if (tileIndex < 0)
                 return false;
 
-            _possibilities[x, y] = 1UL << tileIndex;
-            _result[x, y] = tileId;
-            CollapsedCount++;
+            int cell = x * _height + y;
+            ulong tileBit = 1UL << tileIndex;
 
-            PushPropagate(x, y);
-            return Propagate();
+            // Forcing a tile the constraints have already excluded used to overwrite the cell anyway,
+            // return false, and leave the solver InProgress on a grid that then completed with illegal
+            // neighbours. Refusing keeps the grid consistent. A cell that is already collapsed is a repeat
+            // of the same request, not a second collapse to count.
+            if (_collapsed[cell])
+                return _possibilities[cell] == tileBit;
+
+            if ((_possibilities[cell] & tileBit) == 0)
+                return false;
+
+            _possibilities[cell] = tileBit;
+            _result[cell] = _tiles[tileIndex].Id;
+            _collapsed[cell] = true;
+            _collapsedCount++;
+
+            PushPropagate(cell);
+
+            if (!Propagate())
+            {
+                _status = WFCStatus.Failed;
+                return false;
+            }
+
+            return true;
         }
 
         #endregion
@@ -471,93 +570,118 @@ namespace UdonSharp.CE.Procgen
         #region Core Algorithm
 
         /// <summary>
+        /// Runs one find / collapse / propagate iteration.
+        /// </summary>
+        /// <returns>True while the solve is still in progress.</returns>
+        private bool Step()
+        {
+            int cell = FindMinEntropyCell();
+            if (cell < 0)
+            {
+                // All cells collapsed
+                _status = WFCStatus.Completed;
+                return false;
+            }
+
+            if (!CollapseCell(cell) || !Propagate())
+            {
+                _status = WFCStatus.Failed;
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
         /// Finds the cell with minimum entropy (fewest possibilities).
         /// </summary>
-        private bool FindMinEntropyCell(out int minX, out int minY)
+        /// <returns>The cell index, or -1 when every cell is collapsed.</returns>
+        private int FindMinEntropyCell()
         {
-            minX = -1;
-            minY = -1;
+            int minCell = -1;
             int minEntropy = int.MaxValue;
             float minNoise = float.MaxValue;
 
-            int width = _config.Width;
-            int height = _config.Height;
+            int cellCount = _possibilities.Length;
 
-            for (int x = 0; x < width; x++)
+            for (int cell = 0; cell < cellCount; cell++)
             {
-                for (int y = 0; y < height; y++)
+                if (_collapsed[cell])
+                    continue; // Already collapsed
+
+                int entropy = CountBits(_possibilities[cell]);
+
+                if (entropy == 0)
                 {
-                    if (_result[x, y] >= 0)
-                        continue; // Already collapsed
+                    // Contradiction found; CollapseCell reports it
+                    return cell;
+                }
 
-                    int entropy = CountBits(_possibilities[x, y]);
-
-                    if (entropy == 0)
-                    {
-                        // Contradiction found
-                        minX = x;
-                        minY = y;
-                        return true;
-                    }
-
-                    if (entropy < minEntropy ||
-                        (entropy == minEntropy && _rng.NextFloat() < minNoise))
-                    {
-                        minEntropy = entropy;
-                        minNoise = _rng.NextFloat();
-                        minX = x;
-                        minY = y;
-                    }
+                if (entropy < minEntropy ||
+                    (entropy == minEntropy && _rng.NextFloat() < minNoise))
+                {
+                    minEntropy = entropy;
+                    minNoise = _rng.NextFloat();
+                    minCell = cell;
                 }
             }
 
-            return minX >= 0;
+            return minCell;
         }
 
         /// <summary>
         /// Collapses a cell to a single tile based on weights.
         /// </summary>
-        private bool CollapseCell(int x, int y)
+        private bool CollapseCell(int cell)
         {
-            ulong possible = _possibilities[x, y];
+            ulong possible = _possibilities[cell];
 
             if (possible == 0)
                 return false; // Contradiction
 
-            // Calculate total weight of possible tiles
+            // Calculate total weight of possible tiles. Weights of zero or less contribute nothing.
             float totalWeight = 0f;
             for (int i = 0; i < _tileCount; i++)
             {
                 if ((possible & (1UL << i)) != 0)
                 {
-                    totalWeight += _config.Tiles[i].Weight;
+                    float weight = _tiles[i].Weight;
+                    if (weight > 0f)
+                        totalWeight += weight;
                 }
             }
 
-            if (totalWeight <= 0f)
-                return false;
-
-            // Choose tile based on weight
-            float choice = _rng.NextFloat() * totalWeight;
-            float accumulated = 0f;
             int chosenIndex = -1;
 
-            for (int i = 0; i < _tileCount; i++)
+            // Choose tile based on weight
+            if (totalWeight > 0f)
             {
-                if ((possible & (1UL << i)) != 0)
+                float choice = _rng.NextFloat() * totalWeight;
+                float accumulated = 0f;
+
+                for (int i = 0; i < _tileCount; i++)
                 {
-                    accumulated += _config.Tiles[i].Weight;
-                    if (choice < accumulated)
+                    if ((possible & (1UL << i)) != 0)
                     {
-                        chosenIndex = i;
-                        break;
+                        float weight = _tiles[i].Weight;
+                        if (weight > 0f)
+                        {
+                            accumulated += weight;
+                            if (choice < accumulated)
+                            {
+                                chosenIndex = i;
+                                break;
+                            }
+                        }
                     }
                 }
             }
 
             if (chosenIndex < 0)
             {
-                // Fallback: choose last valid tile
+                // No weighted tile is left: take the last valid one. A cell whose only remaining tiles
+                // weigh nothing used to be reported as a contradiction, failing a grid that had a legal
+                // answer -- the constraints had forced exactly the tile a zero weight says not to volunteer.
                 for (int i = _tileCount - 1; i >= 0; i--)
                 {
                     if ((possible & (1UL << i)) != 0)
@@ -572,30 +696,32 @@ namespace UdonSharp.CE.Procgen
                 return false;
 
             // Collapse to chosen tile
-            _possibilities[x, y] = 1UL << chosenIndex;
-            _result[x, y] = _config.Tiles[chosenIndex].Id;
-            CollapsedCount++;
+            _possibilities[cell] = 1UL << chosenIndex;
+            _result[cell] = _tiles[chosenIndex].Id;
+            _collapsed[cell] = true;
+            _collapsedCount++;
 
-            PushPropagate(x, y);
+            PushPropagate(cell);
             return true;
         }
 
         /// <summary>
         /// Propagates constraints from collapsed cells to neighbors.
         /// </summary>
+        /// <returns>False when a cell was left with no possible tile.</returns>
         private bool Propagate()
         {
-            int width = _config.Width;
-            int height = _config.Height;
-            bool wrap = _config.WrapEdges;
+            int width = _width;
+            int height = _height;
+            bool wrap = _wrapEdges;
 
             while (_propagateStackSize > 0)
             {
                 _propagateStackSize--;
-                int x = _propagateStackX[_propagateStackSize];
-                int y = _propagateStackY[_propagateStackSize];
+                int cell = _propagateStack[_propagateStackSize];
+                _queued[cell] = false;
 
-                ulong possible = _possibilities[x, y];
+                ulong possible = _possibilities[cell];
                 if (possible == 0)
                     return false; // Contradiction
 
@@ -616,50 +742,37 @@ namespace UdonSharp.CE.Procgen
                     }
                 }
 
-                // Propagate to neighbors
+                int x = cell / height;
+                int y = cell - x * height;
+
+                // Propagate to neighbors; an index of -1 means "off the edge of a grid that does not wrap"
                 // North (+Y)
                 int ny = y + 1;
-                if (ny < height || wrap)
-                {
-                    if (wrap && ny >= height) ny = 0;
-                    if (ny < height && PropagateToNeighbor(x, ny, validForNorth))
-                    {
-                        if (_possibilities[x, ny] == 0) return false;
-                    }
-                }
+                if (ny >= height)
+                    ny = wrap ? 0 : -1;
+                if (ny >= 0 && !ConstrainNeighbor(x * height + ny, validForNorth))
+                    return false;
 
                 // South (-Y)
                 ny = y - 1;
-                if (ny >= 0 || wrap)
-                {
-                    if (wrap && ny < 0) ny = height - 1;
-                    if (ny >= 0 && PropagateToNeighbor(x, ny, validForSouth))
-                    {
-                        if (_possibilities[x, ny] == 0) return false;
-                    }
-                }
+                if (ny < 0)
+                    ny = wrap ? height - 1 : -1;
+                if (ny >= 0 && !ConstrainNeighbor(x * height + ny, validForSouth))
+                    return false;
 
                 // East (+X)
                 int nx = x + 1;
-                if (nx < width || wrap)
-                {
-                    if (wrap && nx >= width) nx = 0;
-                    if (nx < width && PropagateToNeighbor(nx, y, validForEast))
-                    {
-                        if (_possibilities[nx, y] == 0) return false;
-                    }
-                }
+                if (nx >= width)
+                    nx = wrap ? 0 : -1;
+                if (nx >= 0 && !ConstrainNeighbor(nx * height + y, validForEast))
+                    return false;
 
                 // West (-X)
                 nx = x - 1;
-                if (nx >= 0 || wrap)
-                {
-                    if (wrap && nx < 0) nx = width - 1;
-                    if (nx >= 0 && PropagateToNeighbor(nx, y, validForWest))
-                    {
-                        if (_possibilities[nx, y] == 0) return false;
-                    }
-                }
+                if (nx < 0)
+                    nx = wrap ? width - 1 : -1;
+                if (nx >= 0 && !ConstrainNeighbor(nx * height + y, validForWest))
+                    return false;
             }
 
             return true;
@@ -668,36 +781,35 @@ namespace UdonSharp.CE.Procgen
         /// <summary>
         /// Applies constraint to a neighbor cell.
         /// </summary>
-        /// <returns>True if the neighbor's possibilities changed.</returns>
-        private bool PropagateToNeighbor(int x, int y, ulong validMask)
+        /// <returns>False when the constraint left the neighbor with no possible tile.</returns>
+        private bool ConstrainNeighbor(int cell, ulong validMask)
         {
-            ulong oldPossible = _possibilities[x, y];
+            ulong oldPossible = _possibilities[cell];
             ulong newPossible = oldPossible & validMask;
 
             if (newPossible == oldPossible)
+                return true;
+
+            _possibilities[cell] = newPossible;
+
+            if (newPossible == 0)
                 return false;
 
-            _possibilities[x, y] = newPossible;
-
-            if (newPossible != 0)
-            {
-                PushPropagate(x, y);
-            }
-
+            PushPropagate(cell);
             return true;
         }
 
         /// <summary>
-        /// Adds a cell to the propagation stack.
+        /// Adds a cell to the propagation stack unless it is already waiting on it.
         /// </summary>
-        private void PushPropagate(int x, int y)
+        private void PushPropagate(int cell)
         {
-            if (_propagateStackSize < _propagateStackX.Length)
-            {
-                _propagateStackX[_propagateStackSize] = x;
-                _propagateStackY[_propagateStackSize] = y;
-                _propagateStackSize++;
-            }
+            if (_queued[cell])
+                return;
+
+            _queued[cell] = true;
+            _propagateStack[_propagateStackSize] = cell;
+            _propagateStackSize++;
         }
 
         #endregion
@@ -723,9 +835,9 @@ namespace UdonSharp.CE.Procgen
         /// </summary>
         public int GetEntropyAt(int x, int y)
         {
-            if (x < 0 || x >= _config.Width || y < 0 || y >= _config.Height)
+            if (_possibilities == null || x < 0 || x >= _width || y < 0 || y >= _height)
                 return 0;
-            return CountBits(_possibilities[x, y]);
+            return CountBits(_possibilities[x * _height + y]);
         }
 
         /// <summary>
@@ -733,10 +845,10 @@ namespace UdonSharp.CE.Procgen
         /// </summary>
         public int[] GetPossibilitiesAt(int x, int y)
         {
-            if (x < 0 || x >= _config.Width || y < 0 || y >= _config.Height)
+            if (_possibilities == null || x < 0 || x >= _width || y < 0 || y >= _height)
                 return new int[0];
 
-            ulong possible = _possibilities[x, y];
+            ulong possible = _possibilities[x * _height + y];
             int count = CountBits(possible);
             int[] result = new int[count];
             int idx = 0;
@@ -745,7 +857,8 @@ namespace UdonSharp.CE.Procgen
             {
                 if ((possible & (1UL << i)) != 0)
                 {
-                    result[idx++] = _config.Tiles[i].Id;
+                    result[idx] = _tiles[i].Id;
+                    idx++;
                 }
             }
 

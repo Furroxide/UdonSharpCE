@@ -19,6 +19,8 @@ namespace UdonSharp.CE.Persistence
         /// <summary>
         /// No data exists for this player/key combination.
         /// This is normal for first-time players. Initialize default values.
+        /// Only trust it once the local OnPlayerRestored event has fired: before VRChat has restored the local
+        /// player's PlayerData, a returning player's save can read as missing too.
         /// </summary>
         NoData = 1,
 
@@ -47,8 +49,8 @@ namespace UdonSharp.CE.Persistence
         QuotaExceeded = 5,
 
         /// <summary>
-        /// Player data is not yet available (still loading).
-        /// Wait for the OnPlayerDataUpdated callback.
+        /// The local player is missing or invalid. This does not detect loading PlayerData.
+        /// Call Restore after local OnPlayerRestored before interpreting NoData.
         /// </summary>
         NotReady = 6
     }

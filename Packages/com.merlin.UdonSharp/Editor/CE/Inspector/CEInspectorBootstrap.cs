@@ -1,3 +1,5 @@
+using System;
+using UdonSharpEditor;
 using UnityEditor;
 using UnityEngine;
 
@@ -17,6 +19,8 @@ namespace UdonSharp.CE.Editor.Inspector
         private const string PREF_HIDE_UDON_BEHAVIOURS = "CE_HideUdonBehaviours";
         private const string PREF_SHOW_OPTIMIZATION_INFO = "CE_ShowOptimizationInfo";
         private const string PREF_AUTO_GROUP_PROPERTIES = "CE_AutoGroupProperties";
+
+        // Written by the former "Use CE Inspector" preference, which nothing read. Only deleted now, on reset.
         private const string PREF_USE_CE_INSPECTOR = "CE_UseCEInspector";
 
         // ═══════════════════════════════════════════════════════════════
@@ -53,13 +57,30 @@ namespace UdonSharp.CE.Editor.Inspector
         }
 
         /// <summary>
-        /// Whether to use the CE Inspector as the default.
-        /// When false, falls back to standard UdonSharp inspector.
+        /// Whether UdonSharp hands U# behaviours to the CE Inspector by default.
+        ///
+        /// That is UdonSharp's own project setting, Project Settings > Udon Sharp > Default Behaviour Editor,
+        /// and this only reports it. It used to be an EditorPrefs toggle that nothing read: switching it
+        /// off changed no inspector, and switching it on did not select the CE Inspector either.
         /// </summary>
         public static bool UseCEInspector
         {
-            get => EditorPrefs.GetBool(PREF_USE_CE_INSPECTOR, true);
-            set => EditorPrefs.SetBool(PREF_USE_CE_INSPECTOR, value);
+            get
+            {
+                UdonSharpSettings settings = UdonSharpSettings.GetSettings();
+
+                // The key UdonSharp files a default editor under is the editor type's ToString().
+                return settings != null &&
+                       string.Equals(settings.defaultBehaviourInterfaceType, typeof(CEBehaviourEditor).ToString(), StringComparison.Ordinal);
+            }
+        }
+
+        /// <summary>
+        /// Opens the project settings page where the default U# behaviour editor is chosen.
+        /// </summary>
+        public static void OpenDefaultEditorSetting()
+        {
+            SettingsService.OpenProjectSettings("Project/Udon Sharp");
         }
 
         // ═══════════════════════════════════════════════════════════════

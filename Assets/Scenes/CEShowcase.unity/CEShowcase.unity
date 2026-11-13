@@ -22808,8 +22808,8 @@ MonoBehaviour:
   _maxAgents: 500
   _initialAgents: 200
   _agentScale: 0.5
-  _arenaMin: {x: -25, y: 0, z: -25}
-  _arenaMax: {x: 25, y: 5, z: 25}
+  _arenaMin: {x: -20, y: 0, z: 20}
+  _arenaMax: {x: 20, y: 5, z: 60}
   _cellSize: 5
   _separationWeight: 1.5
   _alignmentWeight: 1
@@ -27452,8 +27452,8 @@ MonoBehaviour:
   _spawnRate: 500
   _bulletSpeed: 15
   _bulletLifetime: 3
-  _stationCenter: {x: 40, y: 2, z: 0}
-  _stationHalfExtents: {x: 18, y: 5, z: 18}
+  _stationCenter: {x: 29.5, y: 2, z: -36}
+  _stationHalfExtents: {x: 15, y: 5, z: 15}
   _patternMode: 0
   _playerBounceRadius: 1.5
   _statsText: {fileID: 509501042}

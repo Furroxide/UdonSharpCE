@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -19,14 +21,30 @@ namespace UdonSharp.CE.Editor.CodeGen
     ///
     /// Rules:
     /// <list type="bullet">
-    /// <item>No synced state at all -> leave the behaviour alone. Injecting a mode here would force a
-    /// sync method onto the GameObject and can fight a sibling behaviour's declared mode.</item>
+    /// <item>No synced state of its own -> leave the behaviour alone. Injecting a mode here would force a
+    /// sync method onto the GameObject and can fight a sibling behaviour's declared mode; a class that
+    /// only inherits synced state already resolves to whatever its base declares or was given.</item>
     /// <item>Synced state, no declared mode -> inject Manual when something requires it (arrays,
-    /// <c>[SyncOnJoin]</c> payloads), otherwise Continuous. This removes the invisible default where an
-    /// undeclared behaviour silently resolves to Continuous at runtime.</item>
+    /// <c>[SyncOnJoin]</c> payloads) or prefers it (a synced string, on a behaviour with no interpolated
+    /// field), otherwise Continuous. This removes the invisible default where an undeclared behaviour
+    /// silently resolves to Continuous at runtime.</item>
     /// <item>Declared mode that cannot carry the state -> hard compile error. A declared intent is never
     /// silently overridden.</item>
     /// </list>
+    ///
+    /// "The state" is the behaviour's whole synced state: every partial declaration of the class and
+    /// every base class up to <c>UdonSharpBehaviour</c>. The compiler emits inherited fields into the
+    /// derived program and gives that program exactly one sync mode, so a decision made from one
+    /// declaration's own fields is a decision about a program that does not exist.
+    ///
+    /// "Requires" and "prefers" are kept apart on purpose. Continuous sync cannot carry an array at all,
+    /// and a <c>[SyncOnJoin]</c> payload needs Manual's explicit serialization; those are requirements,
+    /// and a declared Continuous that contradicts one is CE0034. A string is different: Continuous syncs
+    /// it, it merely shares the ~200 byte budget with everything else on the behaviour. Treating that as
+    /// a requirement rejected working behaviours outright, and left one shape with no mode that compiled
+    /// at all -- a smoothed field beside a string was pushed to Manual by the string, refused under
+    /// Manual by the compiler because of the interpolation, and refused under a declared Continuous by
+    /// CE0034 because of the string.
     /// </summary>
     internal class BehaviourSyncModeEmitter : ICompileTimeOptimizer
     {
@@ -78,9 +96,16 @@ namespace UdonSharp.CE.Editor.CodeGen
                 if (classSymbol == null || !IsUdonSharpBehaviour(classSymbol))
                     return visited;
 
-                SyncRequirement requirement = AnalyzeSyncedFields(node, classSymbol);
+                // A partial behaviour is one type with several declarations, and every one of them is
+                // visited. Deciding per declaration gave each part that held a synced field its own
+                // injected attribute -- CS0579, a duplicate attribute on a class whose author wrote none --
+                // and let two parts infer two different modes. One part decides for the whole type.
+                if (!IsCanonicalDeclarationPart(classSymbol, node))
+                    return visited;
 
-                if (!requirement.HasSyncedState)
+                SyncRequirement requirement = AnalyzeSyncedFields(classSymbol);
+
+                if (!requirement.DeclaresSyncedState)
                     return visited;
 
                 string declaredMode = GetDeclaredSyncMode(classSymbol);
@@ -91,19 +116,35 @@ namespace UdonSharp.CE.Editor.CodeGen
                     return visited;
                 }
 
-                string inferredMode = requirement.RequiresManual ? "Manual" : "Continuous";
+                // A string only asks for Manual. Honouring that on a behaviour that also interpolates a
+                // field would pick the one mode the compiler then rejects the interpolation under.
+                bool manualForString = requirement.PrefersManual && !requirement.HasInterpolatedField;
+                string inferredMode = (requirement.RequiresManual || manualForString) ? "Manual" : "Continuous";
 
-                ClassDeclarationSyntax withAttribute = visited.AddAttributeLists(
-                    SyntaxFactory.AttributeList(
-                            SyntaxFactory.SingletonSeparatedList(
-                                SyntaxFactory.Attribute(
-                                    SyntaxFactory.ParseName("global::UdonSharp.UdonBehaviourSyncMode"),
-                                    SyntaxFactory.AttributeArgumentList(
-                                        SyntaxFactory.SingletonSeparatedList(
-                                            SyntaxFactory.AttributeArgument(
-                                                SyntaxFactory.ParseExpression(
-                                                    $"global::UdonSharp.BehaviourSyncMode.{inferredMode}")))))))
-                        .WithTriviaFrom(visited));
+                AttributeListSyntax attributeList = SyntaxFactory.AttributeList(
+                    SyntaxFactory.SingletonSeparatedList(
+                        SyntaxFactory.Attribute(
+                            SyntaxFactory.ParseName("global::UdonSharp.UdonBehaviourSyncMode"),
+                            SyntaxFactory.AttributeArgumentList(
+                                SyntaxFactory.SingletonSeparatedList(
+                                    SyntaxFactory.AttributeArgument(
+                                        SyntaxFactory.ParseExpression(
+                                            $"global::UdonSharp.BehaviourSyncMode.{inferredMode}")))))));
+
+                // The injected list goes on the same line as the token it is put in front of, and TAKES
+                // that token's leading trivia instead of copying the declaration's. Copying it printed
+                // every comment and blank line above the class a second time, so the rewritten file ran
+                // that many lines longer than the author's and each later diagnostic in it -- reported by
+                // line in the rewritten tree -- pointed that far below the code it was about.
+                SyntaxToken anchor = visited.Modifiers.Count > 0 ? visited.Modifiers[0] : visited.Keyword;
+
+                attributeList = attributeList
+                    .WithLeadingTrivia(anchor.LeadingTrivia)
+                    .WithTrailingTrivia(SyntaxFactory.Space);
+
+                ClassDeclarationSyntax withAttribute = visited
+                    .ReplaceToken(anchor, anchor.WithLeadingTrivia(SyntaxFactory.TriviaList()))
+                    .AddAttributeLists(attributeList);
 
                 ChangesMade = true;
 
@@ -113,12 +154,34 @@ namespace UdonSharp.CE.Editor.CodeGen
                     $"CE set '{node.Identifier.Text}' to {inferredMode} sync because it declares synced state" +
                     (requirement.RequiresManual
                         ? $" that requires Manual sync ({requirement.ManualReason})."
-                        : " and no [UdonBehaviourSyncMode] was present."),
+                        : manualForString
+                            ? " that includes a synced string, which can exceed the Continuous sync budget."
+                            : " and no [UdonBehaviourSyncMode] was present."),
                     location: node.GetLocation(),
                     originalCode: node.Identifier.Text,
                     optimizedCode: inferredMode);
 
                 return withAttribute;
+            }
+
+            /// <summary>
+            /// Whether this declaration is the one part of a (possibly partial) type that decides its mode:
+            /// the first by file path, then by position. The choice depends only on the symbol, so it is the
+            /// same whichever tree is visited first, and it is the same rule SyncOnJoinGlueEmitter uses to
+            /// place its generated members -- the attribute and the payload land on the same part.
+            /// </summary>
+            private static bool IsCanonicalDeclarationPart(INamedTypeSymbol type, ClassDeclarationSyntax node)
+            {
+                ImmutableArray<SyntaxReference> references = type.DeclaringSyntaxReferences;
+                if (references.Length <= 1)
+                    return true;
+
+                SyntaxReference canonical = references
+                    .OrderBy(reference => reference.SyntaxTree.FilePath, StringComparer.Ordinal)
+                    .ThenBy(reference => reference.Span.Start)
+                    .First();
+
+                return canonical.SyntaxTree == node.SyntaxTree && canonical.Span == node.Span;
             }
 
             private void ValidateDeclaredMode(
@@ -219,41 +282,89 @@ namespace UdonSharp.CE.Editor.CodeGen
             }
 
 
-            private SyncRequirement AnalyzeSyncedFields(ClassDeclarationSyntax node, INamedTypeSymbol classSymbol)
+            /// <summary>
+            /// Works out what the behaviour's synced state needs, from its SYMBOL: every partial part of the
+            /// class, and every base class up to <c>UdonSharpBehaviour</c>.
+            /// </summary>
+            /// <remarks>
+            /// This used to read the fields of the one declaration being visited, which was wrong twice.
+            ///
+            /// A derived behaviour's program carries its base's synced fields as well as its own, and the
+            /// compiler takes the first <c>[UdonBehaviourSyncMode]</c> it meets climbing from the emitted
+            /// type. So 'class Base { [SyncOnJoin] int phase; }' was given Manual, 'class Derived : Base
+            /// { [UdonSynced] float speed; }' looked only at 'speed' and was given Continuous, and Derived
+            /// ran Continuous while carrying the inherited late-join payload -- with nothing reported,
+            /// because a synced string is legal under Continuous. With an inherited array instead, the same
+            /// shape failed to compile on a class that had declared nothing. Inherited state is state.
+            ///
+            /// The other half is the partial case, handled together with
+            /// <see cref="IsCanonicalDeclarationPart"/>: the part that decides has to see the fields the
+            /// other parts hold, or two parts with different fields infer two different modes.
+            ///
+            /// Symbols are used rather than syntax because a base class is usually in another file, and
+            /// this pass's semantic model can only be asked about nodes in its own tree.
+            /// </remarks>
+            private static SyncRequirement AnalyzeSyncedFields(INamedTypeSymbol classSymbol)
             {
                 var requirement = new SyncRequirement();
                 var syncedFieldNames = new List<string>();
 
-                foreach (FieldDeclarationSyntax field in node.Members.OfType<FieldDeclarationSyntax>())
+                for (INamedTypeSymbol current = classSymbol; current != null; current = current.BaseType)
                 {
-                    SyncKind kind = ClassifySyncAttributes(field);
-                    if (kind == SyncKind.None)
-                        continue;
+                    if (current.Name == "UdonSharpBehaviour")
+                        break;
 
-                    requirement.HasSyncedState = true;
+                    bool inherited = !SymbolEqualityComparer.Default.Equals(current, classSymbol);
 
-                    foreach (VariableDeclaratorSyntax variable in field.Declaration.Variables)
-                        syncedFieldNames.Add(variable.Identifier.Text);
-
-                    if (kind == SyncKind.SyncOnJoin)
+                    foreach (ISymbol member in current.GetMembers())
                     {
-                        // [SyncOnJoin] is transported as a synced JSON string on this behaviour, which only
-                        // Manual sync can carry.
-                        requirement.RequiresManual = true;
-                        requirement.ManualReason = "[SyncOnJoin] state is transported as a synced string";
-                        continue;
-                    }
+                        if (!(member is IFieldSymbol field))
+                            continue;
 
-                    ITypeSymbol fieldType = _semanticModel.GetTypeInfo(field.Declaration.Type).Type;
-                    if (fieldType is IArrayTypeSymbol)
-                    {
+                        SyncKind kind = ClassifySyncAttributes(field, out bool interpolated);
+                        if (kind == SyncKind.None)
+                            continue;
+
+                        if (!inherited)
+                            requirement.DeclaresSyncedState = true;
+
+                        if (interpolated)
+                            requirement.HasInterpolatedField = true;
+
+                        syncedFieldNames.Add(inherited ? current.Name + "." + field.Name : field.Name);
+
+                        // The walk starts at the class itself, so its own fields are met before any
+                        // inherited one and get to explain the requirement first.
+                        string manualReason = null;
+
+                        if (kind == SyncKind.SyncOnJoin)
+                        {
+                            // [SyncOnJoin] is transported as a synced JSON string on this behaviour, and the
+                            // generated glue is written for Manual sync.
+                            manualReason = "[SyncOnJoin] state is transported as a synced string";
+                        }
+                        else if (field.Type is IArrayTypeSymbol)
+                        {
+                            manualReason = "synced arrays are not supported by Continuous sync";
+                        }
+                        else if (field.Type != null && field.Type.SpecialType == SpecialType.System_String)
+                        {
+                            // A preference, not a requirement: Continuous does sync a string, it only shares
+                            // the ~200 byte budget with the rest of the behaviour.
+                            requirement.PrefersManual = true;
+                        }
+
+                        if (manualReason == null)
+                            continue;
+
                         requirement.RequiresManual = true;
-                        requirement.ManualReason = "synced arrays are not supported by Continuous sync";
-                    }
-                    else if (fieldType != null && fieldType.SpecialType == SpecialType.System_String)
-                    {
-                        requirement.RequiresManual = true;
-                        requirement.ManualReason = "a synced string can exceed the Continuous sync budget";
+
+                        if (requirement.ManualReason.Length == 0)
+                        {
+                            requirement.ManualReason = inherited
+                                ? $"{manualReason}; '{field.Name}' is inherited from '{current.Name}'"
+                                : manualReason;
+                        }
                     }
                 }
 
@@ -265,45 +376,118 @@ namespace UdonSharp.CE.Editor.CodeGen
             }
 
             /// <summary>
-            /// Resolves each attribute through the semantic model so <c>[Sync]</c> (which derives from
+            /// Classifies a field through its bound attribute classes so <c>[Sync]</c> (which derives from
             /// <c>UdonSyncedAttribute</c>) and aliased usings are both recognised. Matching on the written
             /// text alone lets an alias slip past the generator while the analyzer still sees the field.
             /// </summary>
-            private SyncKind ClassifySyncAttributes(FieldDeclarationSyntax field)
+            private static SyncKind ClassifySyncAttributes(IFieldSymbol field, out bool interpolated)
             {
                 SyncKind result = SyncKind.None;
+                interpolated = false;
 
-                foreach (AttributeListSyntax attributeList in field.AttributeLists)
+                foreach (AttributeData attribute in field.GetAttributes())
                 {
-                    foreach (AttributeSyntax attribute in attributeList.Attributes)
+                    INamedTypeSymbol attributeType = attribute.AttributeClass;
+
+                    if (attributeType == null || attributeType.TypeKind == TypeKind.Error)
                     {
-                        ITypeSymbol attributeType = _semanticModel.GetTypeInfo(attribute).Type;
-
-                        if (attributeType == null)
-                        {
-                            // Fall back to the written name when the model cannot resolve the attribute.
-                            string written = attribute.Name.ToString();
-                            string shortName = written.Substring(written.LastIndexOf('.') + 1);
-
-                            if (shortName == "SyncOnJoin" || shortName == "SyncOnJoinAttribute")
-                                return SyncKind.SyncOnJoin;
-
-                            if (shortName == "UdonSynced" || shortName == "UdonSyncedAttribute" ||
-                                shortName == "Sync" || shortName == "SyncAttribute")
-                                result = SyncKind.Synced;
-
+                        // Fall back to the written name when the model cannot resolve the attribute.
+                        if (!(attribute.ApplicationSyntaxReference?.GetSyntax() is AttributeSyntax written))
                             continue;
-                        }
 
-                        if (IsOrDerivesFrom(attributeType, "SyncOnJoinAttribute"))
+                        string writtenName = written.Name.ToString();
+                        string shortName = writtenName.Substring(writtenName.LastIndexOf('.') + 1);
+
+                        if (shortName == "SyncOnJoin" || shortName == "SyncOnJoinAttribute")
                             return SyncKind.SyncOnJoin;
 
-                        if (IsOrDerivesFrom(attributeType, "UdonSyncedAttribute"))
+                        if (shortName == "UdonSynced" || shortName == "UdonSyncedAttribute" ||
+                            shortName == "Sync" || shortName == "SyncAttribute")
+                        {
                             result = SyncKind.Synced;
+
+                            if (WritesInterpolation(written))
+                                interpolated = true;
+                        }
+
+                        continue;
+                    }
+
+                    if (IsOrDerivesFrom(attributeType, "SyncOnJoinAttribute"))
+                        return SyncKind.SyncOnJoin;
+
+                    if (IsOrDerivesFrom(attributeType, "UdonSyncedAttribute"))
+                    {
+                        result = SyncKind.Synced;
+
+                        if (DeclaresInterpolation(attribute))
+                            interpolated = true;
                     }
                 }
 
                 return result;
+            }
+
+            /// <summary>
+            /// Whether a bound synced attribute asks for Linear or Smooth interpolation, in either spelling:
+            /// <c>[UdonSynced(UdonSyncMode.Smooth)]</c>, or <c>[Sync(...)]</c> with an
+            /// <c>InterpolationMode</c> given positionally or as <c>Interpolation = ...</c>.
+            /// </summary>
+            /// <remarks>
+            /// The argument is found by its enum type rather than by position or name, so the two attribute
+            /// shapes and both of [Sync]'s spellings are one test. Only Linear and Smooth count; None and
+            /// NotSynced interpolate nothing.
+            /// </remarks>
+            private static bool DeclaresInterpolation(AttributeData attribute)
+            {
+                foreach (TypedConstant argument in attribute.ConstructorArguments)
+                {
+                    if (IsInterpolatingArgument(argument))
+                        return true;
+                }
+
+                foreach (KeyValuePair<string, TypedConstant> named in attribute.NamedArguments)
+                {
+                    if (IsInterpolatingArgument(named.Value))
+                        return true;
+                }
+
+                return false;
+            }
+
+            private static bool IsInterpolatingArgument(TypedConstant argument)
+            {
+                if (argument.Kind != TypedConstantKind.Enum || argument.Type == null)
+                    return false;
+
+                if (argument.Type.Name != "UdonSyncMode" && argument.Type.Name != "InterpolationMode")
+                    return false;
+
+                string name = EnumMemberName(argument);
+                return name == "Linear" || name == "Smooth";
+            }
+
+            /// <summary>
+            /// The same question for an attribute the model could not bind, answered from the written
+            /// arguments. Anything it cannot read is taken as "no interpolation", which leaves the inference
+            /// where it was before interpolation was considered at all.
+            /// </summary>
+            private static bool WritesInterpolation(AttributeSyntax attribute)
+            {
+                if (attribute.ArgumentList == null)
+                    return false;
+
+                foreach (AttributeArgumentSyntax argument in attribute.ArgumentList.Arguments)
+                {
+                    string written = argument.Expression is MemberAccessExpressionSyntax memberAccess
+                        ? memberAccess.Name.Identifier.Text
+                        : (argument.Expression as IdentifierNameSyntax)?.Identifier.Text;
+
+                    if (written == "Linear" || written == "Smooth")
+                        return true;
+                }
+
+                return false;
             }
 
             private static bool IsOrDerivesFrom(ITypeSymbol type, string baseTypeName)
@@ -338,8 +522,21 @@ namespace UdonSharp.CE.Editor.CodeGen
 
         private sealed class SyncRequirement
         {
-            public bool HasSyncedState;
+            /// <summary>
+            /// The class itself (any of its partial parts) declares a synced field. Inherited state alone
+            /// does not set this: such a class is left to resolve to its base's mode.
+            /// </summary>
+            public bool DeclaresSyncedState;
+
+            /// <summary>Something in the whole synced state cannot work under Continuous at all.</summary>
             public bool RequiresManual;
+
+            /// <summary>Something in the whole synced state is better served by Manual, but syncs either way.</summary>
+            public bool PrefersManual;
+
+            /// <summary>Some synced field asks for Linear or Smooth interpolation, which only Continuous provides.</summary>
+            public bool HasInterpolatedField;
+
             public string ManualReason = "";
             public string FieldSummary = "";
         }

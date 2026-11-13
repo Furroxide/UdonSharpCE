@@ -246,6 +246,8 @@ namespace UdonSharp.Compiler.Binder
 
         public override BoundNode VisitConstructorDeclaration(ConstructorDeclarationSyntax node)
         {
+            if (node.Initializer != null && (node.Initializer.IsKind(SyntaxKind.ThisConstructorInitializer) || node.Initializer.ArgumentList.Arguments.Count != 0))
+                throw new NotSupportedException("Constructor chaining is not supported by UdonSharp; initialize the fields in this constructor instead.", node.Initializer);
             if (node.ExpressionBody is ArrowExpressionClauseSyntax arrowExpressionClause)
             {
                 return VisitArrowExpressionClause(arrowExpressionClause);
@@ -386,9 +388,9 @@ namespace UdonSharp.Compiler.Binder
                 type = type.GetEnumUnderlyingType();
             }
 
-            // C# sizeof(bool) is 1 byte but Marshal.SizeOf is 4 bytes for bool :(
-            // assume boolean at first, otherwise; let the marshaller report the size :D
-            int size = type == typeof(bool) ? sizeof(bool) : Marshal.SizeOf(type);
+            // Marshal.SizeOf reports the unmanaged size, which differs from C# sizeof for bool (4 vs 1) and
+            // char (1, marshalled as ANSI, vs 2).
+            int size = type == typeof(bool) ? sizeof(bool) : type == typeof(char) ? sizeof(char) : Marshal.SizeOf(type);
 
             return new BoundConstantExpression(size, Context.GetTypeSymbol(SpecialType.System_Int32));
         }
@@ -784,20 +786,26 @@ namespace UdonSharp.Compiler.Binder
         }
         
         /// <summary>
-        /// Handles the 'as' operator (safe cast). In Udon, this is equivalent to a regular cast
-        /// that returns null if the cast fails, rather than throwing an exception.
+        /// Handles the 'as' operator. A conversion C# can prove at compile time is an ordinary conversion; one that
+        /// depends on the runtime type is tested at runtime and yields null when the test fails.
         /// </summary>
         private BoundExpression HandleAsExpression(BinaryExpressionSyntax node)
         {
-            // The right side is the target type
             TypeSymbol targetType = GetTypeSymbol(node.Right);
-            
-            // Visit the left expression (the value being cast)
             BoundExpression sourceExpression = VisitExpression(node.Left);
+            Conversion conversion = SymbolLookupModel.Compilation.ClassifyConversion(sourceExpression.ValueType.RoslynSymbol, targetType.RoslynSymbol);
             
-            // The 'as' operator is essentially a cast that can return null
-            // We treat it the same as a cast expression in Udon
-            return VisitExpression(node.Left, targetType, true);
+            if (conversion.IsIdentity || (conversion.IsImplicit && (conversion.IsReference || conversion.IsBoxing)))
+                return ConvertExpression(node, sourceExpression, targetType, true);
+            
+            // Udon can only test the runtime type against a type it represents directly. UdonSharp behaviours, user
+            // classes and what U# stores as object[] (its List/Dictionary/... and jagged arrays) have no Udon type of
+            // their own to test against, and a plain copy would never produce null.
+            if (targetType.IsExtern && !targetType.IsValueType &&
+                (targetType.UdonType == targetType || targetType.UdonType.SystemType != typeof(object[])))
+                return new BoundAsExpression(Context, node, sourceExpression, targetType);
+
+            throw new NotSupportedException($"'as {targetType}' needs a runtime type test, which UdonSharp can only do for types Udon exposes, not for UdonSharp behaviours, user classes or U# collections. Use an explicit cast where the type is already known, or GetComponent<T>() to find a behaviour.", node);
         }
         
         /// <summary>
@@ -1056,6 +1064,12 @@ namespace UdonSharp.Compiler.Binder
                     }
                 }
             }
+
+            // BoundForEachStatement indexes its source as an array. Anything else that is enumerable in C# -- CEList,
+            // CEDictionary, an IEnumerable -- used to reach it and fail in the middle of emit with an internal
+            // "Cannot get element type on non-array types" instead of an error on this loop.
+            if (!iteratorExpression.ValueType.IsArray)
+                throw new NotSupportedException($"foreach over '{iteratorExpression.ValueType}' is not supported by UdonSharp; only arrays, strings, Transform children, List, Dictionary, HashSet, Queue and Stack can be enumerated. Use a for loop over Count and the indexer (or over a dictionary's GetKeys()) instead.", node.Expression);
 
             return new BoundForEachStatement(node, iteratorExpression, iteratorVal, foreachStatement);
         }

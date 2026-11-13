@@ -128,9 +128,9 @@ namespace UdonSharp.CE.Editor.DevTools
 
                 GUI.color = statusColor;
                 EditorGUILayout.LabelField(
-                    $"Total: {_result.TotalEstimatedBandwidthKBps:F1} / {WorldAnalyzer.NETWORK_BUDGET_KBPS:F0} KB/s",
+                    $"Total: {FloorMark(HasLowerBound(_result))}{_result.TotalEstimatedBandwidthKBps:F1} / {WorldAnalyzer.NETWORK_BUDGET_KBPS:F0} KB/s",
                     EditorStyles.toolbarButton,
-                    GUILayout.Width(150));
+                    GUILayout.Width(160));
                 GUI.color = Color.white;
             }
 
@@ -169,7 +169,9 @@ namespace UdonSharp.CE.Editor.DevTools
             EditorGUILayout.Space(5);
 
             // Bandwidth bar
-            DrawBandwidthBar("Total Bandwidth", _result.TotalEstimatedBandwidthKBps, WorldAnalyzer.NETWORK_BUDGET_KBPS);
+            bool worldIsFloor = HasLowerBound(_result);
+
+            DrawBandwidthBar("Total Bandwidth", _result.TotalEstimatedBandwidthKBps, WorldAnalyzer.NETWORK_BUDGET_KBPS, worldIsFloor);
 
             EditorGUILayout.Space(5);
 
@@ -177,7 +179,7 @@ namespace UdonSharp.CE.Editor.DevTools
             EditorGUILayout.BeginHorizontal();
             EditorGUILayout.LabelField($"Synced Behaviours: {_result.TotalSyncedBehaviours}", GUILayout.Width(150));
             EditorGUILayout.LabelField($"Synced Fields: {_result.TotalSyncedFields}", GUILayout.Width(150));
-            EditorGUILayout.LabelField($"Max Payload: {FieldSizeCalculator.FormatBytes(_result.TotalMaxBytes)}", GUILayout.Width(150));
+            EditorGUILayout.LabelField($"Max Payload: {FloorMark(worldIsFloor)}{FieldSizeCalculator.FormatBytes(_result.TotalMaxBytes)}", GUILayout.Width(160));
 
             int errorCount = _result.Violations.Count(v => v.Severity == AnalysisSeverity.Error);
             int warningCount = _result.Violations.Count(v => v.Severity == AnalysisSeverity.Warning);
@@ -259,7 +261,8 @@ namespace UdonSharp.CE.Editor.DevTools
                 _foldouts[type] = false;
 
             float totalBandwidth = behaviour.TotalBandwidthKBps;
-            string header = $"{type.Name} (×{behaviour.InstanceCount}) — {totalBandwidth:F2} KB/s";
+            bool isFloor = HasLowerBound(behaviour);
+            string header = $"{type.Name} (×{behaviour.InstanceCount}) — {FloorMark(isFloor)}{totalBandwidth:F2} KB/s";
 
             // Color-code by relative contribution
             float ratio = totalBandwidth / _result.TotalEstimatedBandwidthKBps;
@@ -284,7 +287,9 @@ namespace UdonSharp.CE.Editor.DevTools
                 EditorGUILayout.LabelField(syncModeSource == null
                     ? $"Sync Mode: {behaviour.SyncMode}"
                     : $"Sync Mode: {behaviour.SyncMode} ({syncModeSource})");
-                EditorGUILayout.LabelField($"Payload Size: {behaviour.MinTotalBytes}–{behaviour.MaxTotalBytes} bytes");
+                EditorGUILayout.LabelField(isFloor
+                    ? $"Payload Size: >={behaviour.MaxTotalBytes} bytes (a field's length is not known ahead of time)"
+                    : $"Payload Size: {behaviour.MinTotalBytes}–{behaviour.MaxTotalBytes} bytes");
 
                 if (behaviour.ExceedsContinuousLimit)
                 {
@@ -303,7 +308,7 @@ namespace UdonSharp.CE.Editor.DevTools
 
                     EditorGUILayout.LabelField($"  {field.FieldName}", GUILayout.Width(150));
                     EditorGUILayout.LabelField(field.Size.Description, EditorStyles.miniLabel);
-                    EditorGUILayout.LabelField($"{field.Size.MaxBytes} B", GUILayout.Width(60));
+                    EditorGUILayout.LabelField($"{FloorMark(field.IsLowerBound)}{field.Size.MaxBytes} B", GUILayout.Width(70));
 
                     EditorGUILayout.EndHorizontal();
 
@@ -344,7 +349,7 @@ namespace UdonSharp.CE.Editor.DevTools
             EditorGUILayout.EndVertical();
         }
 
-        private void DrawBandwidthBar(string label, float current, float max)
+        private void DrawBandwidthBar(string label, float current, float max, bool isFloor)
         {
             EditorGUILayout.BeginHorizontal();
 
@@ -374,13 +379,38 @@ namespace UdonSharp.CE.Editor.DevTools
             Handles.EndGUI();
 
             // Text overlay
-            string text = $"{current:F1} / {max:F0} KB/s ({ratio * 100:F0}%)";
+            string text = $"{FloorMark(isFloor)}{current:F1} / {max:F0} KB/s ({FloorMark(isFloor)}{ratio * 100:F0}%)";
             GUI.Label(rect, text, new GUIStyle(EditorStyles.centeredGreyMiniLabel)
             {
                 normal = { textColor = Color.white }
             });
 
             EditorGUILayout.EndHorizontal();
+        }
+
+        #endregion
+
+        #region Lower Bounds
+
+        // Every size and rate in this window is the analyzer's worst-case figure. For a field whose length
+        // is not known ahead of time -- an unbounded string, an array no instance or [MaxLength] gave a
+        // length to -- that figure is only the part that could be counted, and the field really costs
+        // that or more. It used to be printed as a plain number, indistinguishable from an exact one; it
+        // is now marked ">=" the way SizeResult renders it, and so is every total that includes one.
+
+        internal static string FloorMark(bool isFloor)
+        {
+            return isFloor ? ">=" : "";
+        }
+
+        internal static bool HasLowerBound(BehaviourAnalysisResult behaviour)
+        {
+            return behaviour != null && behaviour.Fields.Any(field => field.IsLowerBound);
+        }
+
+        internal static bool HasLowerBound(WorldAnalysisResult world)
+        {
+            return world != null && world.BehaviourResults.Any(HasLowerBound);
         }
 
         #endregion

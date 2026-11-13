@@ -25,7 +25,7 @@ The suite that actually runs is **`CEShowcase.Tests`** (edit mode), in
 1. Open the project in **Unity 2022.3.22f1** (see `ProjectSettings/ProjectVersion.txt`).
 2. Install the VRChat Worlds SDK.
 3. **Window → General → Test Runner → EditMode**.
-4. Run the `CEShowcase.Tests` assembly. It is currently 107 tests and takes roughly two minutes.
+4. Run the `CEShowcase.Tests` assembly. It currently contains 553 tests and takes roughly five minutes, plus Unity's own startup.
 
 Notes that will save you time:
 
@@ -35,8 +35,9 @@ Notes that will save you time:
 - **One C# compile error anywhere** fails a batch of unrelated source-generator tests with
   *"All Unity C# compiler errors must be resolved before running an UdonSharp compile."* Check the
   console for `error CS` first rather than debugging the cascade.
-- **There is no ClientSim in this project**, so `Networking.LocalPlayer` is null and `Interact()`
+- **Edit-mode tests have no active ClientSim player**, so `Networking.LocalPlayer` is null and `Interact()`
   early-returns. Test the logic beneath it directly.
+- Headless runs load the showcase additively for the scene guardrails, then close that scene without saving. Existing scene contents are preserved.
 - Analyzer tests bind fixtures from source strings, which requires the fixture to be registered as a
   real assembly first — see `RegisterFixtureAssembly` in `CESyncAuthorityTests.cs` and the comment
   above its call site explaining why.

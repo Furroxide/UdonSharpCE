@@ -1,13 +1,17 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using UdonSharp;
+using UdonSharp.CE.Editor.CodeGen;
 using UdonSharp.CE.Net;
 using UdonSharp.Compiler;
 using UdonSharp.Compiler.Binder;
 using UdonSharp.Compiler.Symbols;
 using VRC.SDK3.Network;
+using VRC.SDK3.UdonNetworkCalling;
 
 namespace UdonSharp.CE.Editor.Analyzers
 {
@@ -16,13 +20,16 @@ namespace UdonSharp.CE.Editor.Analyzers
     /// of [MergeStrategy].
     ///
     /// Checks for:
+    /// - Static methods, which UdonSharp never exports as events
     /// - Methods on behaviours with incompatible sync modes
     /// - Parameter count exceeding VRChat's limit (8)
     /// - Parameter lists whose argument count is not fixed (optional or 'params' parameters), and
     ///   by-reference parameters
     /// - Non-void return types
     /// - Parameter types VRChat cannot put on the wire
-    /// - Missing rate limits on public RPCs
+    /// - No declared RateLimit (info: the default of 5 events per second applies)
+    /// - A declared RateLimit that a hand-written [NetworkCallable] on the same method overrides
+    /// - OwnerOnly together with Target=Owner, which only the owner calling itself can satisfy
     /// - [MergeStrategy] on a field CE never writes
     /// </summary>
     /// <example>
@@ -31,10 +38,10 @@ namespace UdonSharp.CE.Editor.Analyzers
     /// public void TooManyParams(int a, int b, int c, int d, int e, int f, int g, int h, int i)
     /// { }  // CE0011: RPCs limited to 8 parameters
     ///
-    /// // Info - no rate limit
+    /// // Info - no declared rate
     /// [Rpc]
     /// public void NoRateLimit(int value)
-    /// { }  // CE0011: Consider adding rate limit
+    /// { }  // CE0011: default of 5 events per second applies
     ///
     /// // Error - invalid sync mode
     /// [UdonBehaviourSyncMode(BehaviourSyncMode.None)]
@@ -106,6 +113,25 @@ namespace UdonSharp.CE.Editor.Analyzers
                     continue;
 
                 Location location = GetMethodLocation(method);
+
+                // Check: The method is an instance method.
+                //
+                // UdonSharp never exports a static method as an event and builds no network metadata for
+                // one, so there is nothing on any client for a send to reach. The emitter refuses the
+                // declaration during codegen under this same code; this is the same finding for a compile
+                // that reaches analysis without having gone through it.
+                if (method.IsStatic)
+                {
+                    diagnostics.Add(AnalyzerDiagnostic.Error(
+                        location,
+                        $"[Rpc] method '{method.Name}' is static. A network event is delivered to a behaviour " +
+                        "instance, and UdonSharp does not export static methods as events, so no client " +
+                        "could ever receive this one and the method body would never run.",
+                        AnalyzerId,
+                        AnalyzerId,
+                        "Make it an instance method."
+                    ));
+                }
 
                 // Check: Behaviour sync mode compatibility
                 if (networkingDisabled)
@@ -225,31 +251,110 @@ namespace UdonSharp.CE.Editor.Analyzers
                     ));
                 }
 
-                // Check: Missing rate limit (info level)
+                // Check: No declared rate (info level). The method is not unlimited -- every [NetworkCallable]
+                // entry point has a rate, and the emitter gives an [Rpc] that declares none the SDK default
+                // of 5 events per second -- so the note says which limit is in effect. It used to say there
+                // was none, which is the one thing that is never true of an [Rpc].
                 if (rpcAttr.RateLimit <= 0f)
                 {
                     diagnostics.Add(AnalyzerDiagnostic.Info(
                         location,
-                        $"[Rpc] method '{method.Name}' has no rate limit. " +
-                        "Consider adding RateLimit to prevent network spam.",
+                        $"[Rpc] method '{method.Name}' declares no RateLimit, so it is limited to the " +
+                        "[NetworkCallable] default of 5 events per second unless the method carries its own " +
+                        "[NetworkCallable(n)]. Set RateLimit if it needs a different rate.",
                         AnalyzerId,
                         AnalyzerId
                     ));
                 }
 
-                // Check: OwnerOnly on Target.Others (contradictory)
-                if (rpcAttr.OwnerOnly && rpcAttr.Target == RpcTarget.Others)
+                // Check: a declared RateLimit beside a hand-written [NetworkCallable] that says otherwise.
+                //
+                // The emitter does not add a second [NetworkCallable] to an [Rpc] that already carries one, so
+                // the rate VRChat enforces is that attribute's value and RateLimit is read by nothing at all.
+                // When the two disagree the declaration states one rate while another runs, and nothing else
+                // said so.
+                // No RateLimit, or one that matches, is not reported: there is nothing to contradict.
+                if (rpcAttr.RateLimit > 0f &&
+                    TryGetHandWrittenNetworkCallableRate(method, out int enforcedRate) &&
+                    !UnityEngine.Mathf.Approximately(enforcedRate, rpcAttr.RateLimit))
+                {
+                    string declaredRate = rpcAttr.RateLimit.ToString("0.###", CultureInfo.InvariantCulture);
+
+                    diagnostics.Add(AnalyzerDiagnostic.Warning(
+                        location,
+                        $"[Rpc] method '{method.Name}' declares RateLimit = {declaredRate}, but it also carries " +
+                        $"[NetworkCallable({enforcedRate})], written by hand. CE leaves a [NetworkCallable] the " +
+                        $"author wrote untouched, so VRChat enforces {enforcedRate} events per second for this " +
+                        $"method and RateLimit = {declaredRate} is not in effect.",
+                        AnalyzerId,
+                        AnalyzerId,
+                        "Remove the hand-written [NetworkCallable] and let RateLimit set the rate, or make the " +
+                        "two values agree."
+                    ));
+                }
+
+                // Check: OwnerOnly on Target.Owner, the one combination that can only ever talk to itself.
+                //
+                // Target decides who RECEIVES the event and OwnerOnly decides whose SEND the receiver
+                // honours, so the two are independent and most pairings are meaningful. Target=Owner with
+                // OwnerOnly is the exception: the event is delivered to the owner alone, and the owner
+                // then drops it unless the owner sent it.
+                //
+                // This used to warn on OwnerOnly with Target=Others instead, calling it contradictory and
+                // recommending Target=Owner. That had it backwards on both counts: the owner announcing
+                // something to every other player is an ordinary, working shape -- each receiver sees the
+                // owner as the caller and the guard passes -- and the recommended replacement was this one.
+                if (rpcAttr.OwnerOnly && rpcAttr.Target == RpcTarget.Owner)
                 {
                     diagnostics.Add(AnalyzerDiagnostic.Warning(
                         location,
-                        $"[Rpc] method '{method.Name}' has OwnerOnly=true but Target=Others. " +
-                        "This combination is contradictory.",
+                        $"[Rpc] method '{method.Name}' has OwnerOnly=true and Target=Owner. The event is " +
+                        "delivered only to the owner, and the owner-only check then drops it unless the " +
+                        "owner itself sent it, so the only call that ever runs is the owner calling its own " +
+                        "copy. A call from any other player reaches the owner and is discarded there.",
                         AnalyzerId,
                         AnalyzerId,
-                        "Use Target=All or Target=Owner for owner-only RPCs."
+                        "If other players are meant to ask the owner to do something, remove OwnerOnly. If " +
+                        "the owner is announcing something, use Target=All or Target=Others."
                     ));
                 }
             }
+        }
+
+        /// <summary>
+        /// The rate on a [NetworkCallable] the author wrote on this method, or false when it carries none.
+        /// </summary>
+        /// <remarks>
+        /// Analysis runs over the rewritten trees, where every [Rpc] that had no [NetworkCallable] has been
+        /// given one by the emitter. That one holds the rate the emitter derived from RateLimit, and where
+        /// RateLimit could not be expressed the emitter has already said so, so it is recognised by the
+        /// spelling the emitter writes (<see cref="RpcEmitter.InjectedNetworkCallableName"/>) and skipped.
+        /// Reporting it would tell the author they wrote an attribute they never wrote.
+        /// </remarks>
+        private static bool TryGetHandWrittenNetworkCallableRate(MethodSymbol method, out int rate)
+        {
+            rate = 0;
+
+            NetworkCallableAttribute networkCallable = method.GetAttribute<NetworkCallableAttribute>();
+            if (networkCallable == null || method.RoslynSymbol == null)
+                return false;
+
+            foreach (AttributeData attribute in method.RoslynSymbol.GetAttributes())
+            {
+                if (attribute.AttributeClass?.Name != nameof(NetworkCallableAttribute))
+                    continue;
+
+                if (!(attribute.ApplicationSyntaxReference?.GetSyntax() is AttributeSyntax written) ||
+                    written.Name.ToString() == RpcEmitter.InjectedNetworkCallableName)
+                {
+                    return false;
+                }
+
+                rate = networkCallable.MaxEventsPerSecond;
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>

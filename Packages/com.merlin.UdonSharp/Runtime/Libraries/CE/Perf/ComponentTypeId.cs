@@ -48,8 +48,15 @@ namespace UdonSharp.CE.Perf
         public const int CustomBase = 100;
 
         /// <summary>
-        /// Maximum supported component types.
+        /// Upper bound of the type id space, i.e. of the numbers in this class.
         /// </summary>
+        /// <remarks>
+        /// This is not how many components a world can hold. A CEWorld tracks components in one 32-bit
+        /// mask per entity, so it accepts 32 RegisterComponent calls and returns -1 for the 33rd. A type
+        /// id is only a label passed to RegisterComponent; the slot it returns (0-31) is what
+        /// AddComponent, HasComponent and CEQuery take, and passing a type id there instead is silently
+        /// ignored once it is 32 or more.
+        /// </remarks>
         public const int MaxTypes = 256;
     }
 }

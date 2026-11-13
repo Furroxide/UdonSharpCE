@@ -22,7 +22,9 @@ namespace UdonSharp.CE.DevTools
     /// 1. Create a Canvas in your scene
     /// 2. Add a Panel with a Scroll View containing a TextMeshProUGUI text component
     /// 3. Attach this component and wire up the references
-    /// 4. Use the provided prefab from Samples~/CE/DebugConsole/ for quick setup
+    /// 4. Optionally assign a filter Dropdown and an auto-scroll Toggle, and point their On Value Changed
+    ///    at UdonBehaviour.SendCustomEvent with "OnFilterDropdownChanged" / "OnAutoScrollToggleChanged"
+    /// The package ships no prefab for this; the steps above are the whole setup.
     /// </remarks>
     [UdonBehaviourSyncMode(BehaviourSyncMode.None)]
     public class CEDebugConsole : UdonSharpBehaviour
@@ -42,8 +44,18 @@ namespace UdonSharp.CE.DevTools
         [Tooltip("The panel/container to show/hide.")]
         [SerializeField] private GameObject consolePanel;
 
+        [Header("UI Controls (optional)")]
+        [Tooltip("Dropdown that sets the level filter. Its options must be Trace, Debug, Info, Warning, Error, in that order. Wire its On Value Changed to UdonBehaviour.SendCustomEvent with \"OnFilterDropdownChanged\".")]
+        [SerializeField] private Dropdown filterDropdown;
+
+        [Tooltip("TextMeshPro dropdown, read when the legacy Filter Dropdown is empty. Same options and wiring: UdonBehaviour.SendCustomEvent with \"OnFilterDropdownChanged\".")]
+        [SerializeField] private TMP_Dropdown filterDropdownTMP;
+
+        [Tooltip("Toggle that turns auto-scroll on and off. Wire its On Value Changed to UdonBehaviour.SendCustomEvent with \"OnAutoScrollToggleChanged\".")]
+        [SerializeField] private UnityEngine.UI.Toggle autoScrollToggle;
+
         [Header("Configuration")]
-        [Tooltip("Maximum number of log entries to display.")]
+        [Tooltip("Maximum number of log entries kept, of every level. The level filter applies when they are displayed.")]
         [SerializeField] private int maxLogEntries = 100;
 
         [Tooltip("Minimum log level to display.")]
@@ -86,11 +98,7 @@ namespace UdonSharp.CE.DevTools
         private void Start()
         {
             // Initialize buffer
-            _logBuffer = new LogEntry[maxLogEntries];
-            _logHead = 0;
-            _logCount = 0;
-            _needsRefresh = false;
-            _cachedText = "";
+            EnsureInitialized();
 
             // Set initial visibility
             _isVisible = startVisible;
@@ -138,7 +146,12 @@ namespace UdonSharp.CE.DevTools
         public void AddLog(LogEntry entry)
         {
             if (entry == null) return;
-            if (entry.Level < minDisplayLevel) return;
+
+            EnsureInitialized();
+
+            // Every entry is stored; minDisplayLevel is applied when the text is built. Dropping entries
+            // here as well made the filter destructive: anything logged while it was raised was gone for
+            // good, so lowering it again showed a console with holes in it.
 
             // Add to circular buffer
             int index = (_logHead + _logCount) % _logBuffer.Length;
@@ -170,6 +183,8 @@ namespace UdonSharp.CE.DevTools
         /// </summary>
         public void Clear()
         {
+            EnsureInitialized();
+
             System.Array.Clear(_logBuffer, 0, _logBuffer.Length);
             _logHead = 0;
             _logCount = 0;
@@ -238,10 +253,15 @@ namespace UdonSharp.CE.DevTools
 
         #endregion
 
-        #region UI Event Handlers (for buttons)
+        #region UI Event Handlers
+
+        // A uGUI control reaches an UdonSharpBehaviour through UdonBehaviour.SendCustomEvent, which carries
+        // no argument, and U# exports a method that takes parameters under a generated name. So only the
+        // parameterless methods below can be wired to a control; each one reads what it needs from the
+        // control itself.
 
         /// <summary>
-        /// Called by Clear button.
+        /// Clears the log. Wire a Button's On Click to UdonBehaviour.SendCustomEvent with "OnClearButtonClicked".
         /// </summary>
         public void OnClearButtonClicked()
         {
@@ -249,7 +269,7 @@ namespace UdonSharp.CE.DevTools
         }
 
         /// <summary>
-        /// Called by Close button.
+        /// Hides the console. Wire a Button's On Click to UdonBehaviour.SendCustomEvent with "OnCloseButtonClicked".
         /// </summary>
         public void OnCloseButtonClicked()
         {
@@ -257,7 +277,39 @@ namespace UdonSharp.CE.DevTools
         }
 
         /// <summary>
-        /// Called by filter dropdown (0=Trace, 1=Debug, 2=Info, 3=Warning, 4=Error).
+        /// Applies the option selected in the Filter Dropdown, or in Filter Dropdown TMP when the legacy one
+        /// is not assigned. Wire the dropdown's On Value Changed to UdonBehaviour.SendCustomEvent with
+        /// "OnFilterDropdownChanged". The options must be Trace, Debug, Info, Warning, Error, in that order.
+        /// Does nothing when neither dropdown is assigned.
+        /// </summary>
+        public void OnFilterDropdownChanged()
+        {
+            if (filterDropdown != null)
+            {
+                SetFilter((LogLevel)filterDropdown.value);
+            }
+            else if (filterDropdownTMP != null)
+            {
+                SetFilter((LogLevel)filterDropdownTMP.value);
+            }
+        }
+
+        /// <summary>
+        /// Applies the state of the Auto Scroll Toggle. Wire the toggle's On Value Changed to
+        /// UdonBehaviour.SendCustomEvent with "OnAutoScrollToggleChanged". Does nothing when no toggle is assigned.
+        /// </summary>
+        public void OnAutoScrollToggleChanged()
+        {
+            if (autoScrollToggle != null)
+            {
+                autoScroll = autoScrollToggle.isOn;
+            }
+        }
+
+        /// <summary>
+        /// Sets the level filter from an option index (0=Trace, 1=Debug, 2=Info, 3=Warning, 4=Error).
+        /// For calls from code: a Dropdown cannot reach a method with a parameter, so wire it to
+        /// <see cref="OnFilterDropdownChanged"/> instead.
         /// </summary>
         public void OnFilterChanged(int filterIndex)
         {
@@ -265,7 +317,8 @@ namespace UdonSharp.CE.DevTools
         }
 
         /// <summary>
-        /// Called by auto-scroll toggle.
+        /// Turns auto-scroll on or off. For calls from code: a Toggle cannot reach a method with a parameter,
+        /// so wire it to <see cref="OnAutoScrollToggleChanged"/> instead.
         /// </summary>
         public void OnAutoScrollChanged(bool value)
         {
@@ -276,8 +329,34 @@ namespace UdonSharp.CE.DevTools
 
         #region Private Helpers
 
+        /// <summary>
+        /// Allocates the log buffer on first use.
+        ///
+        /// Udon runs a public method on a behaviour whose Start has not happened yet -- another
+        /// behaviour's earlier Start, or a console object that begins inactive. When only Start allocated
+        /// the buffer, the first AddLog from such a caller dereferenced null, and an Udon exception halts
+        /// the behaviour for the rest of the session: no log display and no toggle key.
+        /// </summary>
+        private void EnsureInitialized()
+        {
+            if (_logBuffer != null) return;
+
+            // The ring index is taken modulo the buffer length, so a zero or negative size typed into the
+            // inspector would be a division by zero on the first log.
+            int capacity = maxLogEntries;
+            if (capacity < 1) capacity = 1;
+
+            _logBuffer = new LogEntry[capacity];
+            _logHead = 0;
+            _logCount = 0;
+            _needsRefresh = false;
+            _cachedText = "";
+        }
+
         private void RefreshDisplay()
         {
+            EnsureInitialized();
+
             // Build display text
             System.Text.StringBuilder sb = new System.Text.StringBuilder();
 

@@ -30,14 +30,29 @@ namespace UdonSharp.CE.DevTools
         
         void Update()
         {
-            // Accumulate frame time
-            _deltaTime += (Time.unscaledDeltaTime - _deltaTime) * 0.1f;
+            Sample(Time.unscaledDeltaTime);
+        }
+
+        private void Sample(float frameTime)
+        {
+            // Seed the running average with the first real frame time. Starting it at zero left it short
+            // of the true frame time by a factor of 0.9^n after n frames, so the first reading came out
+            // high -- 62.7 at a steady 60 fps, 37.8 at 30 -- and that reading is the one Max FPS keeps.
+            if (_deltaTime <= 0f)
+                _deltaTime = frameTime;
+            else
+                _deltaTime += (frameTime - _deltaTime) * 0.1f;
+
             _frameCount++;
-            _updateTimer += Time.unscaledDeltaTime;
+            _updateTimer += frameTime;
             
             // Update display periodically
             if (_updateTimer >= _updateInterval)
             {
+                // No frame has taken any time yet, so there is no rate to report and nothing to record.
+                if (_deltaTime <= 0f)
+                    return;
+
                 _fps = 1.0f / _deltaTime;
                 
                 // Track min/max/avg
@@ -73,9 +88,13 @@ namespace UdonSharp.CE.DevTools
         public float GetFrameTimeMs() => _deltaTime * 1000f;
         
         /// <summary>
-        /// Get minimum recorded FPS.
+        /// Get minimum recorded FPS, or 0 when nothing has been recorded yet.
         /// </summary>
-        public float GetMinFPS() => _minFps;
+        /// <remarks>
+        /// The tracker starts at float.MaxValue so the first reading always replaces it; before that
+        /// reading (and again after ResetStats) that sentinel is not a frame rate and must not be shown.
+        /// </remarks>
+        public float GetMinFPS() => _avgSamples > 0 ? _minFps : 0f;
         
         /// <summary>
         /// Get maximum recorded FPS.

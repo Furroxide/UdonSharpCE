@@ -1,13 +1,13 @@
 # CE Persistence
 
-CE.Persistence provides a model-based layer for persistent player data, validation, and size estimation.
+CE.Persistence stores attributed models in the local player's PlayerData as JSON, with validation and size estimation.
 
 ## Quick Start
 
 ```csharp
 using UdonSharp;
 using UdonSharp.CE.Persistence;
-using VRC.SDK3.Data;
+using VRC.SDKBase;
 
 [PlayerData("rpg_save")]
 public class PlayerSaveData
@@ -18,32 +18,43 @@ public class PlayerSaveData
 
 public class SaveManager : UdonSharpBehaviour
 {
-    private PlayerSaveData _data = new PlayerSaveData();
+    private PlayerSaveData _data;
+    private bool _ready;
 
-    void Start()
+    public override void OnPlayerRestored(VRCPlayerApi player)
     {
-        // No manual registration required.
+        if (player == null || !player.isLocal) return;
+        RestoreResult result = CEPersistence.Restore(out _data);
+        if (result == RestoreResult.NoData) _data = new PlayerSaveData();
+        _ready = result == RestoreResult.Success || result == RestoreResult.NoData;
     }
 
     public void SaveLocal()
     {
-        CEPersistence.Save(_data);
+        if (_ready) CEPersistence.Save(_data);
     }
 }
 ```
 
+Wait for the local `OnPlayerRestored` event before treating `NoData` as a first-time player. `NotReady` means the local player is missing or invalid; it does not detect an in-progress PlayerData restore. Saving defaults before restoration can overwrite a returning player's save.
+
 ## Auto Registration
 
-CE.Persistence auto-registers `[PlayerData]` models during Udon compilation. You only need the attributes.
+The compiler generates converters and typed overloads for `[PlayerData("key")]` models. No registration call is needed in behaviour code.
 
-Supported field types:
+Supported fields are writable public or internal fields with `[PersistKey]`:
 
-- Primitives (`bool`, `int`, `float`, etc.)
-- `string`
-- `DataList` / `DataDictionary`
-- Arrays of the above
+- Numeric primitives and `bool`.
+- `string`, `DataList`, and `DataDictionary`.
+- One-dimensional arrays of those types. Jagged and multidimensional arrays are unsupported.
 
-If you need custom conversion (complex types, nested models, etc.), register a converter manually with `CEPersistence.Register`.
+A model can instead expose one writable public or internal `DataDictionary` field without `[PersistKey]` and build its contents itself. Use that form for complex payloads. Manual `Register<T>` converters are editor-only; using them in an Udon behaviour is a compile error. Generic models and inherited `[PersistKey]` fields are unsupported. Duplicate model/field keys and reserved `__ce_*` keys are rejected during generation.
+
+The model class itself must be reachable and constructible from the generated code: public or internal (and so must every class it is nested in), not abstract or static, with a public or internal parameterless constructor. An internal model gets internal overloads. A model that breaks one of these rules fails the compile at its declaration; a `[PersistKey]` field of an unsupported type, or one that is private, protected, `readonly` or `const`, makes generation skip the model with a warning naming the field.
+
+`DefaultValue` applies only together with `Optional = true`, when the key is missing from the stored data. It must be a constant the field can hold; `null` means the type's default. A value the field cannot hold, such as `300` for a `byte` or `1.5` for an `int`, is a compile error rather than a silent truncation.
+
+Null reference fields are omitted when saving; explicit nulls are accepted when restoring reference fields. Invalid non-null field types, invalid array elements, and out-of-range numeric values return `ParseError` with corruption details. `long` and `ulong` use invariant strings to preserve all 64 bits; existing numeric saves are still accepted when representable.
 
 ## API Reference
 
@@ -51,71 +62,52 @@ If you need custom conversion (complex types, nested models, etc.), register a c
 
 | Attribute | Description |
 | --- | --- |
-| `PlayerData` | Marks a class as persistent data with a storage key. |
-| `PersistKey` | Defines the key name used for a field. |
-| `PersistIgnore` | Excludes a field from persistence. |
+| `PlayerData` | Storage key and schema version. `AutoSave` is reserved metadata; it does not schedule saves. |
+| `PersistKey` | Field key, optional default and optional-field metadata. |
+| `PersistIgnore` | Excludes a field. |
 | `Range` | Numeric range validation. |
 | `MaxLength` | String or array length validation. |
-| `Required` | Requires non-empty values. |
+| `Required` | Requires non-empty reference values. |
 
 ### CEPersistence
 
+The generic spellings below are rewritten to generated model-specific overloads. Type inference works when the model argument supplies the type; specify the model for a standalone `out var`, such as `Restore<PlayerSaveData>(out var data)`.
+
 | Member | Description |
 | --- | --- |
-| `Register<T>(toData, fromData, key, version, validate)` | Register a data model and converters (optional; only for custom converters). |
-| `IsRegistered<T>()` | Check if a model is registered. |
-| `Save<T>(T model)` | Save a registered model to the local player's VRChat PlayerData as JSON. |
-| `Restore<T>(out T model)` | Restore a registered model from the local player's VRChat PlayerData JSON. |
-| `ToData<T>(T model)` / `FromData<T>(DataDictionary, out T)` | Convert to and from DataDictionary. |
-| `ToJson<T>(T model, bool beautify)` / `FromJson<T>(string, out T)` | Convert to and from JSON. |
-| `Validate<T>(T model, out List<ValidationError>)` | Validate a model against constraints. |
-| `EstimateSize<T>(T model)` | Estimate serialized size in bytes. |
-| `GetQuotaLimit()` | The PlayerData storage limit, from `Networking.GetPlayerDataStorageLimit()`. |
-| `GetUsedQuota()` | Bytes currently used, from `Networking.GetPlayerDataStorageUsage(localPlayer)`. |
-| `GetRemainingQuota()` | Limit minus current usage. This is a real measurement — the earlier note claiming VRChat does not expose usage was wrong; both SDK calls exist and are now used. |
+| `Save<T>(T model)` | Validate and save local PlayerData JSON; inspect the returned `SaveResult`. |
+| `Restore<T>(out T model)` | Restore local PlayerData after `OnPlayerRestored`; inspect `RestoreResult`. |
+| `ToData<T>(T)` / `FromData<T>(DataDictionary, out T)` | Convert model and dictionary. |
+| `ToJson<T>(T, bool beautify)` / `FromJson<T>(string, out T)` | Convert model and JSON. |
+| `Validate<T>(T, out List<ValidationError>)` | Validate model constraints. |
+| `EstimateSize<T>(T)` | Estimate serialized size. |
+| `IsRegistered<T>()`, `GetKey<T>()`, `GetVersion<T>()` | Compile-time model metadata. |
+| `GetQuotaLimit()` | PlayerData storage limit from the SDK. |
+| `GetUsedQuota()` | SDK-reported local storage usage. |
+| `GetRemainingQuota()` | Limit minus current usage. |
 
 ### PersistenceLifecycle
 
+Read lifecycle details in the behaviour that performed the operation. Static state belongs to each calling behaviour's program; it is not a shared cross-behaviour registry.
+
 | Member | Description |
 | --- | --- |
-| `RegisterCallback(UdonSharpBehaviour)` | Register for save/restore lifecycle events. |
-| `UnregisterCallback(UdonSharpBehaviour)` | Remove a callback. |
-| `GetPendingRestoreResult()` / `GetPendingSaveResult()` | Access last result inside callbacks. |
-| `GetPendingModelKey()` | Access model key inside callbacks. |
-| `GetPendingCorruptionInfo()` | Access corruption details inside callbacks. |
+| `GetPendingRestoreResult()` / `GetPendingSaveResult()` | Most recent result in this behaviour. |
+| `GetPendingModelKey()` | Key associated with the result. |
+| `GetPendingCorruptionInfo()` | Details of the last corruption report. |
 
-Callbacks are invoked by name. Implement `_CE_OnDataRestored`, `_CE_OnDataSaved`, and `_CE_OnDataCorrupted` on your behaviour and read the pending data via the accessor methods above.
+The former `RegisterCallback`, `UnregisterCallback` and `IPersistenceCallbacks` registry is removed. Forward results explicitly to another behaviour when needed.
 
 ### PlayerObjectHelper
 
-| Member | Description |
-| --- | --- |
-| `Initialize()` | Initialize slot tracking. |
-| `AssignPlayerSlot(VRCPlayerApi)` | Assign a player to a slot. |
-| `ReleasePlayerSlot(VRCPlayerApi)` | Release a slot. |
-| `GetPlayerSlot(VRCPlayerApi)` / `GetLocalPlayerSlot()` | Retrieve slot IDs. |
-| `GetPlayerInSlot(int)` | Retrieve player by slot. |
+`Initialize`, `AssignPlayerSlot`, `ReleasePlayerSlot`, `GetPlayerSlot`, `GetLocalPlayerSlot` and `GetPlayerInSlot` manage local slots. Slot numbers depend on local assignment order and can differ between clients. Use a synchronized player-ID-to-slot mapping maintained by one owner when slots index networked arrays.
 
 ## Current Limitations
 
-- `Save` writes model JSON with `PlayerData.SetString`; `Restore` reads it with `PlayerData.TryGetString`.
-- `Restore` returns `NotReady` until local PlayerData is available and `NoData` when the key does not exist.
-- Auto-registration runs during Udon compilation and supports primitives, strings, DataList/DataDictionary, and arrays of those types.
-- Unsupported field types require manual converters via `Register<T>`.
-- JSON numbers deserialize as doubles; cast carefully in custom converters.
-- Exact remaining quota cannot be queried, so `GetRemainingQuota()` returns the full configured quota.
-
-## Common Pitfalls
-
-### Bad
-
-```csharp
-// Using unsupported field types without a custom converter.
-CEPersistence.Save(_data);
-```
-
-### Good
-
-```csharp
-// Keep persistence fields to supported types, or register a custom converter.
-```
+- Save and restore use `PlayerData.SetString` and `PlayerData.TryGetString`.
+- Missing fields retain model initializers unless an optional default is declared. `Required` checks non-empty values during validation; it does not make every missing JSON key a parse error.
+- Size estimates are approximate and err high. Strings are counted in the UTF-8 bytes VRCJson writes, so non-ASCII text is not undercounted; the SDK-reported usage remains the quota authority.
+- Migration between schema versions is not automatic; `VersionMismatch` needs an explicit application policy.
+- Numbers are stored as VRCJson text. A `float` comes back exactly, but a `double` keeps only about 15
+  significant digits (1/3 is restored as 0.333333333333333). `long` and `ulong` fields are stored as
+  strings, so they round-trip exactly.

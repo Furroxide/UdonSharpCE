@@ -161,30 +161,64 @@ namespace UdonSharp.CE.Editor.GraphBridge
         }
 
         /// <summary>
-        /// Scans all assemblies for [GraphNode] methods.
+        /// Finds every [GraphNode] method and [GraphProperty] property.
+        ///
+        /// This used to walk every type of nearly every loaded assembly -- the prefix filter that was
+        /// meant to skip the framework let System, UnityEngine, UnityEditor, Roslyn and the VRChat SDK
+        /// through -- asking each public method, inherited ones included, for the attribute. That was
+        /// hundreds of thousands of lookups, it ran after every domain reload, and because inherited
+        /// methods were not excluded it returned an instance node once for its own class and once more
+        /// for every subclass.
         /// </summary>
         private static List<NodeDefinition> ScanForGraphNodes()
         {
             var nodes = new List<NodeDefinition>();
 
-            // Get all loaded assemblies
-            var assemblies = AppDomain.CurrentDomain.GetAssemblies();
-
-            foreach (var assembly in assemblies)
+            // Unity's own index of attributed methods: each method once, on the type that declares it.
+            foreach (MethodInfo method in TypeCache.GetMethodsWithAttribute<GraphNodeAttribute>())
             {
-                // Skip system assemblies
-                if (assembly.FullName.StartsWith("System.") ||
-                    assembly.FullName.StartsWith("mscorlib") ||
-                    assembly.FullName.StartsWith("Unity.") ||
-                    assembly.FullName.StartsWith("UnityEngine.") ||
-                    assembly.FullName.StartsWith("UnityEditor."))
+                // Private methods are not exported.
+                if (!method.IsPublic || method.DeclaringType == null)
+                    continue;
+
+                try
+                {
+                    var nodeAttr = method.GetCustomAttribute<GraphNodeAttribute>();
+                    if (nodeAttr == null)
+                        continue;
+
+                    var node = CreateNodeDefinition(method, nodeAttr, GetCategoryPath(method.DeclaringType));
+                    if (node != null)
+                    {
+                        nodes.Add(node);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[GraphNodeGenerator] Error reading node {method.DeclaringType.FullName}.{method.Name}: {ex.Message}");
+                }
+            }
+
+            // TypeCache has no index for properties, so those are still found by reflection -- but only
+            // in assemblies that reference the one declaring the attribute, since no other assembly can
+            // have used it.
+            Assembly attributeAssembly = typeof(GraphPropertyAttribute).Assembly;
+            string attributeAssemblyName = attributeAssembly.GetName().Name;
+
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                if (assembly.IsDynamic)
+                    continue;
+
+                if (assembly != attributeAssembly &&
+                    !assembly.GetReferencedAssemblies().Any(reference => reference.Name == attributeAssemblyName))
                 {
                     continue;
                 }
 
                 try
                 {
-                    ScanAssembly(assembly, nodes);
+                    ScanAssemblyProperties(assembly, nodes);
                 }
                 catch (Exception ex)
                 {
@@ -192,49 +226,76 @@ namespace UdonSharp.CE.Editor.GraphBridge
                 }
             }
 
-            // Sort by menu path
-            nodes.Sort((a, b) => string.Compare(a.MenuPath, b.MenuPath, StringComparison.Ordinal));
+            // Sorted on more than the menu path. Generated files are only rewritten when their text
+            // changes, and neither source above promises an order, so two nodes sharing a path must not
+            // be free to swap places between runs.
+            nodes.Sort(CompareNodes);
 
             return nodes;
         }
 
-        /// <summary>
-        /// Scans a single assembly for graph nodes.
-        /// </summary>
-        private static void ScanAssembly(Assembly assembly, List<NodeDefinition> nodes)
+        private static int CompareNodes(NodeDefinition a, NodeDefinition b)
         {
-            Type graphNodeAttrType = typeof(GraphNodeAttribute);
+            int byPath = string.Compare(a.MenuPath, b.MenuPath, StringComparison.Ordinal);
+            if (byPath != 0)
+                return byPath;
 
-            foreach (var type in assembly.GetTypes())
+            int byType = string.Compare(a.ContainingType?.FullName, b.ContainingType?.FullName, StringComparison.Ordinal);
+            if (byType != 0)
+                return byType;
+
+            return string.Compare(a.Method?.ToString(), b.Method?.ToString(), StringComparison.Ordinal);
+        }
+
+        private static string GetCategoryPath(Type type)
+        {
+            return type.GetCustomAttribute<GraphCategoryAttribute>()?.Path;
+        }
+
+        /// <summary>
+        /// Scans a single assembly for [GraphProperty] properties.
+        /// </summary>
+        private static void ScanAssemblyProperties(Assembly assembly, List<NodeDefinition> nodes)
+        {
+            // DeclaredOnly: a property is reported by the type that declares it and not again by each
+            // type that inherits it.
+            const BindingFlags declaredPublic =
+                BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+
+            Type[] types;
+
+            try
             {
-                // Get category attribute if present
+                types = assembly.GetTypes();
+            }
+            catch (ReflectionTypeLoadException ex)
+            {
+                // One type that fails to load must not hide every property in the assembly.
+                types = ex.Types.Where(type => type != null).ToArray();
+            }
+
+            foreach (var type in types)
+            {
+                PropertyInfo[] properties = type.GetProperties(declaredPublic);
+                if (properties.Length == 0)
+                    continue;
+
                 string categoryPath = null;
-                var categoryAttr = type.GetCustomAttribute<GraphCategoryAttribute>();
-                if (categoryAttr != null)
-                {
-                    categoryPath = categoryAttr.Path;
-                }
+                bool categoryResolved = false;
 
-                // Scan methods
-                foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance))
+                foreach (var property in properties)
                 {
-                    var nodeAttr = method.GetCustomAttribute<GraphNodeAttribute>();
-                    if (nodeAttr == null)
-                        continue;
-
-                    var node = CreateNodeDefinition(method, nodeAttr, categoryPath);
-                    if (node != null)
-                    {
-                        nodes.Add(node);
-                    }
-                }
-
-                // Scan properties
-                foreach (var property in type.GetProperties(BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance))
-                {
-                    var propAttr = property.GetCustomAttribute<GraphPropertyAttribute>();
+                    // Not inherited: an override that does not repeat the attribute is already covered by
+                    // the node for the property it overrides.
+                    var propAttr = property.GetCustomAttribute<GraphPropertyAttribute>(false);
                     if (propAttr == null)
                         continue;
+
+                    if (!categoryResolved)
+                    {
+                        categoryPath = GetCategoryPath(type);
+                        categoryResolved = true;
+                    }
 
                     var propertyNodes = CreatePropertyNodes(property, propAttr, categoryPath);
                     nodes.AddRange(propertyNodes);
@@ -245,7 +306,7 @@ namespace UdonSharp.CE.Editor.GraphBridge
         /// <summary>
         /// Creates a node definition from a method.
         /// </summary>
-        private static NodeDefinition CreateNodeDefinition(
+        internal static NodeDefinition CreateNodeDefinition(
             MethodInfo method,
             GraphNodeAttribute nodeAttr,
             string categoryPath)
@@ -321,7 +382,7 @@ namespace UdonSharp.CE.Editor.GraphBridge
         /// <summary>
         /// Creates Get/Set nodes for a property.
         /// </summary>
-        private static List<NodeDefinition> CreatePropertyNodes(
+        internal static List<NodeDefinition> CreatePropertyNodes(
             PropertyInfo property,
             GraphPropertyAttribute propAttr,
             string categoryPath)

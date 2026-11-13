@@ -59,10 +59,38 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
         /// </summary>
         public event Action<PacketEvent> OnPacketProcessed;
 
+        /// <summary>
+        /// The seed the current random sequence was started from. Passing it back to
+        /// <see cref="SetSeed"/> replays the same drops, latencies and duplicates.
+        /// </summary>
+        public int Seed { get; private set; }
+
         // Internal state
         private readonly List<DelayedPacket> _delayedPackets = new List<DelayedPacket>();
         private readonly List<PacketEvent> _recentEvents = new List<PacketEvent>();
         private const int MAX_RECENT_EVENTS = 100;
+
+        // The simulator's own generator. UnityEngine.Random is global state the running world reads
+        // too, so drawing from it here shifted the game's random sequence with every packet.
+        private System.Random _random;
+
+        // The latest delivery time handed out so far, in milliseconds on the simulator clock.
+        private double _lastDeliveryTimeMs;
+
+        // Send order of queued packets. Packets held back behind an earlier one share its delivery
+        // time, and List.Sort is not stable, so the time alone would not keep them in order.
+        private long _nextSequence;
+
+        // Whether conditions are stored in EditorPrefs and delayed packets are pumped from
+        // EditorApplication.update. False only for instances built by CreateDetached.
+        private readonly bool _attached;
+
+        /// <summary>
+        /// Milliseconds on the clock packets are scheduled against. A double end to end: the old
+        /// (float)timeSinceStartup * 1000f lost millisecond resolution once the editor had been open a
+        /// few hours, which is the same order as the jitter being simulated.
+        /// </summary>
+        internal Func<double> ClockMs = () => EditorApplication.timeSinceStartup * 1000.0;
 
         #endregion
 
@@ -70,9 +98,12 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
 
         private NetworkSimulator()
         {
+            _attached = true;
+
             Conditions = NetworkProfiles.None.Clone();
             Stats = new NetworkSimulationStats();
             Stats.Reset();
+            SetSeed(Environment.TickCount);
 
             // Load saved conditions
             LoadConditions();
@@ -81,8 +112,33 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
             EditorApplication.update += Update;
         }
 
+        private NetworkSimulator(NetworkConditions conditions, int seed)
+        {
+            _attached = false;
+
+            Conditions = conditions?.Clone() ?? NetworkProfiles.None.Clone();
+            Stats = new NetworkSimulationStats();
+            Stats.Reset();
+            SetSeed(seed);
+        }
+
+        /// <summary>
+        /// Builds a simulator that is not the singleton: it reads and writes no EditorPrefs and is not
+        /// pumped by the editor, so its caller drives the clock and <see cref="ProcessDelayedPackets"/>.
+        /// </summary>
+        internal static NetworkSimulator CreateDetached(NetworkConditions conditions, int seed)
+        {
+            return new NetworkSimulator(conditions, seed);
+        }
+
         ~NetworkSimulator()
         {
+            // A detached instance never subscribed, and unlike the singleton it does get collected. Its
+            // finalizer must leave the delegate alone: this runs on the finalizer thread, and an
+            // unsynchronized -= there can drop a subscription the main thread is adding at that moment.
+            if (!_attached)
+                return;
+
             EditorApplication.update -= Update;
         }
 
@@ -134,6 +190,15 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
         }
 
         /// <summary>
+        /// Restarts the random sequence from <paramref name="seed"/>.
+        /// </summary>
+        public void SetSeed(int seed)
+        {
+            Seed = seed;
+            _random = new System.Random(seed);
+        }
+
+        /// <summary>
         /// Resets simulation statistics.
         /// </summary>
         public void ResetStats()
@@ -141,6 +206,7 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
             Stats.Reset();
             _delayedPackets.Clear();
             _recentEvents.Clear();
+            _lastDeliveryTimeMs = 0;
         }
 
         /// <summary>
@@ -160,6 +226,11 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
                 };
             }
 
+            // Anything already due goes out first. Delayed packets are otherwise only released by the next
+            // editor update, so a packet that needs no delay could be logged ahead of one that was due
+            // before it was even sent.
+            ProcessDelayedPackets();
+
             Stats.TotalPackets++;
             Stats.TotalBytes += sizeBytes;
 
@@ -172,7 +243,7 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
             };
 
             // Check for packet loss
-            if (Conditions.ShouldDropPacket())
+            if (Conditions.ShouldDropPacket(_random))
             {
                 Stats.DroppedPackets++;
                 result.Dropped = true;
@@ -185,12 +256,10 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
             }
 
             // Calculate latency
-            float latency = Conditions.GetRandomLatency();
-            result.DelayMs = latency;
-            Stats.TotalLatencyMs += latency;
+            float latency = Conditions.GetRandomLatency(_random);
 
             // Check for duplication
-            if (Conditions.ShouldDuplicatePacket())
+            if (Conditions.ShouldDuplicatePacket(_random))
             {
                 Stats.DuplicatedPackets++;
                 result.Duplicated = true;
@@ -199,29 +268,60 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
             result.Delivered = true;
 
             packetEvent.EventType = result.Duplicated ? PacketEventType.Duplicated : PacketEventType.Delivered;
-            packetEvent.LatencyMs = latency;
 
-            if (latency > 0f)
+            double currentTime = ClockMs();
+            double deliveryTimeMs = currentTime + latency;
+
+            if (Conditions.SimulateOutOfOrder && _delayedPackets.Count > 0 && _random.NextDouble() * 100.0 < 25.0)
             {
-                Stats.DelayedPackets++;
+                double maxAdvanceMs = Math.Max(1.0, Math.Min(latency, Conditions.Jitter + latency * 0.5));
+                deliveryTimeMs = Math.Max(currentTime, deliveryTimeMs - (1.0 + _random.NextDouble() * maxAdvanceMs));
+            }
 
-                float currentTime = (float)EditorApplication.timeSinceStartup * 1000f;
-                float deliveryTimeMs = currentTime + latency;
-
-                if (Conditions.SimulateOutOfOrder && _delayedPackets.Count > 0 && UnityEngine.Random.Range(0f, 100f) < 25f)
+            // Every packet draws its own latency, so a later packet can come out with an earlier delivery
+            // time than one sent before it.
+            if (deliveryTimeMs < _lastDeliveryTimeMs)
+            {
+                if (Conditions.SimulateOutOfOrder)
                 {
-                    float maxAdvanceMs = Mathf.Max(1f, Mathf.Min(latency, Conditions.Jitter + latency * 0.5f));
-                    deliveryTimeMs = Mathf.Max(currentTime, deliveryTimeMs - UnityEngine.Random.Range(1f, maxAdvanceMs + 1f));
+                    // Counted here, where the packet is known to overtake something. Labelling a fixed
+                    // quarter of the packets up front reported reordering that had not happened and
+                    // missed the reordering that had.
                     packetEvent.EventType = PacketEventType.OutOfOrder;
                     Stats.OutOfOrderPackets++;
                 }
+                else
+                {
+                    // Out-of-order delivery is switched off, so this packet waits its turn behind the
+                    // ones already in flight. Leaving the draw alone reordered packets on every profile
+                    // with a latency range while the out-of-order count stayed at zero.
+                    deliveryTimeMs = _lastDeliveryTimeMs;
+                }
+            }
+
+            if (deliveryTimeMs > _lastDeliveryTimeMs)
+            {
+                _lastDeliveryTimeMs = deliveryTimeMs;
+            }
+
+            // What the caller is told to wait is the delay actually applied, including any time spent
+            // queued behind an earlier packet -- a caller that schedules by it keeps the same order.
+            float appliedDelayMs = (float)(deliveryTimeMs - currentTime);
+            result.DelayMs = appliedDelayMs;
+            Stats.TotalLatencyMs += appliedDelayMs;
+            packetEvent.LatencyMs = appliedDelayMs;
+
+            if (appliedDelayMs > 0f)
+            {
+                Stats.DelayedPackets++;
 
                 _delayedPackets.Add(new DelayedPacket
                 {
                     Name = packetName,
                     SizeBytes = sizeBytes,
                     DeliveryTimeMs = deliveryTimeMs,
-                    LatencyMs = latency,
+                    Sequence = _nextSequence++,
+                    LatencyMs = appliedDelayMs,
                     EventType = packetEvent.EventType
                 });
             }
@@ -270,13 +370,17 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
             ProcessDelayedPackets();
         }
 
-        private void ProcessDelayedPackets()
+        internal void ProcessDelayedPackets()
         {
             if (_delayedPackets.Count == 0)
                 return;
 
-            float currentTime = (float)EditorApplication.timeSinceStartup * 1000f;
-            _delayedPackets.Sort((a, b) => a.DeliveryTimeMs.CompareTo(b.DeliveryTimeMs));
+            double currentTime = ClockMs();
+            _delayedPackets.Sort((a, b) =>
+            {
+                int byTime = a.DeliveryTimeMs.CompareTo(b.DeliveryTimeMs);
+                return byTime != 0 ? byTime : a.Sequence.CompareTo(b.Sequence);
+            });
 
             for (int i = 0; i < _delayedPackets.Count;)
             {
@@ -312,6 +416,9 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
 
         private void SaveConditions()
         {
+            if (!_attached)
+                return;
+
             EditorPrefs.SetString("CE_NetworkSim_Profile", Conditions.ProfileName);
             EditorPrefs.SetFloat("CE_NetworkSim_LatencyMin", Conditions.LatencyMin);
             EditorPrefs.SetFloat("CE_NetworkSim_LatencyMax", Conditions.LatencyMax);
@@ -377,7 +484,8 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
     {
         public string Name;
         public int SizeBytes;
-        public float DeliveryTimeMs;
+        public double DeliveryTimeMs;
+        public long Sequence;
         public float LatencyMs;
         public PacketEventType EventType;
     }

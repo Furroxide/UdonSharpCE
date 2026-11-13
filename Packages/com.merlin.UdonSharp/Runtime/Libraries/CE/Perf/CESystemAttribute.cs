@@ -10,6 +10,13 @@ namespace UdonSharp.CE.Perf
     /// directly to achieve optimal performance in Udon's constrained environment.
     /// </summary>
     /// <remarks>
+    /// This attribute is metadata only: CEWorld neither discovers nor calls a method because it is
+    /// marked. What <c>CEWorld.Tick()</c> runs is whatever was passed to <c>CEWorld.RegisterSystem</c>,
+    /// and that has to be a public, parameterless method -- it is invoked by name -- which reaches its
+    /// component arrays through fields. The parameterised, private signatures described and shown below
+    /// are the shape a future generator is meant to consume; nothing calls them today, and Order,
+    /// Group, FixedUpdate, Enabled and BatchSize are not read by anything.
+    ///
     /// Systems receive component arrays as parameters and iterate over them in batches.
     /// This pattern eliminates per-entity method call overhead and enables cache-friendly access.
     ///

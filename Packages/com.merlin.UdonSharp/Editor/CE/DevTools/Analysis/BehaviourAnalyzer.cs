@@ -23,12 +23,12 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
         /// <summary>
         /// Maximum bytes for continuous sync mode.
         /// </summary>
-        public const int CONTINUOUS_SYNC_LIMIT = 200;
+        public const int CONTINUOUS_SYNC_LIMIT = NetworkLimits.ContinuousSyncMaxBytes;
 
         /// <summary>
         /// Warning threshold as percentage of continuous limit.
         /// </summary>
-        public const float WARNING_THRESHOLD = 0.8f;
+        public const float WARNING_THRESHOLD = NetworkLimits.WarningThreshold;
 
         /// <summary>
         /// Sync updates per second for continuous mode.
@@ -41,16 +41,23 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
         public const int MANUAL_SYNCS_PER_SECOND = 1;
 
         /// <summary>
+        /// Bytes in the kilobyte every KB/s figure here is quoted in. The budget is 11264 bytes, which is
+        /// 11 KB only at 1024 to the kilobyte, so bandwidth has to be divided by the same number or a
+        /// behaviour sitting exactly on the budget reads as 2.4% over it.
+        /// </summary>
+        public const float BYTES_PER_KILOBYTE = 1024f;
+
+        /// <summary>
         /// Network budget in KB/s.
         /// </summary>
-        public const float NETWORK_BUDGET_KBPS = 11f;
+        public const float NETWORK_BUDGET_KBPS = NetworkLimits.NetworkBudgetBytesPerSecond / BYTES_PER_KILOBYTE;
 
         /// <summary>
         /// Bytes of framing a synced string or array always costs on top of its contents (the serialized
         /// length prefix). For an unbounded string this is the only part of the cost that is knowable at
         /// compile time.
         /// </summary>
-        public const int FRAMING_BYTES = 4;
+        public const int FRAMING_BYTES = FieldSizeCalculator.FRAMING_BYTES;
 
         #endregion
 
@@ -77,6 +84,26 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
         /// <returns>Analysis result with fields, totals, violations, and recommendations.</returns>
         public BehaviourAnalysisResult Analyze(Type behaviourType, UdonBehaviour instance)
         {
+            return Analyze(behaviourType, instance, null);
+        }
+
+        /// <summary>
+        /// Analyzes a behaviour type for bandwidth usage, sizing its synced arrays from the behaviours
+        /// that actually sit in the scene.
+        /// </summary>
+        /// <param name="behaviourType">The type to analyze.</param>
+        /// <param name="instance">The UdonBehaviour that runs this type, when one exists.</param>
+        /// <param name="sceneInstances">
+        /// The scene's behaviours of this type, or null. An array's length is a property of the object, not
+        /// of the type, so this is the only place a real length can come from: without it every synced
+        /// array is reported as a floor of its framing bytes.
+        /// </param>
+        /// <returns>Analysis result with fields, totals, violations, and recommendations.</returns>
+        public BehaviourAnalysisResult Analyze(
+            Type behaviourType,
+            UdonBehaviour instance,
+            IReadOnlyList<UdonSharpBehaviour> sceneInstances)
+        {
             if (behaviourType == null)
                 throw new ArgumentNullException(nameof(behaviourType));
 
@@ -87,14 +114,12 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
             };
 
             // Find all synced fields
-            var fields = behaviourType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-
-            foreach (var field in fields)
+            foreach (var field in GetInstanceFieldsIncludingBases(behaviourType))
             {
                 if (!IsSyncedField(field))
                     continue;
 
-                var fieldResult = AnalyzeField(field);
+                var fieldResult = AnalyzeField(field, sceneInstances);
                 result.Fields.Add(fieldResult);
             }
 
@@ -123,6 +148,14 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
         /// </summary>
         public FieldAnalysisResult AnalyzeField(FieldInfo field)
         {
+            return AnalyzeField(field, null);
+        }
+
+        /// <summary>
+        /// Analyzes a single field, reading an array's length off the given scene instances.
+        /// </summary>
+        public FieldAnalysisResult AnalyzeField(FieldInfo field, IReadOnlyList<UdonSharpBehaviour> sceneInstances)
+        {
             var result = new FieldAnalysisResult
             {
                 Field = field,
@@ -131,8 +164,10 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
                 IsArray = field.FieldType.IsArray
             };
 
+            int instanceArrayLength = result.IsArray ? GetLongestInstanceArray(field, sceneInstances) : -1;
+
             // Calculate size
-            result.Size = CalculateSyncedFieldSize(field);
+            result.Size = CalculateSyncedFieldSize(field, instanceArrayLength);
 
             // Check for CE.Net [Sync] attribute properties
             var syncAttr = field.GetCustomAttribute<SyncAttribute>();
@@ -142,20 +177,44 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
                 result.QuantizeValue = syncAttr.Quantize;
                 result.HasDeltaEncoding = syncAttr.DeltaEncodeHint;
 
-                // Adjust effective size for optimizations
+                // Named, never subtracted. See DescribeTuningOptions for why the size is left alone.
                 if (result.HasQuantization || result.HasDeltaEncoding)
                 {
-                    AdjustSizeForOptimizations(result);
+                    result.Notes = DescribeTuningOptions(result);
                 }
             }
 
             // Try to get array length
             if (result.IsArray)
             {
-                result.ArrayLength = TryGetArrayLength(field);
+                result.ArrayLength = instanceArrayLength > 0 ? instanceArrayLength : TryGetArrayLength(field);
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Every instance field a behaviour carries, including the private ones its base classes declare.
+        ///
+        /// <c>Type.GetFields</c> on the derived type returns inherited public and protected fields and
+        /// silently leaves out a base class's private ones. The emitter does not: a
+        /// '[UdonSynced] private int _health;' on a shared entity base is serialized by every subclass, and
+        /// since the abstract base is never in a scene itself, a tool reading only GetFields counted those
+        /// bytes nowhere at all.
+        /// </summary>
+        public static List<FieldInfo> GetInstanceFieldsIncludingBases(Type behaviourType)
+        {
+            var fields = new List<FieldInfo>();
+
+            for (Type current = behaviourType;
+                 current != null && current != typeof(UdonSharpBehaviour) && current != typeof(object);
+                 current = current.BaseType)
+            {
+                fields.AddRange(current.GetFields(
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly));
+            }
+
+            return fields;
         }
 
         #endregion
@@ -299,41 +358,27 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
             return field.GetCustomAttribute<UdonSyncedAttribute>(true) != null;
         }
 
-        private void AdjustSizeForOptimizations(FieldAnalysisResult result)
+        /// <summary>
+        /// Names the [Sync] tuning options a field carries, without touching its size.
+        ///
+        /// This used to subtract. A quantized field lost 30-75% of its bytes and a field with
+        /// DeltaEncodeHint lost half, on the reasoning that those options make the payload smaller. Neither
+        /// does: Quantize rounds the value in a generated OnPreSerialization and the field goes out at its
+        /// full width, and DeltaEncodeHint is an advisory flag VRChat has no wire format for. The discount
+        /// was applied before the Continuous limit was checked, so fourteen quantized quaternions -- 224
+        /// bytes on the wire -- were reported as 112 and passed.
+        /// </summary>
+        private static string DescribeTuningOptions(FieldAnalysisResult result)
         {
-            float savingsMultiplier = 1f;
+            var notes = new List<string>();
 
             if (result.HasQuantization)
-            {
-                float quantizeSavings = FieldSizeCalculator.CalculateQuantizationSavings(result.QuantizeValue);
-                savingsMultiplier *= (1f - quantizeSavings);
-            }
+                notes.Add($"Quantize {result.QuantizeValue} (rounds the value; bytes sent are unchanged)");
 
             if (result.HasDeltaEncoding)
-            {
-                savingsMultiplier *= (1f - FieldSizeCalculator.DEFAULT_DELTA_SAVINGS);
-            }
+                notes.Add("DeltaEncodeHint (advisory; the whole field is still sent)");
 
-            // Create adjusted size result
-            int adjustedMin = Math.Max(1, (int)(result.Size.MinBytes * savingsMultiplier));
-            int adjustedMax = Math.Max(1, (int)(result.Size.MaxBytes * savingsMultiplier));
-
-            string notes = "";
-            if (result.HasQuantization)
-                notes += $"Quantized ({result.QuantizeValue}); ";
-            if (result.HasDeltaEncoding)
-                notes += "Delta-encode hint; ";
-
-            result.Notes = notes.TrimEnd(' ', ';');
-
-            // Update size with optimization note
-            result.Size = new SizeResult
-            {
-                MinBytes = adjustedMin,
-                MaxBytes = adjustedMax,
-                IsFixed = result.Size.IsFixed,
-                Description = $"{result.Size.Description} (optimized: {notes.Trim(' ', ';')})"
-            };
+            return string.Join("; ", notes);
         }
 
         /// <summary>
@@ -344,8 +389,13 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
         /// string-heavy behaviours by orders of magnitude -- and because [MaxLength] does not bound a synced
         /// string at all. That attribute lives in UdonSharp.CE.Persistence and is only read by CEPersistence
         /// when it writes PlayerData, so on the sync path it is an unenforced hint and is reported as one.
+        ///
+        /// Arrays are sized from <paramref name="instanceArrayLength"/> when a scene instance supplied one,
+        /// because that is the only length there is: reflection over the type cannot see
+        /// 'new int[MAX_PLAYERS]', and assuming sixteen elements in its place reported a hundred-element
+        /// table and a sixty-thousand-byte buffer as the same small field.
         /// </summary>
-        private SizeResult CalculateSyncedFieldSize(FieldInfo field)
+        private SizeResult CalculateSyncedFieldSize(FieldInfo field, int instanceArrayLength)
         {
             Type fieldType = field.FieldType;
 
@@ -355,7 +405,47 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
             if (fieldType.IsArray && fieldType.GetElementType() == typeof(string))
                 return CalculateStringArraySize(field);
 
+            if (fieldType.IsArray && instanceArrayLength > 0)
+            {
+                Type elementType = fieldType.GetElementType();
+                int elementSize = _sizeCalculator.GetTypeSize(elementType);
+
+                return SizeResult.Fixed(
+                    FRAMING_BYTES + elementSize * instanceArrayLength,
+                    $"{elementType?.Name}[{instanceArrayLength}] ({elementSize}B x {instanceArrayLength} + " +
+                    $"{FRAMING_BYTES}B framing; length read from the scene)");
+            }
+
             return _sizeCalculator.CalculateSize(field);
+        }
+
+        /// <summary>
+        /// The longest non-empty array any of the given scene instances holds in this field, or -1 when
+        /// none of them holds one.
+        ///
+        /// The longest, because the figure feeds a limit check and one instance over the limit is a
+        /// problem whatever the others hold. An empty array does not count as a length: 'new byte[0]' is
+        /// how a buffer that is refilled on every send is declared, and calling that a zero-byte field
+        /// would be the sixteen-element guess with a different wrong number.
+        /// </summary>
+        private static int GetLongestInstanceArray(FieldInfo field, IReadOnlyList<UdonSharpBehaviour> sceneInstances)
+        {
+            int longest = -1;
+
+            if (sceneInstances == null || field.DeclaringType == null)
+                return longest;
+
+            foreach (UdonSharpBehaviour sceneInstance in sceneInstances)
+            {
+                // Unity's null: a destroyed behaviour still in the list has no fields worth reading.
+                if (sceneInstance == null || !field.DeclaringType.IsInstanceOfType(sceneInstance))
+                    continue;
+
+                if (field.GetValue(sceneInstance) is Array array && array.Length > longest && array.Length > 0)
+                    longest = array.Length;
+            }
+
+            return longest;
         }
 
         private SizeResult CalculateStringSize(FieldInfo field)
@@ -364,18 +454,21 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
 
             if (hintedCharacters <= 0)
             {
-                return SizeResult.Variable(
-                    FRAMING_BYTES,
+                return SizeResult.LowerBound(
                     FRAMING_BYTES,
                     $"string, length unknown at compile time ({FRAMING_BYTES}B framing + " +
                     $"{NetworkLimits.SyncedStringBytesPerCharacter}B per character; only the framing is counted)");
             }
 
-            return SizeResult.Variable(
+            SizeResult hinted = SizeResult.Variable(
                 FRAMING_BYTES,
                 FRAMING_BYTES + hintedCharacters * NetworkLimits.SyncedStringBytesPerCharacter,
                 $"string, [MaxLength({hintedCharacters})] hint ({FRAMING_BYTES}B framing + {hintedCharacters} x " +
                 $"{NetworkLimits.SyncedStringBytesPerCharacter}B; the hint is not enforced on the sync path)");
+
+            // Still a floor: nothing on the sync path stops the string outgrowing the hint.
+            hinted.IsLowerBound = true;
+            return hinted;
         }
 
         /// <summary>
@@ -388,33 +481,32 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
 
             if (hintedElements <= 0)
             {
-                return SizeResult.Variable(
-                    FRAMING_BYTES,
+                return SizeResult.LowerBound(
                     FRAMING_BYTES,
                     $"string[], element count and element lengths both unknown (only the {FRAMING_BYTES}B array " +
                     "framing is counted)");
             }
 
-            return SizeResult.Variable(
+            SizeResult hinted = SizeResult.Variable(
                 FRAMING_BYTES,
                 FRAMING_BYTES + hintedElements * FRAMING_BYTES,
                 $"string[], [MaxLength({hintedElements})] hint bounds the element count only ({FRAMING_BYTES}B " +
                 $"array framing + {FRAMING_BYTES}B framing per element; element characters unbounded)");
+
+            hinted.IsLowerBound = true;
+            return hinted;
         }
 
         /// <summary>
-        /// Whether any synced field's size is not statically knowable, which makes the reported totals lower
-        /// bounds instead of estimates.
+        /// Whether any synced field's size is not knowable ahead of time, which makes the reported totals
+        /// lower bounds instead of estimates. Strings always are; an array is when no scene instance and no
+        /// [MaxLength] gave it a length.
         /// </summary>
-        private static bool HasUnboundedStringFields(BehaviourAnalysisResult result)
+        private static bool HasLowerBoundFields(BehaviourAnalysisResult result)
         {
             foreach (var field in result.Fields)
             {
-                Type fieldType = field.Field?.FieldType;
-                if (fieldType == null)
-                    continue;
-
-                if (fieldType == typeof(string) || (fieldType.IsArray && fieldType.GetElementType() == typeof(string)))
+                if (field.IsLowerBound)
                     return true;
             }
 
@@ -455,7 +547,7 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
                 return 0f;
 
             // Use max bytes for conservative estimate
-            return (result.MaxTotalBytes * syncsPerSecond) / 1000f;
+            return (result.MaxTotalBytes * syncsPerSecond) / BYTES_PER_KILOBYTE;
         }
 
         private void CheckViolations(BehaviourAnalysisResult result)
@@ -477,17 +569,22 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
             // string counts as 4 bytes here and would otherwise be indistinguishable from one syncing a short
             // fixed record -- the continuous check below can prove a payload too big, but it can never prove
             // one small enough once a field has no compile-time length.
-            if (HasUnboundedStringFields(result))
+            //
+            // The same holds for an array nothing gave a length to: no scene instance holding a non-empty
+            // one, and no [MaxLength]. It is counted as its framing and flagged, where it used to be
+            // counted as sixteen elements and not flagged at all.
+            if (HasLowerBoundFields(result))
             {
                 result.Violations.Add(LimitViolation.Warning(
                     $"Payload size for {result.BehaviourType?.Name ?? "this behaviour"} is a LOWER BOUND: " +
-                    "at least one synced string has no compile-time length",
+                    "at least one synced string or array has no length known ahead of time",
                     result.SyncMode == "Continuous"
-                        ? $"Only the {FRAMING_BYTES}B framing of each string is counted, so a total under " +
+                        ? $"Only the {FRAMING_BYTES}B framing of each such field is counted, so a total under " +
                           $"{CONTINUOUS_SYNC_LIMIT} bytes does NOT confirm the payload fits continuous sync. " +
-                          "Keep the strings short by construction, or move to Manual sync."
-                        : $"Only the {FRAMING_BYTES}B framing of each string is counted; the real cost is " +
-                          $"{NetworkLimits.SyncedStringBytesPerCharacter}B per character at runtime."));
+                          "Keep them short by construction, or move to Manual sync."
+                        : $"Only the {FRAMING_BYTES}B framing of each such field is counted; a string really costs " +
+                          $"{NetworkLimits.SyncedStringBytesPerCharacter}B per character and an array its element " +
+                          "size per element, at whatever length they have at runtime."));
             }
 
             // Check continuous sync limit
@@ -532,29 +629,18 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
                     {
                         Field = field.Field,
                         Message = "Large array in continuous sync",
-                        Suggestion = "Move to Manual sync with delta encoding, or split into multiple behaviours",
-                        EstimatedSavings = (int)(field.Size.MaxBytes * 0.5f)
+                        // No EstimatedSavings figure, here or on the delta recommendation below. Both used
+                        // to quote half the field, and neither had anything behind the number: how much a
+                        // rewrite saves depends on how often the array changes, which nothing here can see.
+                        Suggestion = "Move to Manual sync and send it only when it changes, or split into multiple behaviours",
+                        EstimatedSavings = 0
                     });
                 }
 
-                // Float/Vector without quantization
-                if (!field.HasQuantization && _sizeCalculator.IsQuantizable(field.Field.FieldType))
-                {
-                    result.Recommendations.Add(new Recommendation
-                    {
-                        Field = field.Field,
-                        Message = $"{field.TypeName} without quantization",
-                        // The authority is spelled out because [Sync] takes one positionally and required:
-                        // a suggestion of "[Sync(Quantize = 0.01f)]" is CS7036 the moment it is pasted, and
-                        // this report and CE0014 would then be telling the same author two different
-                        // attribute syntaxes in the same build. Owner is named as the placeholder, not a
-                        // recommendation -- this analyzer sees a FieldInfo, never the writes, so it cannot
-                        // know which authority the field should carry.
-                        Suggestion = "Add Quantize to the field's [Sync], e.g. [Sync(Authority.Owner, Quantize = 0.01f)]. " +
-                                     "Authority is required and positional; keep whichever one the field already declares.",
-                        EstimatedSavings = (int)(field.Size.MaxBytes * 0.5f)
-                    });
-                }
+                // There is deliberately no "float without quantization" recommendation. It used to promise
+                // half the field back for adding Quantize, and Quantize saves no bytes: the value is
+                // rounded and then sent at full width. Advice whose only stated benefit does not exist
+                // sends authors off to tune fields for nothing.
 
                 // String fields that might be IDs
                 if (field.Field.FieldType == typeof(string))
@@ -589,7 +675,7 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
                         // the whole point of the sentence is that the flag changes nothing on the wire.
                         Suggestion = "Use Manual sync and serialize only the changed elements; [Sync]'s DeltaEncodeHint " +
                                      "is an advisory flag read by this report and by CE0013, not a wire format.",
-                        EstimatedSavings = (int)(field.Size.MaxBytes * FieldSizeCalculator.DEFAULT_DELTA_SAVINGS)
+                        EstimatedSavings = 0
                     });
                 }
             }

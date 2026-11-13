@@ -97,7 +97,7 @@ namespace UdonSharp.Serialization
             // ReSharper disable once PossibleNullReferenceException
             Array listArray = (Array)toArrayMethod.Invoke(newUSharpList, null);
             
-            MethodInfo addMethod = uSharpQueueType.GetMethod("Enqueue");
+            MethodInfo addMethod = targetObject.GetType().GetMethod("Enqueue");
             
             foreach (object item in listArray)
             {

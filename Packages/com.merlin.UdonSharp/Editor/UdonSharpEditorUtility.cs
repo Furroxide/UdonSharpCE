@@ -271,13 +271,18 @@ namespace UdonSharpEditor
             
             // If a sidecar asset already exists, reuse it and refresh the lookup caches.
             UdonSharpProgramAsset existingProgramAsset = UnityEditor.AssetDatabase.LoadAssetAtPath<UdonSharpProgramAsset>(assetPath);
-            if (existingProgramAsset != null)
+            if (existingProgramAsset != null && existingProgramAsset.sourceCsScript == script)
             {
                 EnsureProgramAssetLookupCaches();
                 _programAssetLookup[script] = existingProgramAsset;
                 _programAssetTypeLookup[scriptClass] = existingProgramAsset;
                 return existingProgramAsset;
             }
+            
+            if (UnityEditor.AssetDatabase.LoadMainAssetAtPath(assetPath) != null || System.IO.File.Exists(assetPath))
+                assetPath = UnityEditor.AssetDatabase.GenerateUniqueAssetPath(assetPath);
+            if (System.IO.File.Exists(assetPath))
+                return null;
             
             UdonSharpCEUtils.Log($"Auto-creating program asset for {scriptPath}");
             

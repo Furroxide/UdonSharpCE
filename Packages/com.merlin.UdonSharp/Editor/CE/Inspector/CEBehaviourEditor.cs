@@ -18,6 +18,15 @@ namespace UdonSharp.CE.Editor.Inspector
     /// Register this as the default inspector using:
     /// [assembly: DefaultUdonSharpBehaviourEditor(typeof(CEBehaviourEditor), "CE Inspector")]
     /// </summary>
+    /// <remarks>
+    /// CanEditMultipleObjects is what UdonSharp's host inspector checks before it will hand a multi-object
+    /// selection to a default editor. Without it, choosing this inspector replaced every multi-selection
+    /// with "Multi-object editing not supported.", which the stock UdonSharp inspector handles.
+    ///
+    /// Not carried over from the stock inspector: its fallback drawer for [OdinSerialize] jagged arrays.
+    /// Such fields are not editable here.
+    /// </remarks>
+    [CanEditMultipleObjects]
     public class CEBehaviourEditor : UnityEditor.Editor
     {
         // ═══════════════════════════════════════════════════════════════
@@ -96,10 +105,16 @@ namespace UdonSharp.CE.Editor.Inspector
 
             serializedObject.Update();
 
+            // Everything below that describes one behaviour -- its sync mode, its backing UdonBehaviour --
+            // is drawn for a single selection only. With several objects selected those can differ per
+            // object, and showing the first one's as if it spoke for all of them would be wrong.
+            bool isMultiEdit = targets.Length > 1;
+
             try
             {
-                // Draw default U# header (sync settings, interact, etc.) 
-                if (UdonSharpGUI.DrawDefaultUdonSharpBehaviourHeader(target, true, false))
+                // Draw default U# header (sync settings, interact, etc.). All targets, so the sync and
+                // interact settings it edits are applied to the whole selection.
+                if (UdonSharpGUI.DrawDefaultUdonSharpBehaviourHeader(targets, true, false))
                 {
                     return;
                 }
@@ -108,7 +123,10 @@ namespace UdonSharp.CE.Editor.Inspector
                 CEInspectorRenderer.DrawHeader(target.GetType().Name, _badges);
 
                 // Draw status bar
-                CEInspectorRenderer.DrawStatusBar(_syncInfo, _optimizationReport);
+                if (!isMultiEdit)
+                {
+                    CEInspectorRenderer.DrawStatusBar(_syncInfo, _optimizationReport);
+                }
 
                 EditorGUILayout.Space(4);
 
@@ -131,7 +149,18 @@ namespace UdonSharp.CE.Editor.Inspector
                 }
 
                 // Draw advanced section
-                DrawAdvancedSection();
+                if (!isMultiEdit)
+                {
+                    DrawAdvancedSection();
+                }
+            }
+            catch (ExitGUIException)
+            {
+                // Not an error. Unity throws this on purpose to abandon the rest of a GUI pass -- opening
+                // an object picker or a colour picker does it -- and the host has to see it. Caught by the
+                // handler below it was reported as an inspector failure and the whole fallback inspector
+                // was then drawn on top of a half-finished layout.
+                throw;
             }
             catch (Exception ex)
             {
@@ -329,10 +358,7 @@ namespace UdonSharp.CE.Editor.Inspector
             }
 
             // Count synced fields
-            var fields = target.GetType().GetFields(
-                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-
-            foreach (var field in fields)
+            foreach (var field in GetInstanceFields(target.GetType()))
             {
                 if (field.GetCustomAttribute<UdonSyncedAttribute>() != null)
                 {
@@ -349,6 +375,29 @@ namespace UdonSharp.CE.Editor.Inspector
             }
 
             return info;
+        }
+
+        /// <summary>
+        /// Every instance field the behaviour carries, most derived type first, including private fields
+        /// declared on its base classes.
+        ///
+        /// Type.GetFields on the derived type leaves those out, so a [UdonSynced] private field on a
+        /// shared base class was missing from the synced-variable count and its property was grouped as
+        /// though nothing were known about it.
+        /// </summary>
+        private static List<FieldInfo> GetInstanceFields(Type behaviourType)
+        {
+            const BindingFlags declaredInstance =
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+
+            var fields = new List<FieldInfo>();
+
+            for (Type type = behaviourType; type != null && type != typeof(UdonSharpBehaviour); type = type.BaseType)
+            {
+                fields.AddRange(type.GetFields(declaredInstance));
+            }
+
+            return fields;
         }
 
         private int EstimateFieldSize(Type fieldType)
@@ -382,10 +431,15 @@ namespace UdonSharp.CE.Editor.Inspector
                 ["General"] = new PropertyGroup("General", true, 50)
             };
 
-            var type = target.GetType();
-            var fields = type.GetFields(
-                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-                .ToDictionary(f => f.Name, f => f);
+            // Keyed by name with the most derived declaration winning. A base class and a subclass may each
+            // have a private field of the same name, and ToDictionary throws on the second one -- which
+            // took the whole inspector down to its fallback.
+            var fields = new Dictionary<string, FieldInfo>();
+            foreach (var declaredField in GetInstanceFields(target.GetType()))
+            {
+                if (!fields.ContainsKey(declaredField.Name))
+                    fields[declaredField.Name] = declaredField;
+            }
 
             var iterator = obj.GetIterator();
             bool enterChildren = true;
@@ -514,8 +568,7 @@ namespace UdonSharp.CE.Editor.Inspector
         {
             try
             {
-                var fields = type.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                return fields.Any(f => f.GetCustomAttribute<CEPredictedAttribute>() != null);
+                return GetInstanceFields(type).Any(f => f.GetCustomAttribute<CEPredictedAttribute>() != null);
             }
             catch
             {

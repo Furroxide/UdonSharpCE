@@ -48,6 +48,15 @@ namespace CEShowcase.Station6_Procgen
         {
             EnsureInitialized();
             UpdateVisualState();
+
+            // _isDug can already be true here: VRChat may deliver it before Start, and it drops the
+            // OnDeserialization that would have armed the timer for a behaviour that has not started.
+            // A client that then inherits the site from a departing owner has to be counting, or the site
+            // stays dug for the rest of the instance -- nobody else is allowed to bring it back.
+            if (_isDug)
+            {
+                _respawnTimer = _respawnTime;
+            }
         }
 
         private void OnEnable()

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using UdonSharp.CE.Net;
 using UdonSharp.Compiler;
@@ -19,9 +20,13 @@ namespace UdonSharp.CE.Editor.Analyzers
     ///
     /// The check is deliberately hard to trip. A guard counts whether it sits in the writing method, in a
     /// helper the writer calls (the EnsureOwnership() shape), or in every call site the writer has inside
-    /// the behaviour, and local-initialization and ownership-callback entry points are exempt outright.
-    /// The guard itself does not have to be a literal Networking.IsOwner call: a flag or property whose
-    /// value comes from one counts, because that is how ownership is actually written.
+    /// the behaviour. Local-initialization and ownership-callback entry points and owner-scoped [Rpc]
+    /// methods are exempt outright, and a handler this behaviour only ever sends to the owner with
+    /// SendCustomNetworkEvent counts that event as a covered way in. A call site counts whether it is a
+    /// direct call or one of Udon's string-addressed self dispatches (SendCustomEvent and its delayed
+    /// forms), because a handler reached by name is still reached. The guard itself does not have to be
+    /// a literal Networking.IsOwner call: a flag or property whose value comes from one counts, because
+    /// that is how ownership is actually written.
     ///
     /// What is left after all of that is the shape with no answer anywhere on the path -- a write reached
     /// from an entry point the behaviour itself never calls -- which is the shape that silently loses
@@ -127,7 +132,11 @@ namespace UdonSharp.CE.Editor.Analyzers
             if (syncedFields.Count == 0)
                 return diagnostics;
 
-            CENetworkAnalysis.BehaviourMethodGraph graph = CENetworkAnalysis.BuildMethodGraph(type);
+            // The ownership graph, not the plain one: a handler reached through SendCustomEvent or one of
+            // its delayed forms has a caller, and the plain graph cannot see it.
+            CENetworkAnalysis.BehaviourMethodGraph graph =
+                CENetworkAnalysis.BuildOwnershipMethodGraph(type, compilationContext);
+
             if (graph.Methods.Count == 0)
                 return diagnostics;
 
@@ -148,10 +157,16 @@ namespace UdonSharp.CE.Editor.Analyzers
             var exemptMethods = new Dictionary<MethodDeclarationSyntax, bool>();
             var reported = new HashSet<string>(StringComparer.Ordinal);
 
+            HashSet<string> ownerTargetedEvents =
+                CENetworkAnalysis.CollectOwnerTargetedEventNames(type, compilationContext);
+
             var walker = new GuardedPathWalker(
                 graph,
                 compilationContext,
-                CENetworkAnalysis.CollectOwnershipDerivedNames(type, compilationContext));
+                CENetworkAnalysis.CollectOwnershipDerivedNames(type, compilationContext),
+                entryPoint => IsExemptEntryPoint(entryPoint, exemptMethods, compilationContext),
+                entryPoint => IsOwnerScopedRpc(entryPoint, compilationContext),
+                handler => IsOwnerTargetedEventHandler(handler, ownerTargetedEvents));
 
             foreach (CENetworkAnalysis.SyncedFieldWrite write in writes)
             {
@@ -166,9 +181,6 @@ namespace UdonSharp.CE.Editor.Analyzers
                 // keeps the two tiers from sharing state where one could start quietly deciding the
                 // other: everything below this line sees only owner-authoritative fields.
                 if (authority == Authority.Predicted)
-                    continue;
-
-                if (IsReachedFromExemptEntryPoint(method, graph, exemptMethods, compilationContext))
                     continue;
 
                 if (walker.IsGuarded(method))
@@ -230,32 +242,59 @@ namespace UdonSharp.CE.Editor.Analyzers
         }
 
         /// <summary>
-        /// Whether the write can be attributed to an entry point where an unguarded synced write is
-        /// expected. The caller closure is what matters, not the writing method's own name: pushing the
-        /// assignment into an Initialize() helper that only Start() calls does not turn it into a bug.
+        /// Whether the method is itself an entry point where an unguarded synced write is expected.
+        ///
+        /// This is a property of the entry point and nothing wider. It used to be asked of the whole
+        /// caller closure -- "is any method that can reach this write exempt" -- and one exempt caller
+        /// then excused every other way in:
+        /// 'void Start() { ResetScore(); }  public override void Interact() { ResetScore(); }' reported
+        /// nothing for the write in ResetScore, although Interact runs on whoever clicked. Deleting the
+        /// call from Start brought the report back, which is a check answering to something other than
+        /// the code it is reading. A helper that only Start calls is still not a bug: the walker gets
+        /// there by asking whether every way into the helper is covered, and Start is.
+        ///
+        /// An owner-scoped [Rpc] is exempt here because its body only ever runs on the owner: RpcEmitter
+        /// turns every call to it, this behaviour's own included, into a network send to the owner. A
+        /// plain handler of an owner-targeted SendCustomNetworkEvent is deliberately not, because nothing
+        /// rewrites a direct call to it -- see <see cref="IsOwnerTargetedEventHandler"/>.
         /// </summary>
-        private static bool IsReachedFromExemptEntryPoint(
+        private static bool IsExemptEntryPoint(
             MethodDeclarationSyntax method,
-            CENetworkAnalysis.BehaviourMethodGraph graph,
             Dictionary<MethodDeclarationSyntax, bool> cache,
             CompilationContext compilationContext)
         {
             if (cache.TryGetValue(method, out bool cached))
                 return cached;
 
-            bool exempt = false;
-
-            foreach (MethodDeclarationSyntax caller in graph.Callers(method))
-            {
-                if (ExemptMethods.Contains(caller.Identifier.Text) || IsOwnerScopedRpc(caller, compilationContext))
-                {
-                    exempt = true;
-                    break;
-                }
-            }
+            bool exempt = ExemptMethods.Contains(method.Identifier.Text) ||
+                          IsOwnerScopedRpc(method, compilationContext);
 
             cache[method] = exempt;
             return exempt;
+        }
+
+        /// <summary>
+        /// Whether the method is what 'SendCustomNetworkEvent(NetworkEventTarget.Owner, nameof(Method))'
+        /// runs, and nothing in the behaviour sends the same event to anyone else.
+        ///
+        /// That makes the network event a covered way in -- it only ever delivers the call to the owner --
+        /// and nothing more. It is not an exemption for the method, because a direct call is not a network
+        /// event: 'Interact() { ToggleOnOwner(); }' next to the owner-targeted send runs the write on
+        /// whoever clicked. So the walker counts the event as covering the method's outside entry, and
+        /// still asks every caller inside the behaviour to vouch for itself.
+        ///
+        /// The name alone is not enough. Udon only delivers a network event to a public method whose name
+        /// does not start with an underscore, so a send naming anything else is a call that never arrives,
+        /// and a method the event can never reach gets no cover from it.
+        /// </summary>
+        private static bool IsOwnerTargetedEventHandler(MethodDeclarationSyntax method, HashSet<string> ownerTargetedEvents)
+        {
+            string name = method.Identifier.Text;
+
+            if (ownerTargetedEvents == null || !ownerTargetedEvents.Contains(name))
+                return false;
+
+            return !name.StartsWith("_", StringComparison.Ordinal) && method.Modifiers.Any(SyntaxKind.PublicKeyword);
         }
 
         /// <summary>
@@ -273,6 +312,9 @@ namespace UdonSharp.CE.Editor.Analyzers
             private readonly CENetworkAnalysis.BehaviourMethodGraph _graph;
             private readonly CompilationContext _compilationContext;
             private readonly HashSet<string> _ownershipDerivedNames;
+            private readonly Func<MethodDeclarationSyntax, bool> _isExemptEntryPoint;
+            private readonly Func<MethodDeclarationSyntax, bool> _runsOnlyOnOwner;
+            private readonly Func<MethodDeclarationSyntax, bool> _isOwnerTargetedHandler;
 
             private readonly Dictionary<MethodDeclarationSyntax, bool> _guarded =
                 new Dictionary<MethodDeclarationSyntax, bool>();
@@ -288,18 +330,40 @@ namespace UdonSharp.CE.Editor.Analyzers
             public GuardedPathWalker(
                 CENetworkAnalysis.BehaviourMethodGraph graph,
                 CompilationContext compilationContext,
-                HashSet<string> ownershipDerivedNames)
+                HashSet<string> ownershipDerivedNames,
+                Func<MethodDeclarationSyntax, bool> isExemptEntryPoint,
+                Func<MethodDeclarationSyntax, bool> runsOnlyOnOwner,
+                Func<MethodDeclarationSyntax, bool> isOwnerTargetedHandler)
             {
                 _graph = graph;
                 _compilationContext = compilationContext;
                 _ownershipDerivedNames = ownershipDerivedNames;
+                _isExemptEntryPoint = isExemptEntryPoint;
+                _runsOnlyOnOwner = runsOnlyOnOwner;
+                _isOwnerTargetedHandler = isOwnerTargetedHandler;
             }
 
+            /// <summary>
+            /// Whether a synced write in this method is covered: the method is an exempt entry point, or
+            /// an ownership check stands on every way to the write.
+            /// </summary>
             public bool IsGuarded(MethodDeclarationSyntax method)
             {
                 if (method == null || _graph == null)
                     return false;
 
+                if (_isExemptEntryPoint(method))
+                    return true;
+
+                return IsGuardedByOwnershipCheck(method);
+            }
+
+            /// <summary>
+            /// The same question with the entry-point exemption left out, for the one caller that must not
+            /// take it: see <see cref="Vouches"/>.
+            /// </summary>
+            private bool IsGuardedByOwnershipCheck(MethodDeclarationSyntax method)
+            {
                 if (_guarded.TryGetValue(method, out bool cached))
                     return cached;
 
@@ -328,7 +392,10 @@ namespace UdonSharp.CE.Editor.Analyzers
                 return guarded;
             }
 
-            /// <summary>Whether the method or one of the helpers it calls checks ownership itself.</summary>
+            /// <summary>
+            /// Whether the method or one of the helpers it runs checks ownership itself. Helpers it only
+            /// schedules with a delay are not searched: their check runs after the method has returned.
+            /// </summary>
             private bool GuardsOwnPath(MethodDeclarationSyntax method)
             {
                 if (_guardsOwnPath.TryGetValue(method, out bool cached))
@@ -336,7 +403,7 @@ namespace UdonSharp.CE.Editor.Analyzers
 
                 bool guarded = false;
 
-                foreach (MethodDeclarationSyntax callee in _graph.Callees(method))
+                foreach (MethodDeclarationSyntax callee in _graph.ImmediateCallees(method))
                 {
                     SemanticModel model = CENetworkAnalysis.GetSemanticModel(_compilationContext, callee);
 
@@ -356,7 +423,10 @@ namespace UdonSharp.CE.Editor.Analyzers
             ///
             /// No call sites is deliberately not "vacuously gated": a method nothing in the behaviour
             /// calls is reached from outside it -- an Interact override, a UI event, an RPC entry point,
-            /// another behaviour's SendCustomEvent -- and that is the risky case, not the safe one.
+            /// another behaviour's SendCustomEvent -- and that is the risky case, not the safe one. The one
+            /// outside way in that is covered is the owner-targeted network event this behaviour sends,
+            /// which only ever runs the handler on the owner; a handler reached that way and from nowhere
+            /// else in the behaviour is guarded by the send itself.
             ///
             /// Recursion is judged as one unit for that reason. A call from inside a cycle is not a way
             /// *into* the cycle, so counting it as a call site would let 'void Tick() { synced++; Tick(); }'
@@ -371,27 +441,52 @@ namespace UdonSharp.CE.Editor.Analyzers
                 HashSet<MethodDeclarationSyntax> cycle = _graph.Callees(method);
                 cycle.IntersectWith(_graph.Callers(method));
 
-                var entryPoints = new HashSet<MethodDeclarationSyntax>();
+                bool hasEntryPoint = false;
 
                 foreach (MethodDeclarationSyntax member in cycle)
                 {
                     foreach (MethodDeclarationSyntax caller in _graph.DirectCallers(member))
                     {
-                        if (!cycle.Contains(caller))
-                            entryPoints.Add(caller);
+                        if (cycle.Contains(caller))
+                            continue;
+
+                        hasEntryPoint = true;
+
+                        if (!Vouches(caller, member))
+                            return false;
                     }
                 }
 
-                if (entryPoints.Count == 0)
-                    return false;
+                if (hasEntryPoint)
+                    return true;
 
-                foreach (MethodDeclarationSyntax entryPoint in entryPoints)
+                foreach (MethodDeclarationSyntax member in cycle)
                 {
-                    if (!IsGuarded(entryPoint))
-                        return false;
+                    if (_isOwnerTargetedHandler(member))
+                        return true;
                 }
 
-                return true;
+                return false;
+            }
+
+            /// <summary>
+            /// Whether this one call site covers the method it calls.
+            ///
+            /// An ordinary call is covered when its caller is: guarded, or an exempt entry point. A call
+            /// that only happens later -- SendCustomEventDelayedSeconds / SendCustomEventDelayedFrames --
+            /// does not inherit an exemption that was about the moment the caller runs. Start is exempt
+            /// because seeding defaults before ownership means anything is not a lost write; a timer that
+            /// Start arms on every client and that writes synced state a second later is one, on every
+            /// client but the owner. So across a delay the caller has to carry a real ownership check, be
+            /// covered only by the owner-targeted event that runs it, or be an owner-scoped [Rpc], whose
+            /// body only ever runs on the owner in the first place.
+            /// </summary>
+            private bool Vouches(MethodDeclarationSyntax caller, MethodDeclarationSyntax callee)
+            {
+                if (!_graph.IsDeferredOnlyCall(caller, callee))
+                    return IsGuarded(caller);
+
+                return _runsOnlyOnOwner(caller) || IsGuardedByOwnershipCheck(caller);
             }
         }
 

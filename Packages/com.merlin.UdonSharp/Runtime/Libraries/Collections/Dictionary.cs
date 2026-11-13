@@ -44,6 +44,7 @@ namespace UdonSharp.Lib.Internal.Collections
             if (entry != null && entry.next != null)
             {
                 _entry = entry.next;
+                _current = new DictionaryKeyValue<TKey, TValue>();
                 _current.key = _entry.key;
                 _current.value = _entry.value;
                 return true;
@@ -60,6 +61,7 @@ namespace UdonSharp.Lib.Internal.Collections
                 if (_entry != null)
                 {
                     _bucketIndex = bucketIndex;
+                    _current = new DictionaryKeyValue<TKey, TValue>();
                     _current.key = _entry.key;
                     _current.value = _entry.value;
                     return true;
@@ -119,7 +121,14 @@ namespace UdonSharp.Lib.Internal.Collections
         
         private SerializedDictionaryData<TKey, TValue> _serializedData;
         
-        public int Count => _size;
+        public int Count
+        {
+            get
+            {
+                if (_serializedData != null) LoadSerializedData();
+                return _size;
+            }
+        }
 
         public void Add(TKey key, TValue value)
         {
@@ -134,6 +143,22 @@ namespace UdonSharp.Lib.Internal.Collections
             if (_serializedData != null)
                 LoadSerializedData();
             
+            AddEntry(key, value);
+        }
+
+        /// <summary>
+        /// The insertion half of <see cref="Add"/>, split out so that <see cref="LoadSerializedData"/> has
+        /// something to call that is not <see cref="Add"/> itself.
+        ///
+        /// Udon gives a method that is not marked [RecursiveMethod] ONE set of parameter and local slots.
+        /// LoadSerializedData used to rebuild the table by calling Add, so the first Add on a dictionary
+        /// that still carried serialized data re-entered Add from inside Add: the inner calls overwrote the
+        /// outer call's key and value, and when control came back the outer Add inserted the LAST
+        /// serialized pair a second time instead of the pair the caller passed. In C# each call has its own
+        /// frame, so this never showed in the editor. Nothing reachable from this method may call Add.
+        /// </summary>
+        private void AddEntry(TKey key, TValue value)
+        {
             int size = _size;
             if (size >= _threshold)
                 Resize();
@@ -346,6 +371,8 @@ namespace UdonSharp.Lib.Internal.Collections
             #pragma warning disable CS0251
             }
             
+            if (_serializedData != null) LoadSerializedData();
+
             // ReSharper disable once PossibleNullReferenceException
             int hashCode = key.GetHashCode();
             
@@ -366,6 +393,7 @@ namespace UdonSharp.Lib.Internal.Collections
 
                     _size--;
                     value = entry.value;
+                    ReturnFreeEntry(entry);
                     return true;
                 }
 
@@ -422,7 +450,7 @@ namespace UdonSharp.Lib.Internal.Collections
 
                 while (entry != null)
                 {
-                    if (entry.value.Equals(value))
+                    if (entry.value == null ? value == null : entry.value.Equals(value))
                         return true;
 
                     entry = entry.next;
@@ -551,10 +579,11 @@ namespace UdonSharp.Lib.Internal.Collections
             
             Clear();
             
+            // AddEntry, never Add: Add is one of this method's callers. See AddEntry.
             int count = keys.Length;
             for (int i = 0; i < count; i++)
             {
-                Add(keys[i], values[i]);
+                AddEntry(keys[i], values[i]);
             }
         }
         

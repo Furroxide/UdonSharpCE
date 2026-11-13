@@ -70,7 +70,14 @@ namespace UdonSharp.Lib.Internal.Collections
         
         private T[] _serializedItems;
         
-        public int Count => _size;
+        public int Count
+        {
+            get
+            {
+                if (_serializedItems != null) LoadSerializedData();
+                return _size;
+            }
+        }
         
         public bool Add(T value)
         {
@@ -85,6 +92,22 @@ namespace UdonSharp.Lib.Internal.Collections
             if (_serializedItems != null)
                 LoadSerializedData();
             
+            return AddEntry(value);
+        }
+
+        /// <summary>
+        /// The insertion half of <see cref="Add"/>, split out so that <see cref="LoadSerializedData"/> has
+        /// something to call that is not <see cref="Add"/> itself.
+        ///
+        /// Udon gives a method that is not marked [RecursiveMethod] ONE set of parameter and local slots.
+        /// LoadSerializedData used to rebuild the set by calling Add, so the first Add on a set that still
+        /// carried serialized items re-entered Add from inside Add: the inner calls overwrote the outer
+        /// call's value, and when control came back the outer Add found the LAST serialized item already
+        /// present and returned false without ever adding what the caller passed. In C# each call has its
+        /// own frame, so this never showed in the editor. Nothing reachable from this method may call Add.
+        /// </summary>
+        private bool AddEntry(T value)
+        {
             int size = _size;
             if (size >= _threshold)
             {
@@ -532,9 +555,10 @@ namespace UdonSharp.Lib.Internal.Collections
             
             Clear();
 
+            // AddEntry, never Add: Add is one of this method's callers. See AddEntry.
             foreach (T item in serializedItems)
             {
-                Add(item);
+                AddEntry(item);
             }
         }
         

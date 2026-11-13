@@ -86,14 +86,39 @@ namespace UdonSharp.CE.Net
         }
 
         /// <summary>
-        /// Quantization precision for float-compatible types.
-        /// Values are rounded to the nearest multiple of this value during <c>OnPreSerialization</c>.
+        /// Quantization step for <c>float</c>, <c>double</c>, <c>Vector2</c>/<c>Vector3</c>/<c>Vector4</c>,
+        /// <c>Quaternion</c> and <c>Color</c> fields, and one-dimensional arrays of them.
+        /// The field is rounded to the nearest multiple of this value during <c>OnPreSerialization</c>.
         /// Set to 0 for no quantization (default).
         /// </summary>
         /// <remarks>
-        /// Quantization reduces effective precision before sync.
-        /// VRChat still transmits its normal synced field payload, but repeated values
-        /// become more compressible and less noisy.
+        /// The field itself is rounded, on the owner, each time the behaviour serializes. Nothing rounds a
+        /// copy for the wire and leaves the owner's value alone, so:
+        /// - The owner's value snaps to the grid too, and the owner sees what remote clients see.
+        /// - A change smaller than half a step between two serializations never accumulates: the next
+        ///   serialization rounds it straight back. A meter drained by <c>0.02f * Time.deltaTime</c> with
+        ///   <c>Quantize = 0.1f</c> under Continuous sync never moves.
+        ///
+        /// To send a quantized value without losing precision locally, keep the precise value in an
+        /// unsynced field and assign the synced one from it:
+        /// <code>
+        /// private float _charge;                 // the real value, never rounded
+        ///
+        /// [Sync(Authority.Owner, Quantize = 0.1f)]
+        /// public float charge;                   // what is sent
+        ///
+        /// private void Update()
+        /// {
+        ///     if (!Networking.IsOwner(gameObject)) return;
+        ///
+        ///     _charge -= 0.02f * Time.deltaTime;
+        ///     charge = _charge;                  // rounded at the next serialization, from the precise value
+        /// }
+        /// </code>
+        ///
+        /// Rounding is to the nearest step, ties to even (<c>Mathf.Round</c>). Quantization only removes
+        /// precision below the step: VRChat still transmits the field at its full width. An integer field
+        /// is not quantized at all, and CE0010 reports one that asks to be.
         /// </remarks>
         public float Quantize { get; set; } = 0f;
 

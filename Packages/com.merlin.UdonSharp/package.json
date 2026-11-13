@@ -3,7 +3,7 @@
 	"displayName" : "UdonSharp CE",
 	"version" : "1.2.0",
 	"unity" : "2022.3",
-	"description" : "Community Edition fork of UdonSharp — generics and collections where Udon has none, rollback netcode for networked physics, and compile-time analysis of ownership and sync correctness.",
+	"description" : "Community Edition fork of UdonSharp — generics and collections where Udon has none, prediction and state correction for networked physics, and compile-time analysis of ownership and sync correctness.",
 	"author" : {
 		"name" : "Furroxide",
 		"url" : "https://github.com/Furroxide/UdonSharpCE"
@@ -12,7 +12,7 @@
 	"changelogUrl" : "https://github.com/Furroxide/UdonSharpCE/blob/master/CHANGELOG.md",
 	"licensesUrl" : "https://github.com/Furroxide/UdonSharpCE/blob/master/LICENSE",
 	"vpmDependencies" : {
-		"com.vrchat.worlds" : "^3.2.x"
+		"com.vrchat.worlds" : "^3.8.1"
 	},
 	"samples" : [
 		{
@@ -24,11 +24,6 @@
 			"displayName" : "Tutorials",
 			"description" : "Tutorials Example",
 			"path" : "Samples~/Tutorials"
-		},
-		{
-			"displayName" : "Community Edition",
-			"description" : "CE module examples",
-			"path" : "Samples~/CE"
 		},
 		{
 			"displayName" : "Utilities",

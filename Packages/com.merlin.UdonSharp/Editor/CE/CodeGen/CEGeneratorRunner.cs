@@ -49,12 +49,17 @@ namespace UdonSharp.CE.Editor.CodeGen
             /// <summary>
             /// Literals whose presence in real code (not a comment, not a string) makes this generator's
             /// output MANDATORY -- if one of these is written and the generator transformed nothing, that
-            /// is a silent codegen failure and USCE0001 fails the compile.
+            /// is a silent codegen failure and USCE0001 fails the compile. A literal "[X" counts only where
+            /// its bracket opens an attribute list whose first attribute is named X or XAttribute, so every
+            /// attribute spelling a generator is obliged by needs its own literal.
             ///
             /// That obligation is the whole bar. A generator with any legitimate no-op path -- an opt-out
             /// attribute, an author-supplied declaration it defers to, a token that can appear without
             /// obliging it -- declares NO tokens and states why at its entry below, because a tripwire that
-            /// can fire on a correct project turns a working compile into a fatal error for everyone.
+            /// can fire on a correct project turns a working compile into a fatal error for everyone. The
+            /// one way to keep a token anyway is to recognise every such no-op where it happens and report
+            /// it through OptimizationContext.RecordObligationDischarged, which Run counts as handling the
+            /// file; a generator that does that says so at its entry.
             /// </summary>
             public string[] TriggerTokens;
 
@@ -132,7 +137,12 @@ namespace UdonSharp.CE.Editor.CodeGen
                     Order = 11,
                     // Obligation: [Rpc] is inert without the injected [NetworkCallable] and the rewritten
                     // call site -- the method stays a plain local call that never reaches another client.
-                    TriggerTokens = new[] { "[Rpc" },
+                    // Its one legitimate no-op, an [Rpc] the author already completed by hand ([NetworkCallable]
+                    // written beside it, any owner guard it owes already in place), is reported through
+                    // RecordObligationDischarged, so a project made only of those is not mistaken for this
+                    // emitter having stopped working. A token counts only where it names the whole attribute
+                    // ([Rpc] or [RpcAttribute], never [RpcLogger]), so the shorthand needs a token of its own.
+                    TriggerTokens = new[] { "[Rpc", "[RpcOwnerOnly" },
                 },
                 new GeneratorEntry
                 {
@@ -302,6 +312,8 @@ namespace UdonSharp.CE.Editor.CodeGen
                     var (tree, filePath) = result[i];
                     context.CurrentFilePath = filePath;
 
+                    int dischargedBefore = context.GetDischargedObligationCount(entry.GeneratorId);
+
                     SyntaxTree generatedTree;
 
                     try
@@ -329,7 +341,13 @@ namespace UdonSharp.CE.Editor.CodeGen
                             filePath);
                     }
 
-                    if (!ReferenceEquals(generatedTree, tree))
+                    int dischargedAfter = context.GetDischargedObligationCount(entry.GeneratorId);
+
+                    // A file counts as handled when the generator rewrote it, or when it said it met its
+                    // trigger there and correctly emitted nothing (see RecordObligationDischarged). Only the
+                    // first is visible as a changed tree, and the tripwire must not mistake the second for
+                    // a generator that silently stopped working.
+                    if (!ReferenceEquals(generatedTree, tree) || dischargedAfter != dischargedBefore)
                         transformed++;
 
                     result[i] = (generatedTree, filePath);

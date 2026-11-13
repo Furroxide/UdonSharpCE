@@ -168,11 +168,9 @@ namespace CEShowcase.Core
             // CollectibleItem does it with CE_Visual -- the five collectibles used to carry a second copy
             // of their mesh on the host object as well, and this sweep resurrected it behind every pickup.
             //
-            // Lights are deliberately NOT toggled. TheaterEffects owns the enabled state of the stage
-            // lights -- it switches them on for the spotlight sequence and off again afterwards -- so
-            // driving them from here would switch them on at Start and leave them burning over an idle
-            // stage, and Start ordering between two behaviours is undefined. Anything that should go
-            // dark with its station belongs on a Renderer, not on a Light.
+            // The same holds for the Light, Camera and AudioSource loops above: this sweep owns their
+            // enabled flags outright. A station that needs one of its own lights dark while it is visible
+            // has to say so with intensity, which is what DigSite and TheaterEffects both do.
         }
 
         /// <summary>

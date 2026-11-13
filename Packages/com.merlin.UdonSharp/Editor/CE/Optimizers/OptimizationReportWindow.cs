@@ -35,28 +35,77 @@ namespace UdonSharp.CE.Editor.Optimizers
             window.Show();
         }
 
+        // Copies of the optimization context taken on the main thread, and the only thing drawn from.
+        //
+        // The context is filled in by the U# compile, which runs on a worker task while the editor keeps
+        // repainting. Enumerating its list and dictionary directly from OnGUI threw "Collection was
+        // modified" whenever a repaint landed inside a compile, part-way through a layout group.
+        private List<OptimizationEntry> _entries = new List<OptimizationEntry>();
+        private List<KeyValuePair<string, StringLiteralInfo>> _internedStrings = new List<KeyValuePair<string, StringLiteralInfo>>();
+
         private void OnGUI()
         {
-            var context = CEOptimizerRunner.GetContext();
+            // Only on Layout: the events that follow in the same pass have to see exactly the controls
+            // Layout declared, so the data may not change between them.
+            if (Event.current.type == EventType.Layout)
+            {
+                RefreshSnapshot(CEOptimizerRunner.GetContext());
+            }
 
-            DrawHeader(context);
+            DrawHeader();
             DrawFilters();
-            DrawContent(context);
+            DrawContent();
         }
 
-        private void DrawHeader(OptimizationContext context)
+        private void RefreshSnapshot(OptimizationContext context)
+        {
+            try
+            {
+                var entries = new List<OptimizationEntry>(context.GetEntries());
+                var internedStrings = new List<KeyValuePair<string, StringLiteralInfo>>(context.InternedStrings);
+
+                // A copy that raced an insert can hold a slot that was not written yet.
+                entries.RemoveAll(entry => entry == null);
+                internedStrings.RemoveAll(pair => pair.Key == null || pair.Value == null);
+
+                _entries = entries;
+                _internedStrings = internedStrings;
+            }
+            catch (System.Exception)
+            {
+                // The compile changed a collection while it was being copied. The previous snapshot is
+                // still whole, so keep drawing that and take another one on the next pass.
+                Repaint();
+            }
+        }
+
+        private static Dictionary<string, int> CountByOptimizer(List<OptimizationEntry> entries)
+        {
+            var counts = new Dictionary<string, int>();
+
+            foreach (var entry in entries)
+            {
+                string id = entry.OptimizerId ?? "";
+                counts.TryGetValue(id, out int count);
+                counts[id] = count + 1;
+            }
+
+            return counts;
+        }
+
+        private void DrawHeader()
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
 
             EditorGUILayout.LabelField("CE Optimization Report", EditorStyles.boldLabel);
 
             EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField($"Total Optimizations: {context.TotalOptimizations}");
-            EditorGUILayout.LabelField($"Internable Strings: {context.InternedStrings.Count(s => s.Value.OccurrenceCount >= 2)}");
+            EditorGUILayout.LabelField($"Total Optimizations: {_entries.Count}");
+            EditorGUILayout.LabelField($"Internable Strings: {_internedStrings.Count(s => s.Value.OccurrenceCount >= 2)}");
             EditorGUILayout.EndHorizontal();
 
             // Optimizer info
-            var counts = context.GetOptimizationCounts();
+            var counts = CountByOptimizer(_entries);
             if (counts.Count > 0)
             {
                 EditorGUILayout.Space(5);
@@ -94,18 +143,18 @@ namespace UdonSharp.CE.Editor.Optimizers
             EditorGUILayout.EndHorizontal();
         }
 
-        private void DrawContent(OptimizationContext context)
+        private void DrawContent()
         {
             _scrollPosition = EditorGUILayout.BeginScrollView(_scrollPosition);
 
-            var entries = context.GetEntries()
+            var entries = _entries
                 .Where(e => MatchesFilter(e))
                 .ToList();
 
             if (entries.Count == 0)
             {
                 EditorGUILayout.HelpBox(
-                    context.TotalOptimizations == 0
+                    _entries.Count == 0
                         ? "No optimizations were applied during the last compilation.\n\n" +
                           "This could mean:\n" +
                           "• No optimization opportunities were found\n" +
@@ -124,7 +173,7 @@ namespace UdonSharp.CE.Editor.Optimizers
             }
 
             // Draw internable strings section
-            DrawInternableStrings(context);
+            DrawInternableStrings();
 
             EditorGUILayout.EndScrollView();
         }
@@ -240,9 +289,9 @@ namespace UdonSharp.CE.Editor.Optimizers
             }
         }
 
-        private void DrawInternableStrings(OptimizationContext context)
+        private void DrawInternableStrings()
         {
-            var internableStrings = context.InternedStrings
+            var internableStrings = _internedStrings
                 .Where(s => s.Value.OccurrenceCount >= 2)
                 .OrderByDescending(s => s.Value.OccurrenceCount)
                 .ToList();

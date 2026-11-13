@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using UdonSharp.Compiler;
 using UdonSharp.Compiler.Binder;
 using UdonSharp.Compiler.Symbols;
@@ -11,8 +12,10 @@ namespace UdonSharp.CE.Editor.Analyzers
     /// <summary>
     /// Detects synced array fields that are not initialized.
     ///
-    /// VRChat requires synced arrays to be initialized at declaration time with a fixed size.
-    /// Arrays that are not initialized will cause runtime errors or unexpected sync behavior.
+    /// A synced array that is still null when its behaviour serializes cannot be sent, and nothing
+    /// reports it: the sync simply stops working. CE closes that off by requiring every synced array to
+    /// have a non-null initializer at its declaration. The length written there is not a commitment --
+    /// under Manual sync the array can be replaced by one of another length at any time.
     /// </summary>
     /// <example>
     /// // Bad - will trigger CE0001 error
@@ -57,11 +60,11 @@ namespace UdonSharp.CE.Editor.Analyzers
 
                     diagnostics.Add(AnalyzerDiagnostic.Error(
                         location,
-                        $"Synced array field '{field.Name}' must be initialized at declaration. " +
-                        "VRChat requires synced arrays to have a fixed size defined at compile time.",
+                        $"Synced array field '{field.Name}' has no initializer, so it is null until something assigns it. " +
+                        NullArrayConsequence,
                         AnalyzerId,
                         AnalyzerId,
-                        $"Initialize the array: private int[] {field.Name} = new int[SIZE];"
+                        BuildInitializerSuggestion(field)
                     ));
                 }
                 else
@@ -75,16 +78,89 @@ namespace UdonSharp.CE.Editor.Analyzers
                         diagnostics.Add(AnalyzerDiagnostic.Error(
                             location,
                             $"Synced array field '{field.Name}' is initialized to null. " +
-                            "VRChat requires synced arrays to be initialized with a fixed-size array.",
+                            NullArrayConsequence,
                             AnalyzerId,
                             AnalyzerId,
-                            $"Initialize the array: private int[] {field.Name} = new int[SIZE];"
+                            BuildInitializerSuggestion(field)
                         ));
                     }
                 }
             }
 
             return diagnostics;
+        }
+
+        /// <summary>
+        /// Why the rule exists, in terms of what happens rather than of a requirement VRChat does not have.
+        ///
+        /// The text used to say VRChat needs synced arrays "to have a fixed size defined at compile time".
+        /// It does not -- this package's own NetPhysicsWorld declares 'new byte[0]' and replaces it with an
+        /// array of a different length on every send -- and an author who believed the message would
+        /// conclude that a resizable synced array is impossible. What actually goes wrong is the null.
+        /// </summary>
+        private const string NullArrayConsequence =
+            "Udon cannot serialize a null synced array, so the behaviour's variable sync fails for as long as the " +
+            "field is null. CE requires the array to exist from its declaration so that cannot happen; the length " +
+            "given there is only a starting value, and under Manual sync the array may be replaced by one of a " +
+            "different length at runtime.";
+
+        /// <summary>
+        /// The declaration to write instead, spelled with the field's own accessibility and array type.
+        ///
+        /// The suggestion was a fixed 'private int[] name = new int[SIZE];' whatever the field was, so a
+        /// 'public Vector3[] points;' was told to become a private int array. Pasted as written, that is a
+        /// second compile error in place of the first.
+        /// </summary>
+        private static string BuildInitializerSuggestion(FieldSymbol field)
+        {
+            string arrayType = GetDeclaredTypeText(field);
+
+            // 'Vector3[]' becomes 'Vector3[SIZE]', and a jagged 'int[][]' becomes 'int[SIZE][]', which is
+            // how C# spells allocating the outer array.
+            int firstBracket = arrayType.IndexOf('[');
+            string creation = firstBracket >= 0
+                ? arrayType.Insert(firstBracket + 1, "SIZE")
+                : arrayType + "[SIZE]";
+
+            return "Initialize it where it is declared: " +
+                   $"{GetAccessibilityText(field.RoslynSymbol.DeclaredAccessibility)} {arrayType} {field.Name} = new {creation};";
+        }
+
+        /// <summary>
+        /// The field's type as its author wrote it, falling back to Roslyn's short spelling.
+        /// </summary>
+        private static string GetDeclaredTypeText(FieldSymbol field)
+        {
+            SyntaxNode declarator = field.RoslynSymbol.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax();
+
+            if (declarator?.Parent is VariableDeclarationSyntax declaration)
+                return declaration.Type.ToString();
+
+            return field.Type.RoslynSymbol.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
+        }
+
+        private static string GetAccessibilityText(Accessibility accessibility)
+        {
+            switch (accessibility)
+            {
+                case Accessibility.Public:
+                    return "public";
+
+                case Accessibility.Protected:
+                    return "protected";
+
+                case Accessibility.Internal:
+                    return "internal";
+
+                case Accessibility.ProtectedOrInternal:
+                    return "protected internal";
+
+                case Accessibility.ProtectedAndInternal:
+                    return "private protected";
+
+                default:
+                    return "private";
+            }
         }
 
         /// <summary>

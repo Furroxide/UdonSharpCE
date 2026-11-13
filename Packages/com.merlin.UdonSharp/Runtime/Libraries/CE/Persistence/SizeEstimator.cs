@@ -44,6 +44,7 @@ namespace UdonSharp.CE.Persistence
         /// </summary>
         /// <param name="token">The DataToken to estimate.</param>
         /// <returns>Estimated size in bytes.</returns>
+        [RecursiveMethod]
         public static int EstimateDataTokenSize(DataToken token)
         {
             switch (token.TokenType)
@@ -60,7 +61,7 @@ namespace UdonSharp.CE.Persistence
                 case TokenType.UShort:
                 case TokenType.Int:
                 case TokenType.UInt:
-                    return EstimateIntegerSize((long)token.Double);
+                    return EstimateIntegerSize((long)token.Number);
 
                 case TokenType.Long:
                 case TokenType.ULong:
@@ -96,6 +97,7 @@ namespace UdonSharp.CE.Persistence
         /// </summary>
         /// <param name="dict">The DataDictionary to estimate.</param>
         /// <returns>Estimated size in bytes.</returns>
+        [RecursiveMethod]
         public static int EstimateDataDictionarySize(DataDictionary dict)
         {
             if (dict == null)
@@ -110,12 +112,18 @@ namespace UdonSharp.CE.Persistence
                 if (!keys.TryGetValue(i, out DataToken keyToken))
                     continue;
 
+                // VRCJson refuses to serialize a dictionary with a key that is not a string, so such an entry
+                // can never reach PlayerData and has no size to add. Reading .String off it threw instead,
+                // which under Udon halts the behaviour that asked for the estimate.
+                if (keyToken.TokenType != TokenType.String)
+                    continue;
+
                 string key = keyToken.String;
                 if (!dict.TryGetValue(key, out DataToken valueToken))
                     continue;
 
                 // Key size: "key":
-                size += STRING_OVERHEAD + key.Length + KEY_OVERHEAD;
+                size += EstimateStringSize(key) + 1;
 
                 // Value size
                 size += EstimateDataTokenSize(valueToken);
@@ -133,6 +141,7 @@ namespace UdonSharp.CE.Persistence
         /// </summary>
         /// <param name="list">The DataList to estimate.</param>
         /// <returns>Estimated size in bytes.</returns>
+        [RecursiveMethod]
         public static int EstimateDataListSize(DataList list)
         {
             if (list == null)
@@ -170,6 +179,10 @@ namespace UdonSharp.CE.Persistence
             if (value == 0)
                 return 1;
 
+            // Negating long.MinValue overflows back to itself, so the digit loop below never ran for it and
+            // its 20 characters were reported as 1.
+            if (value == long.MinValue) return 20;
+
             int digits = 0;
             if (value < 0)
             {
@@ -201,8 +214,10 @@ namespace UdonSharp.CE.Persistence
             if (value == 0f)
                 return 1;
 
-            // Check if it's an integer value
-            if (value == (int)value)
+            // Check if it's an integer value. The range test has to come first: UdonSharp lowers '(int)value'
+            // to Convert.ToInt32, which throws outside int range where C# wraps, so estimating a model holding
+            // float.MaxValue halted the behaviour that only asked how big its save would be.
+            if (value >= int.MinValue && value < 2147483648f && value == (int)value)
                 return EstimateIntegerSize((int)value);
 
             return FLOAT_MAX_SIZE;
@@ -221,8 +236,9 @@ namespace UdonSharp.CE.Persistence
             if (value == 0d)
                 return 1;
 
-            // Check if it's an integer value
-            if (value == (long)value)
+            // Check if it's an integer value, range first for the same reason as in EstimateFloatSize: the
+            // '(long)value' below is Convert.ToInt64 under Udon and throws from 2^63 up.
+            if (value >= long.MinValue && value < 9223372036854775808d && value == (long)value)
                 return EstimateIntegerSize((long)value);
 
             return DOUBLE_MAX_SIZE;
@@ -238,8 +254,11 @@ namespace UdonSharp.CE.Persistence
             if (value == null)
                 return NULL_SIZE;
 
-            // Account for string quotes and potential escaping
-            int size = STRING_OVERHEAD + value.Length;
+            // Account for string quotes and potential escaping. VRCJson writes non-ASCII characters out raw,
+            // so they cost their UTF-8 bytes in the stored payload. Counting UTF-16 characters undercounted
+            // every such string -- by two bytes a character for CJK text -- so a save the estimate called safe
+            // could still overrun the quota.
+            int size = STRING_OVERHEAD + System.Text.Encoding.UTF8.GetByteCount(value);
 
             // Add extra for escape sequences
             foreach (char c in value)

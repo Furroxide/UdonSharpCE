@@ -34,12 +34,28 @@ Start here: [Community Edition Overview](ce-overview)
 - Jagged arrays
 - Referencing other custom UdonSharpBehaviour classes, accessing fields, and calling methods on them
 - Recursive method calls are supported via the `[RecursiveMethod]` attribute
+- `List<T>`, `Dictionary<TKey, TValue>`, `HashSet<T>`, `Queue<T>` and `Stack<T>`, compiled to Udon by
+  UdonSharp's own implementations (see the notes on each type's limits in [CE Data](ce-data))
+
+## C# features rejected at compile time
+
+These compile as plain C# but have no faithful Udon translation, so UdonSharp stops with an error at the
+line that uses them instead of producing a program that behaves differently:
+
+- Constructor chaining (`: this(...)`, or `: base(...)` with arguments). Initialize the fields in the
+  constructor itself.
+- Explicit static constructors. Use static field initializers.
+- `as` to a type Udon cannot test at runtime: user classes, UdonSharpBehaviour types, and types UdonSharp
+  stores as `object[]` (its collections and jagged arrays). `as` to Unity, VRChat and system types works.
+- `foreach` over CE collections (`CEList<T>`, `CEDictionary<TKey, TValue>`). Use a `for` loop over
+  `Count` and the indexer, or `GetKeys()` for a dictionary.
+- User-defined conversion operators.
 
 ## Differences from regular Unity C# to note
 
 - For the best experience making UdonSharp scripts, make your scripts inherit from `UdonSharpBehaviour` instead of `MonoBehaviour`
 - If you need to call `GetComponent<UdonBehaviour>()` you will need to use `(UdonBehaviour)GetComponent(typeof(UdonBehaviour))` at the moment since the generic get component is not exposed for UdonBehaviour yet. `GetComponent<T>()` works for other Unity component types though.
-- Udon currently only supports array `[]` collections and by extension UdonSharp only supports arrays at the moment. It looks like they might support `List<T>` at some point, but it is not there yet.
+- Udon itself only has arrays. UdonSharp compiles `List<T>`, `Dictionary<TKey, TValue>`, `HashSet<T>`, `Queue<T>` and `Stack<T>` onto arrays for you, so they cost more than a plain array and are not interchangeable with the .NET types at runtime (for example, `.GetType()` does not return the .NET type).
 - Field initilizers are evaluated at compile time, if you have any init logic that depends on other objects in the scene you should use Start for this.
 - Use the `UdonSynced` attribute on fields that you want to sync.
 - Numeric casts are checked for overflow due to UdonVM limitations
@@ -53,15 +69,19 @@ Start here: [Community Edition Overview](ce-overview)
 
 ### Requirements
 
-- Unity 2019.4.31f1
-- [VRCSDK3 + UdonSDK](https://vrchat.com/home/download)
-- The latest [release](https://github.com/vrchat-community/UdonSharp/releases/latest) of UdonSharp
+- Unity 2022.3 (the version the VRChat Creator Companion installs)
+- The VRChat Worlds SDK, 3.8.1 or newer
 
 ### Installation
 
-1. Read the getting started with Udon doc page https://docs.vrchat.com/docs/getting-started-with-udon this has basic installation instructions for Udon.
-2. Install the latest version of the VRCSDK3 linked on the getting started.
-3. Get the latest release of UdonSharp from [here](https://github.com/vrchat-community/UdonSharp/releases/latest) and install it to your project.
+UdonSharp CE replaces UdonSharp in a project. Do not install both.
+
+1. In the [VRChat Creator Companion](https://vcc.docs.vrchat.com/), open Settings → Packages → Add
+   Repository and add `https://vrc.furroxide.dev/vpm/index.json`.
+2. Open your world project in the Creator Companion. If it already lists UdonSharp, remove it first.
+3. Add **UdonSharp CE** from the package list.
+
+See [Setup](setup) for more detail.
 
 ### Getting started
 

@@ -11,19 +11,33 @@ namespace UdonSharp.CE.NetPhysics
     public class StateCompressor
     {
         // Quantization parameters
-        public float PositionPrecision = 0.01f; // Hint: positions quantize to 16-bit within bounds.
+        public float PositionPrecision = 0.01f; // Not read: positions always quantize to 16 bits per axis across the bounds.
         public float VelocityPrecision = 0.1f;  // 10 cm/s
-        public float RotationPrecision = 0.01f; // Hint: rotations packed via smallest-three.
+        public float RotationPrecision = 0.01f; // Not read: rotations are always packed smallest-three at 15 bits.
 
-        // Bounds for position encoding (smaller values = more precision for same bits).
+        // World-space box positions are quantized into (smaller = more precision for the same bits).
+        // A position outside it is clamped onto its surface, silently, and arrives as a different
+        // place: an arena built away from the origin had everything in it pinned to the nearest face
+        // of this box on every client but the authority. NetPhysicsWorld therefore sets these from its
+        // own position and StateBoundsMin/Max; the values here only suit a simulation at the origin.
         public Vector3 WorldMin = new Vector3(-100, -10, -100);
-        public Vector3 WorldMax = new Vector3(100, 50, 100);
+        public Vector3 WorldMax = new Vector3(100, 150, 100);
+
+        // Set once a non-finite value has been replaced, so the warning is logged once per compressor
+        // rather than for every body in every packet.
+        private bool _reportedNonFinite;
 
         // Header: frame (4) + entityCount (4)
         public const int HeaderBytes = 8;
 
-        // Entity: id (2) + pos (6) + rot (6) + vel (5) + angVel (5) = 24 bytes
-        public const int BytesPerEntity = 24;
+        // Entity: id (2) + pos (6) + rot (6) + vel (5) + angVel (5) + input lag (1) = 25 bytes
+        public const int BytesPerEntity = 25;
+
+        // Entity id written for a slot that names no entity. Ids are a ushort on the wire.
+        private const int WireInvalidEntityId = 65535;
+
+        // Input lag written when the authority has no usable figure; everything below it is a frame count.
+        private const int WireUnknownInputLag = 255;
 
         // Smallest-three quaternion domain (other three components live within +/- sqrt(0.5)).
         private const float QuaternionMaxComponent = 0.70710678118f;
@@ -44,11 +58,23 @@ namespace UdonSharp.CE.NetPhysics
 
             for (int i = 0; i < entityCount; i++)
             {
-                WriteUInt16(data, ref offset, (ushort)snapshot.EntityIds[i]);
+                // Range-checked before the cast: Udon lowers a narrowing cast to System.Convert, which
+                // throws on a value that does not fit, and an exception halts the world's behaviour for
+                // the rest of the session.
+                int entityId = snapshot.EntityIds[i];
+                if (entityId < 0 || entityId > WireInvalidEntityId)
+                    entityId = WireInvalidEntityId;
+
+                int inputLag = snapshot.InputLagFrames[i];
+                if (inputLag < 0 || inputLag >= WireUnknownInputLag)
+                    inputLag = WireUnknownInputLag;
+
+                WriteUInt16(data, ref offset, (ushort)entityId);
                 WritePosition(data, ref offset, snapshot.Positions[i]);
                 WriteRotation(data, ref offset, snapshot.Rotations[i]);
                 WritePackedVector3_12Bit(data, ref offset, snapshot.Velocities[i], VelocityPrecision);
                 WritePackedVector3_12Bit(data, ref offset, snapshot.AngularVelocities[i], VelocityPrecision);
+                data[offset++] = (byte)inputLag;
             }
 
             return data;
@@ -81,11 +107,15 @@ namespace UdonSharp.CE.NetPhysics
 
             for (int i = 0; i < entityCount; i++)
             {
-                snapshot.EntityIds[i] = ReadUInt16(data, ref offset);
+                int entityId = ReadUInt16(data, ref offset);
+                snapshot.EntityIds[i] = entityId == WireInvalidEntityId ? PhysicsSnapshot.InvalidEntityId : entityId;
                 snapshot.Positions[i] = ReadPosition(data, ref offset);
                 snapshot.Rotations[i] = ReadRotation(data, ref offset);
                 snapshot.Velocities[i] = ReadPackedVector3_12Bit(data, ref offset, VelocityPrecision);
                 snapshot.AngularVelocities[i] = ReadPackedVector3_12Bit(data, ref offset, VelocityPrecision);
+
+                int inputLag = data[offset++];
+                snapshot.InputLagFrames[i] = inputLag == WireUnknownInputLag ? PhysicsSnapshot.UnknownInputLag : inputLag;
             }
 
             return true;
@@ -94,16 +124,40 @@ namespace UdonSharp.CE.NetPhysics
         private void WritePosition(byte[] data, ref int offset, Vector3 pos)
         {
             Vector3 min = WorldMin;
-            Vector3 max = WorldMax;
-            Vector3 range = max - min;
+            Vector3 range = WorldMax - min;
 
-            float nx = range.x != 0f ? Mathf.Clamp01((pos.x - min.x) / range.x) : 0f;
-            float ny = range.y != 0f ? Mathf.Clamp01((pos.y - min.y) / range.y) : 0f;
-            float nz = range.z != 0f ? Mathf.Clamp01((pos.z - min.z) / range.z) : 0f;
+            WriteUInt16(data, ref offset, QuantizePositionAxis(pos.x, min.x, range.x));
+            WriteUInt16(data, ref offset, QuantizePositionAxis(pos.y, min.y, range.y));
+            WriteUInt16(data, ref offset, QuantizePositionAxis(pos.z, min.z, range.z));
+        }
 
-            WriteUInt16(data, ref offset, (ushort)Mathf.RoundToInt(nx * 65535f));
-            WriteUInt16(data, ref offset, (ushort)Mathf.RoundToInt(ny * 65535f));
-            WriteUInt16(data, ref offset, (ushort)Mathf.RoundToInt(nz * 65535f));
+        /// <summary>
+        /// One coordinate as a step 0..65535 across its axis of the box.
+        /// </summary>
+        /// <remarks>
+        /// A NaN coordinate used to reach the narrowing cast as int.MinValue: Clamp01 works by comparing,
+        /// every comparison with NaN is false, so it handed the NaN straight back, and rounding it gave
+        /// int.MinValue. Udon lowers that cast to a System.Convert, which throws, so one NaN on one body
+        /// halted the authority's world for the rest of the session and every other body's state with
+        /// it. A NaN now travels as the middle of the axis; an infinity is clamped onto the face like
+        /// any other far-off position.
+        /// </remarks>
+        private ushort QuantizePositionAxis(float value, float min, float range)
+        {
+            if (float.IsNaN(value) || float.IsInfinity(value))
+                ReportNonFinite();
+
+            float normalized = range != 0f ? (value - min) / range : 0f;
+            if (float.IsNaN(normalized))
+                normalized = 0.5f;
+
+            int step = Mathf.RoundToInt(Mathf.Clamp01(normalized) * 65535f);
+            if (step < 0)
+                step = 0;
+            if (step > 65535)
+                step = 65535;
+
+            return (ushort)step;
         }
 
         private Vector3 ReadPosition(byte[] data, ref int offset)
@@ -128,6 +182,15 @@ namespace UdonSharp.CE.NetPhysics
         /// </summary>
         private void WriteRotation(byte[] data, ref int offset, Quaternion rot)
         {
+            // A NaN or infinite component survives normalisation and arrives as four numbers that are not
+            // a rotation at all. The sum of the components is non-finite whenever one of them is.
+            float sum = rot.x + rot.y + rot.z + rot.w;
+            if (float.IsNaN(sum) || float.IsInfinity(sum))
+            {
+                ReportNonFinite();
+                rot = Quaternion.identity;
+            }
+
             rot = NormalizeQuaternion(rot);
 
             // Find index of largest absolute component
@@ -209,18 +272,14 @@ namespace UdonSharp.CE.NetPhysics
             return rot;
         }
 
-        private static void WritePackedVector3_12Bit(byte[] data, ref int offset, Vector3 v, float precision)
+        private void WritePackedVector3_12Bit(byte[] data, ref int offset, Vector3 v, float precision)
         {
             if (precision <= 0f)
                 precision = 0.0001f;
 
-            int qx = Mathf.RoundToInt(v.x / precision);
-            int qy = Mathf.RoundToInt(v.y / precision);
-            int qz = Mathf.RoundToInt(v.z / precision);
-
-            qx = Mathf.Clamp(qx, -2047, 2047);
-            qy = Mathf.Clamp(qy, -2047, 2047);
-            qz = Mathf.Clamp(qz, -2047, 2047);
+            int qx = QuantizeSigned12(v.x / precision);
+            int qy = QuantizeSigned12(v.y / precision);
+            int qz = QuantizeSigned12(v.z / precision);
 
             uint ux = (uint)(qx + 2048);
             uint uy = (uint)(qy + 2048);
@@ -258,6 +317,46 @@ namespace UdonSharp.CE.NetPhysics
             int qz = uz - 2048;
 
             return new Vector3(qx * precision, qy * precision, qz * precision);
+        }
+
+        /// <summary>
+        /// A scaled velocity component as a whole number in -2047..2047.
+        /// </summary>
+        /// <remarks>
+        /// Clamped as a float, before rounding. An infinity rounds to int.MinValue, so clamping the
+        /// result sent every infinite component as the most negative value whatever its sign; a NaN has
+        /// no value to send at all and goes as zero.
+        /// </remarks>
+        private int QuantizeSigned12(float scaled)
+        {
+            if (float.IsNaN(scaled))
+            {
+                ReportNonFinite();
+                return 0;
+            }
+
+            if (float.IsInfinity(scaled))
+                ReportNonFinite();
+
+            if (scaled > 2047f)
+                scaled = 2047f;
+            else if (scaled < -2047f)
+                scaled = -2047f;
+
+            return Mathf.RoundToInt(scaled);
+        }
+
+        /// <summary>
+        /// Logs, once per compressor, that a non-finite value was about to be sent. The value has already
+        /// been replaced by then; the warning is for whatever upstream produced it.
+        /// </summary>
+        private void ReportNonFinite()
+        {
+            if (_reportedNonFinite)
+                return;
+
+            _reportedNonFinite = true;
+            Debug.LogWarning("[CE.NetPhysics] StateCompressor: replaced a NaN or infinite position, rotation or velocity before sending it. A body in the simulation has non-finite state.");
         }
 
         private static ushort QuantizeQuaternionComponent(float value)
@@ -300,8 +399,10 @@ namespace UdonSharp.CE.NetPhysics
 
         private static Quaternion NormalizeQuaternion(Quaternion q)
         {
+            // Tested for being positive rather than against zero, because NaN fails every comparison; and
+            // a magnitude that overflowed to infinity would scale every component to zero.
             float mag = Mathf.Sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
-            if (mag <= 0f)
+            if (!(mag > 0f) || float.IsInfinity(mag))
                 return Quaternion.identity;
 
             float inv = 1f / mag;

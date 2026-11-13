@@ -49,7 +49,8 @@ namespace UdonSharp.Compiler.Binder
             BoundAccessExpression iteratorAccess = BoundAccessExpression.BindAccess(sourceDictValue);
             
             BoundInvocationExpression getIteratorExpression = BoundInvocationExpression.CreateBoundInvocation(context, SyntaxNode, IteratorMethod, iteratorAccess, Array.Empty<BoundExpression>());
-            Value iteratorValue = context.EmitValue(getIteratorExpression);
+            Value iteratorValue = context.CreateInternalValue(IteratorMethod.ReturnType);
+            context.EmitValueAssignment(iteratorValue, getIteratorExpression);
             iteratorValue.MarkUsedRecursively();
             BoundAccessExpression iteratorValueAccess = BoundAccessExpression.BindAccess(iteratorValue);
             

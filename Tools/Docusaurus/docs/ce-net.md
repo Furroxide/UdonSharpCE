@@ -44,9 +44,15 @@ public class ScoreBoard : UdonSharpBehaviour
 - `[Sync]` takes an `Authority` as its first, required argument. See [Sync Authority](#sync-authority) — it is what tells the analyzers whether an unguarded write is a desync or the point.
 - `[UdonSynced]` is unchanged and fully supported. Nothing about the upstream attribute moved, and it has no authority parameter. The difference is precision: a declared authority replaces the inference CE0014 otherwise has to fall back on.
 - `[Rpc]` is real. The receiver is marked `[NetworkCallable]` so VRChat enforces the declared `RateLimit` itself, `OwnerOnly` becomes an actual receiver-side ownership check, and calls to the method are rewritten into `SendCustomNetworkEvent` with the declared target. Write `recv.Foo(a, b)` and it goes over the network; `RpcTarget.Self` stays a direct call. Use `CENet.Rpc(target, RpcTarget.X, nameof(Foo), …)` when you would rather the send be explicit at the call site.
+- A rewritten call sends each argument as the declared parameter type. `SetVolume(1)` against `void SetVolume(float v)` sends `1f`, as the direct call would have: VRChat refuses an event whose argument types do not match the receiver's parameters, so the conversion is spelled out for you rather than lost.
+- Every `[Rpc]` has a rate. `RateLimit` left unset is not "unlimited" — the method gets `[NetworkCallable]`'s default of 5 events per second, parameterless or not, because the SDK rejects any network-callable method with a rate below 1.
+- Behaviour sync mode is inferred when you declare none: Manual if the behaviour's synced state requires it (a synced array, or `[SyncOnJoin]` state), Manual as well for a synced `string` unless some field is interpolated, and Continuous otherwise. "The behaviour's synced state" means all of it — every partial part of the class and every base class — so a derived behaviour that inherits an array or `[SyncOnJoin]` state is Manual even if its own fields would not ask for it. A mode you declare is never overridden; it is only rejected (CE0033, CE0034) when it cannot carry the state at all.
 - `[SyncOnJoin]` emits JSON glue for supported pure data graphs and transports it as an `[UdonSynced]` string on the behaviour itself, written in `OnPreSerialization` and applied in `OnDeserialization`. Authority is normal object ownership, and VRChat delivers the value to late joiners automatically — there is no coordinator object.
-- `SyncOnJoin(Group = "name")` gives a behaviour one payload per group instead of one in total, each with its own capture, restore and applied-guard. Capture asks VRChat to serialize only when some group's JSON actually changed, so writing a small hot field stops re-sending a large cold snapshot alongside it. Fields naming no group share the default payload.
-- `RateLimiter` is a runtime helper; call `TryCall()` to enforce limits.
+- The payload is also applied in `Start`, before your own `Start` body runs. VRChat drops an `OnDeserialization` that arrives before a behaviour has started — the usual case for an object that is inactive when a player joins — so without this such a behaviour kept its scene defaults until the owner next changed something. Applying an empty or already-applied payload does nothing and logs nothing. A base behaviour gets a generated `Start` only while no behaviour derived from it declares one (UdonSharp would reject the pair); the derived `Start` then carries the restore instead.
+- A serialization VRChat does not deliver is not retried. The glue logs an error when one group's payload alone is over the Manual sync limit (`NetworkLimits.ManualSyncMaxBytes`, estimated at 2 bytes per character), and capture only asks to serialize again once some payload changes. A `Group` does not help with size: every group of a behaviour is sent in each of its serializations, so split oversized state across behaviours instead.
+- `SyncOnJoin(Group = "name")` gives a behaviour one payload per group instead of one in total, each with its own capture, restore and applied-guard. Capture requests serialization only when a group's JSON changes. Decode guards are independent per group. Serialization still applies to the behaviour; groups do not guarantee that unchanged strings are omitted from a packet. Fields naming no group share the default payload.
+- `RateLimiter` is a runtime helper; call `TryCall()` to enforce limits. The limit is a minimum interval, not a count: a rate of 5 lets one call through and then counts every call in the next 0.2 s as over the limit, so of two calls 50 ms apart the second is refused (or, with `DropOnLimit` off, let through with a warning). It reads `Time.time`, which only advances once per frame, so with a rate set no more than one call per frame is ever within the limit.
+- `[LocalOnly]` is a compile-time check on your own sends, not a runtime barrier. CE0012 reports a behaviour sending a network event to one of its own `[LocalOnly]` methods — through `SendCustomNetworkEvent` or `CENet.Rpc`, with the event name written as a string literal or `nameof`, and sent to the behaviour itself or to a reference of its own (or a derived) type. A send to some other behaviour type is not reported, whatever the event is called.
 - `MergeStrategy` and `ConflictResolver` are manual utilities for resolving conflicting sync state.
 
 ## Sync Authority
@@ -149,7 +155,7 @@ replicates nothing at all, and CE0033 normally rejects that during codegen first
 | --- | --- |
 | `Rpc` | Marks a method network-callable and rewrites its call sites into `SendCustomNetworkEvent`. |
 | `RpcOwnerOnly` | Shorthand for `Rpc(OwnerOnly = true)`. |
-| `LocalOnly` | Marks methods that must never be triggered via network events. |
+| `LocalOnly` | Marks methods the declaring behaviour must not send a network event to (CE0012). A compile-time check, not a runtime barrier. |
 
 ### Enums
 
@@ -164,7 +170,7 @@ replicates nothing at all, and CE0033 normally rejects that during codegen first
 
 | Type | Purpose |
 | --- | --- |
-| `RateLimiter` | Enforces per-second call limits. |
+| `RateLimiter` | Spaces calls at least 1 / rate seconds apart. |
 | `NetworkLimits` | Constants for sync and RPC limits. |
 | `ConflictResolver` | Manual helpers for ownership and merge strategies. |
 | `MergeStrategyAttribute` | Annotates `[SyncOnJoin]` fields for conflict handling (CE0046 elsewhere). The glue does not yet apply the strategy, so call `ConflictResolver` yourself. |
@@ -192,14 +198,26 @@ replicates nothing at all, and CE0033 normally rejects that during codegen first
   check: CE0033 rejects a synced field on a `None`/`NoVariableSync` behaviour during codegen, before
   analysis runs, so in a normal compile CE0063 reports nothing. Authority is also per field, not per
   write, so a predicted field's owner-only writes lose CE0014 coverage too.
-- `Quantize` rounds float-compatible values before sync. `DeltaEncode` / `DeltaEncodeHint` is advisory only; VRChat does not expose true delta sync for Udon fields.
-- `[SyncOnJoin]` generated glue supports primitives, enums, strings, supported Unity value structs, `DataDictionary`/`DataList`, one-dimensional arrays, `List<T>`, and Unity-serializable pure data models.
-- Scene/object references, delegates, polymorphic fields, dictionaries other than `DataDictionary`, jagged/multidimensional arrays, and recursive graphs need `[SyncSerializer]`. CE0032 warns when a root field is omitted from generated glue.
+- `Quantize` rounds the field itself, on the owner, each time the behaviour serializes — not a copy made for the wire. The owner's value snaps to the grid as well, and a change smaller than half a step between two serializations never accumulates, because the next serialization rounds it straight back: a meter drained by `0.02f * Time.deltaTime` with `Quantize = 0.1f` never moves. To send a quantized value while keeping a precise one, keep the precise value in an unsynced field and assign the synced field from it (`charge = _charge;`). Ties round to even. `DeltaEncode` / `DeltaEncodeHint` is advisory only; VRChat does not expose true delta sync for Udon fields.
+- `[SyncOnJoin]` generated glue supports `bool`, the integer types, `float` and `double` (not `char` or `decimal`), enums, strings, supported Unity value structs, `DataDictionary`/`DataList`, one-dimensional arrays, `List<T>`, and Unity-serializable pure data models. An enum from UnityEngine, VRChat or System has to be backed by `int` with no negative value and none of 2048 or more, because UdonSharp turns a number back into one through a lookup table. A decoded number that does not fit its field — 300 for a `byte`, a value outside an enum's table — rejects that group's payload like any other malformed entry rather than halting the behaviour.
+- Scene/object references, delegates, polymorphic fields, dictionaries other than `DataDictionary`, jagged/multidimensional arrays, and recursive graphs need `[SyncSerializer]`. CE0032 warns when a root field is omitted from generated glue, including a `static` or `const` field, which has no per-instance state to send.
 - `Group` names become part of generated member names, so characters outside `a-z A-Z 0-9 _` become underscores and two group names that differ only in punctuation are a compile error rather than a silent merge into one payload. `Priority` orders fields inside a single group only — two groups are two synced variables and VRChat may deliver them in either order, so a dependency that has to hold belongs in one group.
 - `[Rpc]` sends for you: the receiver is marked `[NetworkCallable]` and call sites become `SendCustomNetworkEvent`.
-  Limits worth knowing: `RateLimit` is clamped to whole events/second in 1..100 and a clamp is reported; an `[Rpc]`
+  Limits worth knowing: `RateLimit` is clamped to whole events/second in 1..100 and a clamp is reported as a
+  console warning during the compile; a `RateLimit` you do not set is 5 events/second, not unlimited; a
+  `[NetworkCallable(n)]` you write yourself is left alone and its `n` is the rate in effect, so a `RateLimit` beside
+  it that says otherwise is ignored (CE0011 warns when the two differ); an `[Rpc]`
   calling another `[Rpc]` is CE0045 (direct self-recursion is allowed) — route deliberate hops through `CENet.Rpc`;
-  parameters must be Udon-serializable and at most 8; the method must return `void`.
+  parameters must be Udon-serializable and at most 8; the method must be an instance method (a `static` one is
+  CE0011, since UdonSharp exports no static method as an event) and must return `void`.
+- `OwnerOnly` checks who *sent* the event; `Target` chooses who *receives* it. They are independent, so
+  `Target = Others` with `OwnerOnly` is the ordinary "owner announces to everyone else". The pairing that does
+  nothing useful is `Target = Owner` with `OwnerOnly`: only the owner calling its own copy ever passes, and
+  CE0011 warns about it. A request other players send to the owner wants `Target = Owner` *without* `OwnerOnly`.
+- `RpcTarget.Self` describes the call sites — they stay direct calls — not the method. The method is still
+  marked `[NetworkCallable]`, so an explicit `SendCustomNetworkEvent` or `CENet.Rpc` can still reach it.
+- What happens to an event past its rate limit is VRChat's decision and is not configurable from `[Rpc]`. The SDK
+  exposes `NetworkCalling.GetQueuedEvents` / `GetAllQueuedEvents` for reading how many events are still waiting.
 - `MergeStrategyAttribute` does not auto-resolve conflicts; call `ConflictResolver` yourself.
 
 ## Common Pitfalls

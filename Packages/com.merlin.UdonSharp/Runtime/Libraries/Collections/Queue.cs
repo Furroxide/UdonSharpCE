@@ -56,7 +56,6 @@ namespace UdonSharp.Lib.Internal.Collections
         internal T[] _items;
         internal int _size;
         internal int _head;
-        private QueueIterator<T> _cachedIterator;
         
         public int Count => _size;
         
@@ -77,7 +76,7 @@ namespace UdonSharp.Lib.Internal.Collections
             
             if (size == itemArr.Length)
             {
-                T[] newItems = new T[itemArr.Length * 2];
+                T[] newItems = new T[itemArr.Length == 0 ? 4 : itemArr.Length * 2];
                 
                 int head = _head;
                 
@@ -207,7 +206,7 @@ namespace UdonSharp.Lib.Internal.Collections
             
             while (iterator.MoveNext())
             {
-                if (item.Equals(iterator.Current))
+                if (item == null ? iterator.Current == null : item.Equals(iterator.Current))
                     return true;
             }
             
@@ -301,12 +300,8 @@ namespace UdonSharp.Lib.Internal.Collections
 
         public QueueIterator<T> GetEnumerator()
         {
-            if (_cachedIterator == null)
-                _cachedIterator = new QueueIterator<T>(this);
-            else
-                _cachedIterator.Reset();
-
-            return _cachedIterator;
+            // Nested enumerations need independent cursors, even on a single-threaded VM.
+            return new QueueIterator<T>(this);
         }
     }
 }

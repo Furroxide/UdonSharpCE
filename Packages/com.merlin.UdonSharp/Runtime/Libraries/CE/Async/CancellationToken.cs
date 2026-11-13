@@ -27,7 +27,9 @@ namespace UdonSharp.CE.Async
     ///     {
     ///         _cts = new CancellationTokenSource();
     ///
-    ///         for (int i = 0; i < 100; i++)
+    ///         // A while loop at method-body level, not a for: an await inside a for loop is CE0025.
+    ///         int i = 0;
+    ///         while (i < 100)
     ///         {
     ///             if (_cts.Token.IsCancellationRequested)
     ///             {
@@ -37,6 +39,7 @@ namespace UdonSharp.CE.Async
     ///
     ///             await UdonTask.Delay(0.1f);
     ///             DoWork(i);
+    ///             i++;
     ///         }
     ///     }
     ///

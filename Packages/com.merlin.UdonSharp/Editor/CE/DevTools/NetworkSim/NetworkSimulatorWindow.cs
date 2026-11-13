@@ -143,8 +143,14 @@ namespace UdonSharp.CE.Editor.DevTools.NetworkSim
 
             EditorGUILayout.EndHorizontal();
 
+            // Says what the tool is not, because ACTIVE next to a latency slider reads as "my world is now
+            // running on a bad connection" and nothing of the kind is happening.
             EditorGUILayout.HelpBox(
-                "Simulate network conditions to test your world's networking behaviour under various scenarios.",
+                "Models loss, latency, jitter, duplication and reordering for packets passed to " +
+                "NetworkSimulator.SimulatePacket (the Test Packet button below sends one).\n\n" +
+                "It does not sit between your world and VRChat or ClientSim: synced variables and network " +
+                "events in play mode are unaffected by these settings, and the bandwidth limit is only " +
+                "used for the estimate shown under Advanced Settings.",
                 MessageType.Info);
         }
 

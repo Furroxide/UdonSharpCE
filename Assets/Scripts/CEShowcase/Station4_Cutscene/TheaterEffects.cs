@@ -51,6 +51,23 @@ namespace CEShowcase.Station4_Cutscene
                 }
             }
             
+            // The stage lights are gated by intensity, never by their enabled flag. DemoManager owns that
+            // flag: showing a station switches on every Light under it, so lights this behaviour kept
+            // "off" by disabling them came back burning white over an idle stage each time the station was
+            // hidden and shown -- and at world load too, whenever DemoManager happened to start second.
+            // Enabling them once here, dark, means that sweep has nothing left to turn on.
+            if (_stageLights != null)
+            {
+                for (int i = 0; i < _stageLights.Length; i++)
+                {
+                    if (_stageLights[i] != null)
+                    {
+                        _stageLights[i].intensity = 0f;
+                        _stageLights[i].enabled = true;
+                    }
+                }
+            }
+
             StopAllEffects();
         }
         
@@ -66,7 +83,7 @@ namespace CEShowcase.Station4_Cutscene
         
         private void UpdateStageLights()
         {
-            if (_stageLights == null || _lightColors == null) return;
+            if (_stageLights == null) return;
             
             _lightTimer += Time.deltaTime * _lightPulseSpeed;
             
@@ -82,8 +99,9 @@ namespace CEShowcase.Station4_Cutscene
                 float intensity = _lightIntensity * (1f + Mathf.Sin(phase) * 0.5f);
                 light.intensity = intensity;
                 
-                // Color cycling
-                if (_lightColors.Length > 0)
+                // Color cycling. Optional: with no palette the lights still have to come up, now that
+                // this pulse is the only thing that ever raises them.
+                if (_lightColors != null && _lightColors.Length > 0)
                 {
                     float colorIndex = (Mathf.Sin(phase * 0.5f) + 1f) * 0.5f * (_lightColors.Length - 1);
                     int idx1 = Mathf.FloorToInt(colorIndex);
@@ -190,20 +208,11 @@ namespace CEShowcase.Station4_Cutscene
         
         public void StartStageLights()
         {
+            // UpdateStageLights brings the intensity up from the next frame. Nothing here touches the
+            // enabled flag -- see Start -- so a sequence that reaches this behind a hidden station cannot
+            // switch the lights back on over DemoManager's head.
             _lightsActive = true;
             _lightTimer = 0f;
-            
-            // Turn on all lights
-            if (_stageLights != null)
-            {
-                for (int i = 0; i < _stageLights.Length; i++)
-                {
-                    if (_stageLights[i] != null)
-                    {
-                        _stageLights[i].enabled = true;
-                    }
-                }
-            }
             
             CELogger.Debug("Effects", "Stage lights started");
         }
@@ -212,16 +221,15 @@ namespace CEShowcase.Station4_Cutscene
         {
             _lightsActive = false;
             
-            // Reset lights
+            // Take the lights down to dark, and leave them enabled
             if (_stageLights != null)
             {
                 for (int i = 0; i < _stageLights.Length; i++)
                 {
                     if (_stageLights[i] != null)
                     {
-                        _stageLights[i].intensity = _lightIntensity;
+                        _stageLights[i].intensity = 0f;
                         _stageLights[i].color = Color.white;
-                        _stageLights[i].enabled = false;
                     }
                 }
             }

@@ -58,9 +58,14 @@ namespace CEShowcase.Station1_BulletHell
         [SerializeField] private float _bulletSpeed = 15f;
         [SerializeField] private float _bulletLifetime = 10f; // Increased since we use bounds checking now
         
+        // World space, and they have to contain the spawn points. These sat at (40, 2, 0) +/- 18 after the
+        // station had moved to z = -36: every bullet spawned 23 m outside the box, was clamped onto its
+        // near face on the spawn frame (which spends the one bounce), and half of them left again and were
+        // despawned a frame later. The survivors flew across Station 6 while Station 1 showed nothing.
+        // The defaults match Station1_Floor in CEShowcase.unity: a 30 m square centred on (29.5, 0, -36).
         [Header("Station Bounds")]
-        [SerializeField] private Vector3 _stationCenter = new Vector3(40f, 2f, 0f);
-        [SerializeField] private Vector3 _stationHalfExtents = new Vector3(18f, 5f, 18f);
+        [SerializeField] private Vector3 _stationCenter = new Vector3(29.5f, 2f, -36f);
+        [SerializeField] private Vector3 _stationHalfExtents = new Vector3(15f, 5f, 15f);
         
         [Header("Pattern Settings")]
         [SerializeField] private int _patternMode = 2; // Force random for bounce demo

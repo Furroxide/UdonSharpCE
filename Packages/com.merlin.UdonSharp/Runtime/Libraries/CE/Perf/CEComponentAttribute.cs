@@ -37,10 +37,15 @@ namespace UdonSharp.CE.Perf
     ///     public int state;
     /// }
     ///
-    /// // Use with CEWorld:
+    /// // CEWorld does not read this attribute. The arrays it describes are declared and
+    /// // registered by hand, one per field, and written by entity id:
     /// var world = new CEWorld(1000);
+    /// Vector3[] enemyPositions = new Vector3[world.MaxEntities];
+    /// int positionSlot = world.RegisterComponent(ComponentTypeId.CustomBase + 0, enemyPositions);
+    ///
     /// int entity = world.CreateEntity();
-    /// world.Set(entity, new Position { value = Vector3.zero });
+    /// world.AddComponent(entity, positionSlot);
+    /// enemyPositions[entity] = Vector3.zero;
     /// </code>
     /// </example>
     [PublicAPI]

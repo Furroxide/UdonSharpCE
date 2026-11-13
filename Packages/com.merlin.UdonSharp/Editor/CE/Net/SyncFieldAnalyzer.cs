@@ -76,9 +76,9 @@ namespace UdonSharp.CE.Editor.Analyzers
         {
             var diagnostics = new List<AnalyzerDiagnostic>();
 
-            // Get behaviour sync mode
-            var behaviourSyncAttr = type.GetAttribute<UdonBehaviourSyncModeAttribute>();
-            bool isManualSync = behaviourSyncAttr?.behaviourSyncMode == BehaviourSyncMode.Manual;
+            // The mode may be declared on a base class, and it applies to this subclass all the same; reading
+            // only this type's own attribute missed interpolation on a Manual subclass whose mode sits on its base.
+            bool isManualSync = CENetworkAnalysis.GetDeclaredSyncMode(type) == BehaviourSyncMode.Manual;
 
             // Check all fields
             if (type.FieldSymbols.IsDefaultOrEmpty)
@@ -136,6 +136,14 @@ namespace UdonSharp.CE.Editor.Analyzers
         /// <summary>
         /// Checks if a type is a float-based type that supports quantization.
         /// </summary>
+        /// <remarks>
+        /// The name compared is the type's full metadata-style name, from
+        /// <see cref="TypeSymbol.GetFullTypeName"/>. It used to be <c>RoslynSymbol.ToString()</c>, which
+        /// prints a built-in type by its C# keyword -- 'float', 'double' -- so the two entries this check
+        /// exists for, System.Single and System.Double, could never match. The Unity structs print the
+        /// same either way, which is why Vector3 worked and hid it. The result was CE0010 reporting
+        /// "Quantize is only effective on float types" on a float.
+        /// </remarks>
         private bool IsFloatType(TypeSymbol type)
         {
             // Handle arrays of float types
@@ -144,7 +152,7 @@ namespace UdonSharp.CE.Editor.Analyzers
                 return IsFloatType(type.ElementType);
             }
 
-            string typeName = type.RoslynSymbol.ToString();
+            string typeName = TypeSymbol.GetFullTypeName(type.RoslynSymbol);
             return FloatTypes.Contains(typeName);
         }
 

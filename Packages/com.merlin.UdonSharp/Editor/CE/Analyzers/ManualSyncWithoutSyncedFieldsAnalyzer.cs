@@ -51,7 +51,12 @@ namespace UdonSharp.CE.Editor.Analyzers
             // generation is Phase A of the compile and analyzers run after Bind, so the generated payload
             // field is already a synced field here. Exempting them instead would have hidden a generator
             // that silently produced nothing.
-            if (CENetworkAnalysis.GetSyncedFields(type).Count > 0)
+            //
+            // The base chain counts. A subclass of a base that declares '[UdonSynced] protected int
+            // _health;' serializes _health on every RequestSerialization() it makes, because the emitter
+            // collects inherited fields; judging it by its own declarations alone told its author the
+            // payload was empty and that nothing reached other players, on a behaviour that syncs.
+            if (CENetworkAnalysis.HasSyncedFieldsIncludingBases(type))
                 return diagnostics;
 
             InvocationExpressionSyntax requestSerialization =

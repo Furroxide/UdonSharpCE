@@ -67,27 +67,22 @@ namespace CEShowcase.Tests.Editor
                 "tooling shows for a CE-style behaviour is understated.");
         }
 
-        /// <summary>
-        /// The validator decides "initialized" by locating the field's declaration in source. These
-        /// fixtures are nested private classes inside a test file, which it cannot resolve to a source
-        /// declaration, so it conservatively reports both. That is the correct conservative behaviour for
-        /// a type it cannot see, and asserting on it here would only pin an artefact of the fixture shape.
-        ///
-        /// What is worth pinning is that <c>[Sync]</c> is recognised as synced at all -- the tooling used
-        /// to look for the exact <c>UdonSyncedAttribute</c> type and miss every CE-style field. If the
-        /// attribute were not recognised, the validator would report nothing for either fixture.
-        /// </summary>
         [Test]
         public void UninitializedSyncedArrayValidator_RecognisesSyncAttributeArrays()
         {
-            var issues = new UninitializedSyncedArrayValidator()
-                .Validate(ContextFor(typeof(UninitializedSyncArrayFixture)))
-                .ToList();
-
-            Assert.That(issues, Is.Not.Empty,
-                "A synced array declared with [Sync] was not seen as synced at all. A null synced array " +
-                "throws inside Udon's serializer on the owner and silently transmits nothing, so the " +
-                "validator missing [Sync] fields means it misses exactly the bug it exists to catch.");
+            var host = new UnityEngine.GameObject("Sync validator fixture");
+            try
+            {
+                var missing = host.AddComponent<UninitializedSyncArrayFixture>();
+                var initialized = host.AddComponent<InitializedSyncArrayFixture>();
+                var issues = new UninitializedSyncedArrayValidator().Validate(new ValidationContext
+                {
+                    Behaviours = new List<UdonSharpBehaviour> { missing, initialized }
+                }).ToList();
+                Assert.That(issues, Has.Count.EqualTo(1));
+                Assert.That(issues[0].RelatedType, Is.EqualTo(typeof(UninitializedSyncArrayFixture)));
+            }
+            finally { UnityEngine.Object.DestroyImmediate(host); }
         }
 
         /// <summary>
@@ -108,7 +103,7 @@ namespace CEShowcase.Tests.Editor
                 Assert.Ignore("No compiled UdonSharpBehaviour types in the project.");
 
             var issues = new UninitializedSyncedArrayValidator()
-                .Validate(new ValidationContext { BehaviourTypes = shipped })
+                .Validate(new ValidationContext { BehaviourTypes = shipped, Behaviours = UnityEngine.Resources.FindObjectsOfTypeAll<UdonSharpBehaviour>().Where(b => b != null && b.gameObject.scene.IsValid()).ToList() })
                 .ToList();
 
             Assert.That(issues.Select(i => i.Message), Is.Empty,

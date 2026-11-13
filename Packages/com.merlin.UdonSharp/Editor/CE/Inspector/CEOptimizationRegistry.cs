@@ -241,7 +241,7 @@ namespace UdonSharp.CE.Editor.Inspector
             if (context == null)
                 return null;
 
-            var entries = context.GetEntriesForFile(filePath).ToList();
+            var entries = CopyEntries(context).Where(entry => entry.FilePath == filePath).ToList();
             if (entries.Count == 0)
                 return null;
 
@@ -273,6 +273,31 @@ namespace UdonSharp.CE.Editor.Inspector
             }
 
             return report;
+        }
+
+        /// <summary>
+        /// A copy of the recorded entries, to be read instead of the context's own list.
+        ///
+        /// The U# compile appends to that list from a worker thread while the editor keeps running.
+        /// Walking it directly threw "Collection was modified" whenever an inspector opened during a
+        /// compile, and the CE inspector answers a setup failure with its plain fallback.
+        /// </summary>
+        private static List<OptimizationEntry> CopyEntries(OptimizationContext context)
+        {
+            try
+            {
+                var entries = new List<OptimizationEntry>(context.GetEntries());
+
+                // A copy that raced an insert can hold a slot that was not written yet.
+                entries.RemoveAll(entry => entry == null || entry.OptimizerId == null);
+                return entries;
+            }
+            catch (Exception)
+            {
+                // The list was resized mid-copy. Nothing is reported this time; the next request asks again,
+                // since an empty result is not cached.
+                return new List<OptimizationEntry>();
+            }
         }
 
         /// <summary>
@@ -319,7 +344,7 @@ namespace UdonSharp.CE.Editor.Inspector
             if (context == null)
                 return (0, 0, new Dictionary<string, int>());
 
-            var entries = context.GetEntries();
+            var entries = CopyEntries(context);
             var files = new HashSet<string>();
             var byType = new Dictionary<string, int>();
 

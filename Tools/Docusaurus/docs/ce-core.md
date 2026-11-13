@@ -38,39 +38,67 @@ public class CallbackExample : UdonSharpBehaviour
 | `Create(UdonSharpBehaviour, string)` | Convenience factory for `CECallback`. |
 | `None` | Invalid callback value. |
 
+`Invoke()` goes through `SendCustomEvent`, so `MethodName` has to be a name U# exports from the target's program: a public parameterless instance method under its own name, or a built-in Udon event under its Udon name (`Interact` is `"_interact"`, `Start` is `"_start"`). Any other name compiles and then never fires.
+
 ## Optimization And Compiler Attributes
 
-These attributes are declared for CE compiler features. Only `CEPreserveAction` is currently enforced by the compiler pipeline.
+`CENoOptimize`, `CENoInline`, `CEInline`, `CENoUnroll`, `CEUnroll`, `CEConst` and `CEDebugOnly` are declared `[Obsolete(error: true)]`, so using one is a compile error. The optimizer passes they controlled are disabled, which leaves them nothing to opt into or out of. `CEPreserveAction` is the only attribute in this group that the compiler reads.
 
 | Attribute | Purpose | Status |
 | --- | --- | --- |
-| `CENoOptimize` | Opt out of CE optimizations on a member or type. | Reserved |
-| `CENoInline` | Prevent inlining of a method. | Reserved |
-| `CEInline` | Request inlining of a method. | Reserved |
-| `CENoUnroll` | Prevent loop unrolling in a method. | Reserved |
-| `CEUnroll` | Request loop unrolling. | Reserved |
-| `CEConst` | Mark a field as a compile-time constant. | Reserved |
-| `CEDebugOnly` | Remove a method in release builds. | Reserved |
-| `CEPreserveAction` | Prevent Action-to-CECallback transformation. | Active |
+| `CENoOptimize` | Opt out of CE optimizations on a member or type. | `[Obsolete(error: true)]` |
+| `CENoInline` | Prevent inlining of a method. | `[Obsolete(error: true)]` |
+| `CEInline` | Request inlining of a method. | `[Obsolete(error: true)]` |
+| `CENoUnroll` | Prevent loop unrolling in a method. | `[Obsolete(error: true)]` |
+| `CEUnroll` | Request loop unrolling. | `[Obsolete(error: true)]` |
+| `CEConst` | Mark a field as a compile-time constant. | `[Obsolete(error: true)]` |
+| `CEDebugOnly` | Remove a method in release builds. | `[Obsolete(error: true)]` |
+| `CEPreserveAction` | Keep `System.Action` and lambdas in a type or method exactly as written. | Active |
 
-## Notes On Action Transformation
+## Action To CECallback
 
-CE converts parameterless `Action` usage to `CECallback` at compile time. This means:
+Udon has no delegates, so CE rewrites parameterless `System.Action` into `CECallback` at compile time.
 
-- `Action<T>` and other delegate types are not supported.
-- Simple lambdas like `() => Method()` are converted, but closures are not.
-- Use `callback.Invoke()` (not `callback?.Invoke()`) after transformation.
+What is rewritten:
 
-## Lambda Inlining (Supported Subset)
+- `Action` as the type of a field, local, parameter, property or method return value, including as a type argument (`List<Action>`).
+- `() => Method()`, `() => this.Method()`, `() => { Method(); }` and `delegate { Method(); }`, where `Method` is a parameterless method of the same behaviour, become `new CECallback(this, "Method")`.
+- `new Action(Method)` becomes `new CECallback(this, "Method")`.
 
-CE can inline a small subset of lambdas to avoid delegate usage:
+The string is the name U# exports the method under: the written name for a public method, and the Udon event name for a built-in event, whatever its accessibility (`() => Interact()` becomes `"_interact"`). Call a converted value with `callback.Invoke()`.
 
-- Immediate invocation: `(() => { ... })();` is inlined as a direct block.
-- CE collection helpers: `List`, `Queue`, `Stack`, and `CEList` support `ForEach`, `ForEachWithIndex`, and `ForEachUntil` with lambdas.
+What keeps a file exactly as written, so that U# reports the delegate itself:
 
-Notes:
-- `ForEachUntil` requires an expression body or a single `return` statement.
-- For unsupported lambda shapes, rewrite as explicit loops or extract a method and use `CECallback`.
+- `Action<T>`, `Func<T>` and other delegate types. They are never converted.
+- A lambda that captures a local, takes parameters, does more than make one call, or calls a method on another object.
+- A method group anywhere except inside `new Action(Method)`.
+- Any use of an `Action` value other than storing, passing, returning and calling `.Invoke()`: `?.Invoke()`, `handler()`, `+=` and `-=`, comparing with `null`, `ReferenceEquals`, converting to `object` or `Delegate`, members such as `.Method`, `typeof(Action)`, casts, `null` and `default`, `new Action[n]`, `foreach (var handler in handlers)` and `event Action`.
+- Handing an `Action` to an API that is not U# source (for example `Task.Run`), or to code marked `[CEPreserveAction]`.
+- A callback-shaped lambda outside an `UdonSharpBehaviour`, or in a static member, because a callback needs a behaviour instance to raise the event on.
+
+Files that share an `Action` member are converted together or not at all. That covers a declaration and every file that uses it, an override and the member it overrides, and an interface member and its implementation. One file CE cannot convert keeps all the others it shares a member with as written.
+
+`CE0062` is a compile error for a lambda or `new Action(...)` that is the right shape but names a target `SendCustomEvent` cannot reach: a private or static method that is not a built-in event, a method with parameters, a local function, a delegate value, or a method the behaviour inherits from `UdonSharpBehaviour` without overriding it (`RequestSerialization()`, or `Interact()` when the behaviour has no `Interact` of its own). It is reported only when that target is what keeps the file from being converted.
+
+## Lambda Inlining
+
+CE inlines a lambda into a plain loop when the lambda is the only argument of one of these calls, written as a statement:
+
+- `System.Collections.Generic.List<T>.ForEach`
+- `CEList<T>.ForEach`, `CEList<T>.ForEachWithIndex` and `CEList<T>.ForEachUntil`
+
+The argument can also be a method group that names a method of the same object (`list.ForEach(Process)` or `list.ForEach(this.Process)`) or a static method.
+
+In the loop the lambda's parameters keep their names, `return;` moves on to the next element just as it does in the lambda, and a nested `ForEach` call is inlined as well. The call is left as written, and reported by `CE0021`, when:
+
+- the lambda returns from inside a loop of its own, or uses a label;
+- one of its parameters, or a local it declares, has the name of a local or parameter of the enclosing method;
+- a `ForEachUntil` lambda is more than an expression or a single `return`;
+- the lambda is `async`, has `ref`, `out` or `in` parameters, or its body is a `throw` expression;
+- the call is not a statement (for example the body of an expression-bodied member), contains a `#if` directive, or sits inside a `[CEPreserveAction]` type or method;
+- the receiver is any other type with a `ForEach` method, such as `CEQuery`, `CEPool` or an extension method.
+
+Immediately invoked lambdas such as `(() => { ... })()` are not inlined. Write the loop out explicitly, or move the body into a public method and use a `CECallback`.
 
 ## Common Pitfalls
 
@@ -78,6 +106,7 @@ Notes:
 
 ```csharp
 using System;
+using UdonSharp;
 
 public class Example : UdonSharpBehaviour
 {
@@ -85,9 +114,11 @@ public class Example : UdonSharpBehaviour
 
     void Start()
     {
-        _onDone = () => OnDone();
-        _onDone?.Invoke(); // `?.` is not valid after Action becomes CECallback
+        _onDone = () => Finish();
+        _onDone?.Invoke(); // CE cannot follow `?.`, so this file keeps System.Action and U# rejects the delegate
     }
+
+    private void Finish() { } // CE0062 once `?.` is gone: a private method is not exported under its name
 }
 ```
 
@@ -95,6 +126,7 @@ public class Example : UdonSharpBehaviour
 
 ```csharp
 using System;
+using UdonSharp;
 
 public class Example : UdonSharpBehaviour
 {
@@ -102,8 +134,10 @@ public class Example : UdonSharpBehaviour
 
     void Start()
     {
-        _onDone = () => OnDone();
+        _onDone = () => Finish();
         _onDone.Invoke();
     }
+
+    public void Finish() { }
 }
 ```

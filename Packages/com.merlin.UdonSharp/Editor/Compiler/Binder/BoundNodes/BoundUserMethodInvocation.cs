@@ -39,7 +39,7 @@ namespace UdonSharp.Compiler.Binder
 
                 if (instanceValues == null)
                 {
-                    // using (context.InterruptAssignmentScope())
+                    using (context.InterruptAssignmentScope())
                     {
                         instanceCow = context.EmitValue(new BoundArrayCreationExpression(SyntaxNode, context,
                                 context.GetTypeSymbol(SpecialType.System_Object).MakeArrayType(context),
@@ -78,11 +78,20 @@ namespace UdonSharp.Compiler.Binder
             }
             
             Value instanceValue = instanceCow?.Value;
-
-            ReleaseCowReferences(context);
+            if (instanceValue != null && isRecursiveCall && !Method.IsConstructor)
+            {
+                Value receiver = context.CreateInternalValue(instanceValue.UdonType);
+                context.Module.AddCopy(instanceValue, receiver);
+                instanceValue = receiver;
+            }
 
             if (Method.IsStatic && !Method.IsExtern && !Method.ContainingType.IsUdonSharpBehaviour)
+            {
                 context.EmitStaticTypeInitialization(Method.ContainingType);
+                parameterValues = EmitParameterValues(context);
+            }
+
+            ReleaseCowReferences(context);
 
             if (isRecursiveCall)
             {

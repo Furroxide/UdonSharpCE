@@ -72,10 +72,17 @@ namespace UdonSharp.CE.Persistence
     /// // Save data
     /// SaveResult result = CEPersistence.Save(myData);
     ///
-    /// // Restore data
+    /// // Restore data, from OnPlayerRestored for the local player (see remarks)
     /// RestoreResult result = CEPersistence.Restore(out PlayerSaveData loadedData);
     /// </code>
     /// </example>
+    /// <remarks>
+    /// Restore is only authoritative once VRChat has restored the local player's PlayerData, which it announces
+    /// with OnPlayerRestored for the local player. Before that the stored key may not be loaded yet, so a
+    /// returning player can read as NoData exactly like a new one, and a world that answers NoData by saving
+    /// defaults overwrites the real save. NotReady does not cover this: it only reports a missing or invalid
+    /// local player.
+    /// </remarks>
     [PublicAPI]
     public static partial class CEPersistence
     {
@@ -833,7 +840,11 @@ namespace UdonSharp.CE.Persistence
                 return 0;
             }
 
-            return SizeEstimator.EstimateStringSize(stored);
+            // The stored value is the JSON text itself, so it occupies exactly its UTF-8 bytes. Sizing it as a
+            // string about to be written again added two quote bytes plus an escape byte for every quote inside
+            // the JSON -- several per field -- which credited back more than the key really holds and let a
+            // save that no longer fit pass the budget check.
+            return System.Text.Encoding.UTF8.GetByteCount(stored);
         }
 
         #endregion

@@ -3,8 +3,14 @@ using JetBrains.Annotations;
 namespace UdonSharp.CE.NetPhysics
 {
     /// <summary>
-    /// Heuristic selection of rollback strategy based on error and age of the authoritative update.
+    /// Classifies a divergence by its size and the age of the authoritative update.
     /// </summary>
+    /// <remarks>
+    /// A standalone classifier: nothing in this library calls it. <see cref="RollbackManager"/>
+    /// measures each entity's error against its own speed-aware tolerance, and the entity itself
+    /// chooses between easing a correction in and jumping (<c>CorrectionSnapDistance</c>). The two
+    /// rollback results describe a rewind-and-replay that cannot be performed from Udon.
+    /// </remarks>
     [PublicAPI]
     public class RollbackDecider
     {

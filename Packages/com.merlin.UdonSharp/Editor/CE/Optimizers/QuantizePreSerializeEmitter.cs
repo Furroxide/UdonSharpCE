@@ -68,10 +68,20 @@ namespace UdonSharp.CE.Editor.Optimizers
                 }
 
                 List<QuantizeFieldSpec> fields = CollectQuantizedFields(declaredType);
-                if (fields.Count == 0)
+                bool isBehaviour = IsUdonSharpBehaviour(declaredType);
+
+                // A behaviour with no quantized field of its own still inherits the rounding its bases
+                // declare -- through an OnPreSerialization that is generated, so nothing in the source
+                // says an override of it ought to call base. One that did not simply stopped the base's
+                // fields being rounded for every instance of the derived behaviour.
+                List<string> inheritedHelpers = isBehaviour
+                    ? CollectInheritedHelperNames(declaredType)
+                    : new List<string>();
+
+                if (fields.Count == 0 && inheritedHelpers.Count == 0)
                     return visited;
 
-                if (!IsUdonSharpBehaviour(declaredType))
+                if (!isBehaviour)
                 {
                     // A plain class cannot carry [Sync] at all: UdonSynced exists only on behaviours, so the
                     // field never leaves the local client and rounding it accomplishes nothing. Only a
@@ -98,11 +108,12 @@ namespace UdonSharp.CE.Editor.Optimizers
                 // an author split a behaviour's quantized fields across files. Every once-per-type question
                 // below is therefore asked of the symbol, and the generated members land in exactly one part.
                 bool isCanonicalPart = IsCanonicalDeclarationPart(declaredType, node);
+                string helperName = GetHelperMethodName(declaredType);
 
                 bool classChanged = false;
-                if (isCanonicalPart && !DeclaresMethod(declaredType, HelperMethodName))
+                if (fields.Count > 0 && isCanonicalPart && !DeclaresMethod(declaredType, helperName))
                 {
-                    visited = visited.AddMembers(ParseMember(BuildHelperMethod(fields)));
+                    visited = visited.AddMembers(ParseMember(BuildHelperMethod(helperName, fields, declaredType.IsSealed)));
                     ChangesMade = true;
                     classChanged = true;
                 }
@@ -115,21 +126,46 @@ namespace UdonSharp.CE.Editor.Optimizers
                 {
                     // Another part of this same type owns the handler and gets the helper call injected when
                     // that part is visited; adding a second declaration here is CS0111.
-                    if (isCanonicalPart && !DeclaresMethod(declaredType, "OnPreSerialization"))
+                    //
+                    // A type with no quantized field of its own needs no handler either: the one it
+                    // inherits already rounds every field the hierarchy has.
+                    if (fields.Count > 0 && isCanonicalPart && !DeclaresMethod(declaredType, "OnPreSerialization"))
                     {
-                        visited = visited.AddMembers(ParseMember(BuildOnPreSerializationMethod()));
+                        visited = visited.AddMembers(ParseMember(BuildOnPreSerializationMethod(helperName)));
                         ChangesMade = true;
                         classChanged = true;
                     }
                 }
-                else if (!CallsHelper(onPreSerialization))
+                else
                 {
-                    MethodDeclarationSyntax updatedMethod = InjectHelperCall(onPreSerialization);
-                    if (!ReferenceEquals(updatedMethod, onPreSerialization))
+                    // A handler the author wrote may never call base, so it is handed every quantized base's
+                    // helper as well as this type's own -- including one that does call base, because the
+                    // call can sit behind an early return ('if (skip) return; base.OnPreSerialization();')
+                    // and those paths still serialize. On the paths that do reach base the fields are rounded
+                    // twice, which changes nothing: a value already on the grid rounds to itself.
+                    var missingHelpers = new List<string>();
+
+                    if (inheritedHelpers.Count > 0)
                     {
-                        visited = visited.ReplaceNode(onPreSerialization, updatedMethod);
-                        ChangesMade = true;
-                        classChanged = true;
+                        foreach (string inheritedHelper in inheritedHelpers)
+                        {
+                            if (!CallsHelper(onPreSerialization, inheritedHelper))
+                                missingHelpers.Add(inheritedHelper);
+                        }
+                    }
+
+                    if (fields.Count > 0 && !CallsHelper(onPreSerialization, helperName))
+                        missingHelpers.Add(helperName);
+
+                    if (missingHelpers.Count > 0)
+                    {
+                        MethodDeclarationSyntax updatedMethod = InjectHelperCalls(onPreSerialization, missingHelpers);
+                        if (!ReferenceEquals(updatedMethod, onPreSerialization))
+                        {
+                            visited = visited.ReplaceNode(onPreSerialization, updatedMethod);
+                            ChangesMade = true;
+                            classChanged = true;
+                        }
                     }
                 }
 
@@ -142,10 +178,60 @@ namespace UdonSharp.CE.Editor.Optimizers
                         description: $"Injected quantization into '{node.Identifier.Text}.OnPreSerialization'",
                         location: node.GetLocation(),
                         originalCode: node.Identifier.Text,
-                        optimizedCode: HelperMethodName);
+                        optimizedCode: helperName);
                 }
 
                 return visited;
+            }
+
+            /// <summary>
+            /// The helper's name on one behaviour. It carries the declaring type's name because UdonSharp
+            /// rejects any method that repeats a base behaviour's name and parameters without overriding it
+            /// ("does not yet support hiding base methods"), private ones included. Under one shared name a
+            /// base and a derived behaviour that both quantize fields could not be compiled at all -- while
+            /// the same generated source built cleanly as plain C#, which is all the tests then checked.
+            /// </summary>
+            private static string GetHelperMethodName(INamedTypeSymbol type)
+            {
+                string name = HelperMethodName + "_" + type.Name;
+
+                // Two behaviours in one hierarchy can share a simple name across namespaces, and they
+                // would collide again. Counting the same-named bases above keeps each one distinct.
+                int sameNamedBases = 0;
+
+                for (INamedTypeSymbol current = type.BaseType; current != null; current = current.BaseType)
+                {
+                    if (current.Name == type.Name)
+                        sameNamedBases++;
+                }
+
+                return sameNamedBases == 0
+                    ? name
+                    : name + "_" + sameNamedBases.ToString(CultureInfo.InvariantCulture);
+            }
+
+            /// <summary>
+            /// The helpers of every base behaviour that declares quantized fields, base-most first. Each of
+            /// those behaviours emits its own when it is visited, so the name is derived here the same way
+            /// rather than looked up: this pass's output is not in the semantic model yet.
+            /// </summary>
+            private List<string> CollectInheritedHelperNames(INamedTypeSymbol declaredType)
+            {
+                var names = new List<string>();
+
+                for (INamedTypeSymbol current = declaredType.BaseType;
+                     current != null && current.ToDisplayString() != "UdonSharp.UdonSharpBehaviour";
+                     current = current.BaseType)
+                {
+                    // Only a behaviour compiled from source gets a helper generated onto it.
+                    if (current.DeclaringSyntaxReferences.Length == 0)
+                        continue;
+
+                    if (CollectQuantizedFields(current).Count > 0)
+                        names.Insert(0, GetHelperMethodName(current));
+                }
+
+                return names;
             }
 
             /// <summary>
@@ -363,10 +449,15 @@ namespace UdonSharp.CE.Editor.Optimizers
                 }
             }
 
-            private static string BuildHelperMethod(IReadOnlyList<QuantizeFieldSpec> fields)
+            /// <summary>
+            /// Protected rather than private so a derived behaviour's own OnPreSerialization can be handed
+            /// the call when it never chains to base. A sealed behaviour has nothing deriving from it, and
+            /// a protected member there only earns CS0628.
+            /// </summary>
+            private static string BuildHelperMethod(string helperName, IReadOnlyList<QuantizeFieldSpec> fields, bool isSealed)
             {
                 var builder = new StringBuilder();
-                builder.AppendLine($"private void {HelperMethodName}()");
+                builder.AppendLine($"{(isSealed ? "private" : "protected")} void {helperName}()");
                 builder.AppendLine("{");
 
                 foreach (QuantizeFieldSpec field in fields)
@@ -380,6 +471,11 @@ namespace UdonSharp.CE.Editor.Optimizers
 
             private static IEnumerable<string> BuildQuantizeStatements(QuantizeFieldSpec field)
             {
+                // The field as it has to be written in an expression. A symbol's name carries no '@', so a
+                // field declared as '@float' would otherwise be emitted as the keyword and not parse. The
+                // generated locals below only use the name as a suffix, where a keyword is harmless.
+                string fieldAccess = EscapeIdentifier(field.FieldName);
+
                 string quantizeVar = $"__ce_quantize_{field.FieldName}";
                 yield return "{";
                 yield return $"    float {quantizeVar} = {field.QuantizeExpression};";
@@ -388,17 +484,17 @@ namespace UdonSharp.CE.Editor.Optimizers
 
                 if (!field.IsArray)
                 {
-                    foreach (string line in BuildSingleValueQuantizeLines(field, field.FieldName, quantizeVar, "        "))
+                    foreach (string line in BuildSingleValueQuantizeLines(field, fieldAccess, quantizeVar, "        "))
                         yield return line;
                 }
                 else
                 {
                     string indexName = $"__ce_i_{field.FieldName}";
-                    yield return $"        if ({field.FieldName} != null)";
+                    yield return $"        if ({fieldAccess} != null)";
                     yield return "        {";
-                    yield return $"            for (int {indexName} = 0; {indexName} < {field.FieldName}.Length; {indexName}++)";
+                    yield return $"            for (int {indexName} = 0; {indexName} < {fieldAccess}.Length; {indexName}++)";
                     yield return "            {";
-                    foreach (string line in BuildSingleValueQuantizeLines(field, $"{field.FieldName}[{indexName}]", quantizeVar, "                "))
+                    foreach (string line in BuildSingleValueQuantizeLines(field, $"{fieldAccess}[{indexName}]", quantizeVar, "                "))
                         yield return line;
                     yield return "            }";
                     yield return "        }";
@@ -416,15 +512,23 @@ namespace UdonSharp.CE.Editor.Optimizers
             /// UdonSharpBehaviour's own OnPreSerialization is a no-op, so this is safe at the base-most type
             /// too.
             /// </summary>
-            private static string BuildOnPreSerializationMethod()
+            private static string BuildOnPreSerializationMethod(string helperName)
             {
                 return $@"
 public override void OnPreSerialization()
 {{
     base.OnPreSerialization();
-    {HelperMethodName}();
+    {helperName}();
 }}
 ";
+            }
+
+            private static string EscapeIdentifier(string name)
+            {
+                if (string.IsNullOrEmpty(name))
+                    return name;
+
+                return SyntaxFacts.GetKeywordKind(name) != SyntaxKind.None ? "@" + name : name;
             }
 
             /// <summary>
@@ -460,24 +564,27 @@ public override void OnPreSerialization()
                     .Any(method => !method.IsImplicitlyDeclared && method.Parameters.Length == 0);
             }
 
-            private static bool CallsHelper(MethodDeclarationSyntax method)
+            private static bool CallsHelper(MethodDeclarationSyntax method, string helperName)
             {
                 return method.DescendantNodes()
                     .OfType<InvocationExpressionSyntax>()
-                    .Any(invocation => invocation.Expression is IdentifierNameSyntax identifier && identifier.Identifier.Text == HelperMethodName);
+                    .Any(invocation => invocation.Expression is IdentifierNameSyntax identifier && identifier.Identifier.Text == helperName);
             }
 
-            private static MethodDeclarationSyntax InjectHelperCall(MethodDeclarationSyntax method)
+            private static MethodDeclarationSyntax InjectHelperCalls(MethodDeclarationSyntax method, IReadOnlyList<string> helperNames)
             {
-                StatementSyntax helperCall = SyntaxFactory.ParseStatement($"{HelperMethodName}();");
+                StatementSyntax[] helperCalls = helperNames
+                    .Select(helperName => SyntaxFactory.ParseStatement($"{helperName}();"))
+                    .ToArray();
 
                 if (method.ExpressionBody != null)
                 {
                     var statements = new List<StatementSyntax>
                     {
-                        SyntaxFactory.ExpressionStatement(method.ExpressionBody.Expression),
-                        helperCall
+                        SyntaxFactory.ExpressionStatement(method.ExpressionBody.Expression)
                     };
+
+                    statements.AddRange(helperCalls);
 
                     return method
                         .WithExpressionBody(null)
@@ -494,11 +601,11 @@ public override void OnPreSerialization()
                 // guarded.
                 bool alreadyExits = EndsWithExit(method.Body);
 
-                var injector = new ReturnInjector(helperCall);
+                var injector = new ReturnInjector(helperCalls);
                 BlockSyntax updatedBody = (BlockSyntax)injector.Visit(method.Body);
                 if (!alreadyExits)
                 {
-                    updatedBody = updatedBody.AddStatements(helperCall);
+                    updatedBody = updatedBody.AddStatements(helperCalls);
                 }
 
                 return method.WithBody(updatedBody);
@@ -608,16 +715,18 @@ public override void OnPreSerialization()
 
             private sealed class ReturnInjector : CSharpSyntaxRewriter
             {
-                private readonly StatementSyntax _helperCall;
+                private readonly StatementSyntax[] _helperCalls;
 
-                public ReturnInjector(StatementSyntax helperCall)
+                public ReturnInjector(StatementSyntax[] helperCalls)
                 {
-                    _helperCall = helperCall;
+                    _helperCalls = helperCalls;
                 }
 
                 public override SyntaxNode VisitReturnStatement(ReturnStatementSyntax node)
                 {
-                    return SyntaxFactory.Block(_helperCall, node);
+                    var statements = new List<StatementSyntax>(_helperCalls);
+                    statements.Add(node);
+                    return SyntaxFactory.Block(statements);
                 }
 
                 // A return inside a lambda, an anonymous method or a local function exits that body, not

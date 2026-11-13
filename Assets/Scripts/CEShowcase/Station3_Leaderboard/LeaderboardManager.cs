@@ -3,7 +3,9 @@ using UdonSharp.CE.Data;
 using UdonSharp.CE.DevTools;
 using UnityEngine;
 using VRC.SDK3.Data;
+using VRC.SDK3.UdonNetworkCalling;
 using VRC.SDKBase;
+using VRC.Udon.Common.Interfaces;
 
 namespace CEShowcase.Station3_Leaderboard
 {
@@ -76,8 +78,9 @@ namespace CEShowcase.Station3_Leaderboard
         void Start()
         {
             // Rebuild rather than merely initialize: VRChat may deliver the synced arrays before Start
-            // runs, and a bare InitializeCollections would throw that roster away and leave the board
-            // empty until somebody happened to score again.
+            // runs, and it drops the OnDeserialization event for a behaviour that has not started yet,
+            // so this is the only place that delivery is ever applied. A bare InitializeCollections would
+            // throw that roster away and leave the board empty until somebody happened to score again.
             RebuildFromSyncedState();
 
             CELogger.Info("Leaderboard", "Leaderboard Manager initialized with CEDictionary");
@@ -94,7 +97,8 @@ namespace CEShowcase.Station3_Leaderboard
             // CEDictionary provides:
             // - O(1) average lookup/insert/remove
             // - Automatic resizing
-            // - Tombstone-based deletion (no iterator invalidation)
+            // - Tombstone-based deletion (Remove still rehashes in place once tombstones pass a quarter
+            //   of capacity, so never remove while walking the table)
             // - JSON serialization via ToJson()/FromJson()
             _playerNames = new CEDictionary<int, string>(MAX_PLAYERS);
             _playerScores = new CEDictionary<int, int>(MAX_PLAYERS);
@@ -177,6 +181,11 @@ namespace CEShowcase.Station3_Leaderboard
         
         /// <summary>
         /// Adds score to a player - demonstrates CEDictionary modification.
+        ///
+        /// This is the owner's half of scoring: it changes the local index and publishes it, and the
+        /// publish is inert on a client that does not hold the board. A button that called this directly
+        /// moved the presser's own screen and nothing else, and the owner's next publish wiped it again.
+        /// Buttons go through <see cref="RequestScore"/>.
         /// </summary>
         public void AddScore(int playerId, int amount)
         {
@@ -195,29 +204,66 @@ namespace CEShowcase.Station3_Leaderboard
             SortLeaderboard();
             UpdateDisplay();
 
-            // Publish to everyone. The previous version only serialized when the score belonged to the
-            // local player, which -- combined with there being nothing synced -- meant no score ever left
-            // the client that scored it. Inert unless we already hold the board; the callers that create
-            // new data claim it first.
+            // Publish to everyone. Inert unless we hold the board; RequestScore is what carries a
+            // non-owner's points to the client that does.
             PublishLeaderboard();
         }
 
         /// <summary>
-        /// Claims the board so the local client may publish. Reserved for the paths that genuinely
-        /// originate data nobody else has -- the local player scoring -- because every transfer costs the
-        /// instance an ownership change and hands the authoritative copy of the roster to this client.
+        /// Scores for the local player, from whichever client pressed the button.
+        ///
+        /// The board has exactly one writer, its owner, so everybody else asks the owner to score for
+        /// them. Claiming the board from the button instead looks simpler and loses points: two players
+        /// pressing inside one round trip each become the owner locally, each publish a roster that is
+        /// missing the other's press, and the last one to arrive wins.
         /// </summary>
-        private bool ClaimLeaderboardAuthority()
+        public void RequestScore(int amount)
         {
             VRCPlayerApi localPlayer = Networking.LocalPlayer;
             if (localPlayer == null || !localPlayer.IsValid())
-                return false;
+                return;
 
             if (Networking.IsOwner(localPlayer, gameObject))
-                return true;
+            {
+                CreditPlayer(localPlayer, amount);
+                return;
+            }
 
-            Networking.SetOwner(localPlayer, gameObject);
-            return Networking.IsOwner(localPlayer, gameObject);
+            SendCustomNetworkEvent(NetworkEventTarget.Owner, nameof(OwnerAddScore), amount);
+        }
+
+        /// <summary>
+        /// Network entry point for <see cref="RequestScore"/>. Runs on the owner, which credits whoever
+        /// sent the request rather than trusting a player id in the payload.
+        /// </summary>
+        [NetworkCallable(10)]
+        public void OwnerAddScore(int amount)
+        {
+            VRCPlayerApi localPlayer = Networking.LocalPlayer;
+            if (localPlayer == null || !Networking.IsOwner(localPlayer, gameObject))
+                return;
+
+            // Null for a local call. The owner scores through RequestScore's direct path, so a request
+            // with nobody behind it has nobody to credit.
+            VRCPlayerApi caller = NetworkCalling.CallingPlayer;
+            if (caller == null || !caller.IsValid())
+                return;
+
+            CreditPlayer(caller, amount);
+        }
+
+        /// <summary>
+        /// The owner's credit step for either route. The player is seated first if the board has never
+        /// heard of them: a request can beat the join that would have seated its sender, and an owner
+        /// that inherited the board holds whatever roster the last delivery carried, which need not
+        /// include itself. AddScore would otherwise drop the points with a warning.
+        /// </summary>
+        private void CreditPlayer(VRCPlayerApi player, int amount)
+        {
+            if (!_playerNames.ContainsKey(player.playerId))
+                AddPlayer(player.playerId, player.displayName);
+
+            AddScore(player.playerId, amount);
         }
 
         /// <summary>
@@ -227,8 +273,8 @@ namespace CEShowcase.Station3_Leaderboard
         /// client (a join, for one), and grabbing the object first meant every client in turn became the
         /// owner and then overwrote the synced roster with its own local view. A late joiner has never
         /// seen anybody score, so its view has everyone on zero -- last writer wins and the whole board
-        /// randomly reset. Ownership is now claimed only where new data genuinely originates; see
-        /// ClaimLeaderboardAuthority.
+        /// randomly reset. Nothing claims the board any more: new scores reach the owner as requests,
+        /// see RequestScore.
         /// </summary>
         public void PublishLeaderboard()
         {
@@ -514,16 +560,49 @@ namespace CEShowcase.Station3_Leaderboard
         
         private void AddScoreToLocalPlayer(int amount)
         {
-            VRCPlayerApi localPlayer = Networking.LocalPlayer;
-            if (localPlayer == null || !localPlayer.IsValid()) return;
+            // The same single-writer route the ScoreButtons take. This used to claim the board and
+            // publish from here, which is the last-writer-wins race RequestScore describes.
+            RequestScore(amount);
+            CELogger.Info("Leaderboard", $"Requested {amount} points");
+        }
 
-            // The one path that produces a fact no other client knows: this player just scored. Claim the
-            // board here so the PublishLeaderboard inside AddScore has somewhere to write, instead of
-            // letting every client claim it on every join.
-            ClaimLeaderboardAuthority();
+        // The live roster, parked while a local-only demo borrows the index fields. See BeginScratchRoster.
+        private CEDictionary<int, string> _liveNames;
+        private CEDictionary<int, int> _liveScores;
+        private int[] _liveSortedIds;
+        private int _liveCount;
 
-            AddScore(localPlayer.playerId, amount);
-            CELogger.Info("Leaderboard", $"Added {amount} points! New score: {GetPlayerScore(_localPlayerId)}");
+        /// <summary>
+        /// Parks the live roster and points the index fields at empty scratch collections, so a local
+        /// demo can reuse AddPlayer / SortLeaderboard / UpdateDisplay without touching shared state.
+        ///
+        /// The demos used to run on the live index, which is the one PublishLeaderboard serializes: the
+        /// next publish from that client handed its invented roster to the whole instance. Udon is
+        /// single-threaded and nothing between here and EndScratchRoster yields, so no join, score or
+        /// deserialization can observe the borrowed fields -- by the time anything can publish, the live
+        /// roster is back. The board goes on showing the scratch result until the next real update
+        /// redraws it.
+        /// </summary>
+        private void BeginScratchRoster()
+        {
+            _liveNames = _playerNames;
+            _liveScores = _playerScores;
+            _liveSortedIds = _sortedPlayerIds;
+            _liveCount = _playerCount;
+
+            InitializeCollections();
+        }
+
+        private void EndScratchRoster()
+        {
+            _playerNames = _liveNames;
+            _playerScores = _liveScores;
+            _sortedPlayerIds = _liveSortedIds;
+            _playerCount = _liveCount;
+
+            _liveNames = null;
+            _liveScores = null;
+            _liveSortedIds = null;
         }
         
         /// <summary>
@@ -539,13 +618,13 @@ namespace CEShowcase.Station3_Leaderboard
             string localName = localId >= 0 ? GetPlayerName(localId) : "";
             int localScore = localId >= 0 ? GetPlayerScore(localId) : 0;
             
-            // Clear and reinitialize collections
-            InitializeCollections();
+            // Benchmark on a scratch roster. Refilling the live one evicted every real player, and the 79
+            // invented ids filled the table so nobody could be added back for the rest of the instance.
+            BeginScratchRoster();
             
-            // Re-add local player
+            // Seat the local player among the simulated ones
             if (localId >= 0)
             {
-                _localPlayerId = localId;
                 AddPlayer(localId, localName);
                 _playerScores[localId] = localScore;
             }
@@ -578,7 +657,10 @@ namespace CEShowcase.Station3_Leaderboard
             SortLeaderboard();
             UpdateDisplay();
             
-            CELogger.Info("Leaderboard", $"Stress test complete. {_playerCount} players loaded in {elapsed}ms.");
+            int simulatedCount = _playerCount;
+            EndScratchRoster();
+
+            CELogger.Info("Leaderboard", $"Stress test complete. {simulatedCount} players loaded in {elapsed}ms.");
         }
         
         /// <summary>
@@ -588,6 +670,11 @@ namespace CEShowcase.Station3_Leaderboard
         {
             // Example JSON that could come from persistence
             string sampleJson = "{\"players\":[{\"id\":1,\"name\":\"LoadedPlayer\",\"score\":9999}]}";
+
+            // Loaded into a scratch roster, like the stress test. The sample's id 1 is a real VRChat
+            // player id -- the first player into every instance -- so loading it over the live index
+            // handed that player 9999 points on the next publish.
+            BeginScratchRoster();
             
             if (VRCJson.TryDeserializeFromJson(sampleJson, out DataToken token))
             {
@@ -618,11 +705,38 @@ namespace CEShowcase.Station3_Leaderboard
             
             SortLeaderboard();
             UpdateDisplay();
+
+            EndScratchRoster();
             CELogger.Info("Leaderboard", "Loaded players from JSON");
         }
         
+        /// <summary>
+        /// Previews the board with every score at zero. A preview, not a reset: the scores belong to
+        /// whoever holds the board, and zeroing the live index here stayed invisible to everyone else
+        /// right up until this client next published, at which point it wiped the instance's scores.
+        /// </summary>
         public void OnResetScores()
         {
+            // Copy the live roster out so the zeroing below has something of its own to work on
+            int count = _playerCount;
+            int[] rosterIds = new int[count];
+            string[] rosterNames = new string[count];
+            int[] rosterScores = new int[count];
+            for (int i = 0; i < count; i++)
+            {
+                rosterIds[i] = _sortedPlayerIds[i];
+                rosterNames[i] = GetPlayerName(rosterIds[i]);
+                rosterScores[i] = GetPlayerScore(rosterIds[i]);
+            }
+
+            BeginScratchRoster();
+
+            for (int i = 0; i < count; i++)
+            {
+                AddPlayer(rosterIds[i], rosterNames[i]);
+                _playerScores[rosterIds[i]] = rosterScores[i];
+            }
+
             // Demonstrates iterating over dictionary keys
             int[] playerIds = _playerScores.GetKeys();
             for (int i = 0; i < playerIds.Length; i++)
@@ -638,7 +752,9 @@ namespace CEShowcase.Station3_Leaderboard
             SortLeaderboard();
             UpdateDisplay();
             
-            CELogger.Info("Leaderboard", "All scores reset");
+            EndScratchRoster();
+
+            CELogger.Info("Leaderboard", "Score reset previewed");
         }
         
         // ========================================
@@ -664,8 +780,9 @@ namespace CEShowcase.Station3_Leaderboard
         {
             if (player == null) return;
             
-            // CEDictionary supports Remove() with O(1) average complexity
-            // Uses tombstone deletion to avoid rehashing during iteration
+            // CEDictionary supports Remove() with O(1) average complexity. It leaves a tombstone, and
+            // rehashes in place once tombstones pass a quarter of capacity -- so a Remove can still move
+            // every entry, and nothing here walks the table while removing.
             int playerId = player.playerId;
             
             if (_playerNames.ContainsKey(playerId))

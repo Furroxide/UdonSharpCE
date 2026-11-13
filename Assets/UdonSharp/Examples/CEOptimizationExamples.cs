@@ -6,12 +6,16 @@ namespace UdonSharp.CE.Examples
 {
 #pragma warning disable CS0162, CS0219 // This sample intentionally demonstrates unreachable-code and constant-folding optimizations.
     /// <summary>
-    /// This example script demonstrates all automatic CE compiler optimizations.
+    /// The code shapes CE's syntactic optimizers were written for -- kept as a reference, not as a demo.
     /// 
-    /// These optimizations happen automatically during compilation - no attributes
-    /// or configuration needed. Users benefit simply by using UdonSharpCE.
+    /// None of those optimizers runs in this release. All six (loop unrolling, tiny-method inlining,
+    /// string interning, common subexpression elimination, loop-invariant code motion and extern call
+    /// caching) are registered but disabled, because each was found able to change what a program does,
+    /// and the assembly-level optimizer under Editor/Compiler/Optimization is not wired into the compiler.
+    /// This behaviour therefore compiles to the same Udon stock UdonSharp produces for the same C#. The
+    /// section comments below say, per technique, what actually happens today.
     /// 
-    /// View the optimization report: Tools > UdonSharpCE > Show Optimization Report
+    /// The optimization report (Udon CE/Optimization Report) lists each optimizer as disabled.
     /// </summary>
     // NoVariableSync, not None: this behaviour syncs no variables, but it does send network events
     // (see the string-interning examples below). BehaviourSyncMode.None disables SendCustomNetworkEvent
@@ -24,8 +28,8 @@ namespace UdonSharp.CE.Examples
         // ════════════════════════════════════════════════════════════════════
         // Evaluates constant expressions at compile time, eliminating runtime math.
         // 
-        // Note: Now handled by the Binder's ConstantExpressionOptimizer and
-        // StrengthReductionPass at the binary level for optimal results.
+        // Status: this one does happen, but it is UdonSharp's own binder that does it
+        // (ConstantExpressionOptimizer), not a CE pass.
         // 
         // Benefits:
         // - Fewer Udon instructions
@@ -80,31 +84,27 @@ namespace UdonSharp.CE.Examples
         }
 
         // ════════════════════════════════════════════════════════════════════
-        // OPTIMIZATION: DEAD CODE ELIMINATION
+        // OPTIMIZATION: DEAD CODE ELIMINATION -- NOT PERFORMED
         // ════════════════════════════════════════════════════════════════════
-        // Removes code that can never execute, reducing program size.
+        // What it was meant to do: remove code that can never execute, reducing program size.
         //
-        // Note: Now handled by binary-level optimization passes including
-        // PeepholeOptimizationPass and DeadCodeEliminationPass for thorough
-        // CFG-based analysis.
-        //
-        // Benefits:
-        // - Smaller compiled programs
-        // - Debug code automatically removed when condition is false
-        // - Cleaner generated Udon assembly
+        // Status: no CE pass removes anything here. The PeepholeOptimizationPass and
+        // DeadCodeEliminationPass this comment used to credit belong to the assembly-level
+        // optimizer, which is not wired into the compiler. Code that must be absent from the
+        // compiled program has to be excluded with #if, not with a const bool.
         // ════════════════════════════════════════════════════════════════════
 
-        // Set to false to completely remove debug code from builds
+        // Setting this to false stops the debug code running; it does not remove it from the program
         private const bool DEBUG_MODE = false;
         private const bool FEATURE_ENABLED = true;
 
         /// <summary>
-        /// Dead code is completely removed from the compiled output.
+        /// Code behind an always-false condition. Nothing in CE strips it; see the status note above.
         /// </summary>
         private void DeadCodeEliminationExamples()
         {
             // ─── Always-False Conditions ───
-            // This entire block is removed from the compiled program
+            // Never executes, but is not guaranteed to be absent from the compiled program
             if (false)
             {
                 Debug.Log("This code doesn't exist in the compiled output");
@@ -172,9 +172,12 @@ namespace UdonSharp.CE.Examples
         private void DoMoreWork() { }
 
         // ════════════════════════════════════════════════════════════════════
-        // OPTIMIZATION 1: SMALL LOOP UNROLLING (CEOPT003)
+        // OPTIMIZATION 1: SMALL LOOP UNROLLING (CEOPT003) -- DISABLED
         // ════════════════════════════════════════════════════════════════════
-        // Replaces small fixed-iteration loops with straight-line code.
+        // Status: disabled in this release. It substituted the loop literal into member-access
+        // names (producing 'v.0'), so every loop below compiles exactly as written.
+        //
+        // What it was meant to do: replace small fixed-iteration loops with straight-line code.
         //
         // Criteria for automatic unrolling:
         // - Iteration count is constant and known at compile time
@@ -194,7 +197,7 @@ namespace UdonSharp.CE.Examples
         private Transform[] _waypoints = new Transform[4];
 
         /// <summary>
-        /// Small loops are automatically unrolled into straight-line code.
+        /// Small fixed-count loops of the kind CEOPT003 targeted. They run as ordinary loops.
         /// </summary>
         private void SmallLoopUnrollingExamples()
         {
@@ -254,9 +257,12 @@ namespace UdonSharp.CE.Examples
         private float CalculateAxisValue(int axis) => axis * 10.0f;
 
         // ════════════════════════════════════════════════════════════════════
-        // OPTIMIZATION 2: TINY METHOD INLINING (CEOPT004)
+        // OPTIMIZATION 2: TINY METHOD INLINING (CEOPT004) -- DISABLED
         // ════════════════════════════════════════════════════════════════════
-        // Replaces calls to very small methods with their body.
+        // Status: disabled in this release. It dropped side effects and collapsed overloads by
+        // name, so every call below is an ordinary method call.
+        //
+        // What it was meant to do: replace calls to very small methods with their body.
         //
         // Criteria for automatic inlining:
         // - Method is expression-bodied or has single return statement
@@ -271,7 +277,7 @@ namespace UdonSharp.CE.Examples
         // ════════════════════════════════════════════════════════════════════
 
         /// <summary>
-        /// Tiny helper methods are inlined at their call sites.
+        /// Tiny helper calls of the kind CEOPT004 targeted. They are called, not inlined.
         /// </summary>
         private void TinyMethodInliningExamples()
         {
@@ -321,9 +327,11 @@ namespace UdonSharp.CE.Examples
         private float Length(float x, float y) => Mathf.Sqrt(Square(x) + Square(y));
 
         // ════════════════════════════════════════════════════════════════════
-        // OPTIMIZATION 3: STRING INTERNING (CEOPT005)
+        // OPTIMIZATION 3: STRING INTERNING (CEOPT005) -- DISABLED
         // ════════════════════════════════════════════════════════════════════
-        // Identifies duplicate string literals across your codebase.
+        // Status: disabled in this release, so no duplicates are reported anywhere.
+        //
+        // What it was meant to do: identify duplicate string literals across your codebase.
         //
         // The optimizer tracks string usage and reports duplicates in the
         // Optimization Report window. Strings appearing 2+ times could be
@@ -336,8 +344,7 @@ namespace UdonSharp.CE.Examples
         // ════════════════════════════════════════════════════════════════════
 
         /// <summary>
-        /// Duplicate strings are detected for potential interning.
-        /// Check Tools > UdonSharpCE > Show Optimization Report for details.
+        /// Duplicate literals of the kind CEOPT005 would have reported. Nothing reports them today.
         /// </summary>
         private void StringInterningExamples()
         {
@@ -381,21 +388,21 @@ namespace UdonSharp.CE.Examples
         }
 
         // ════════════════════════════════════════════════════════════════════
-        // COMBINED EXAMPLE: ALL OPTIMIZATIONS WORKING TOGETHER
+        // COMBINED EXAMPLE: THE SHAPES ABOVE IN ONE UPDATE LOOP
         // ════════════════════════════════════════════════════════════════════
 
         private const bool ENABLE_PROFILING = false;
         private Vector3[] _quadPositions = new Vector3[4];
 
         /// <summary>
-        /// Real-world example showing multiple optimizations in action.
+        /// The shapes above in one method. Only the constant folding below actually happens.
         /// </summary>
         private void Update()
         {
             // Constant folding: 1.0f / 60.0f → 0.0166667f
             float fixedDelta = 1.0f / 60.0f;
 
-            // Dead code elimination: Entire profiling block removed
+            // Never runs while ENABLE_PROFILING is false, but nothing removes it from the program
             if (ENABLE_PROFILING)
             {
                 Debug.Log($"Frame time: {Time.deltaTime}");
@@ -422,23 +429,15 @@ namespace UdonSharp.CE.Examples
         private Vector3 CalculateWeightedPosition(int corner, float weight) => Vector3.one * weight;
 
         // ════════════════════════════════════════════════════════════════════
-        // CONTROL ATTRIBUTES: WHEN YOU NEED TO DISABLE OPTIMIZATIONS
+        // CONTROL ATTRIBUTES: REMOVED
         // ════════════════════════════════════════════════════════════════════
         // 
-        // In rare cases, you may need to prevent specific optimizations.
-        // Use these attributes from UdonSharp.CE namespace:
-        //
-        // [CENoOptimize]     - Disable ALL optimizations on class/method/field
-        // [CENoInline]       - Prevent method from being inlined
-        // [CEInline]         - Force method to be inlined
-        // [CENoUnroll]       - Prevent loop unrolling in method
-        // [CEUnroll(n)]      - Force unrolling up to n iterations
-        // [CEConst]          - Mark field as compile-time constant
-        // [CEDebugOnly]      - Remove method entirely in release builds
-        //
-        // Example:
-        // [CENoInline]
-        // private float CriticalMethod(float x) => x * x;
+        // [CENoOptimize], [CENoInline], [CEInline], [CENoUnroll], [CEUnroll], [CEConst] and
+        // [CEDebugOnly] are [Obsolete(error: true)]: applying one is a compile error. The
+        // optimizers they steered are disabled, and an attribute that silently does nothing is
+        // worse than none -- [CEDebugOnly] in particular would leave "debug-only" code in a
+        // release build. Use #if for code that must not ship. [CEPreserveAction] is unrelated
+        // to these and still works.
         //
         // ════════════════════════════════════════════════════════════════════
     }

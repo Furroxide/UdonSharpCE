@@ -17,26 +17,28 @@ namespace UdonSharp.CE.Perf
     /// - Expensive calculations that don't need every-frame updates
     /// - Progressive loading/generation
     ///
-    /// The processor maintains its position between frames and fires
-    /// callbacks when batches complete or when all items are processed.
+    /// The processor maintains its position between frames, and keeps it when
+    /// the item count changes: a pass carries on from where it was against the
+    /// new count instead of starting over.
+    ///
+    /// Every Process method takes a delegate. Udon has no way to represent one, and CE inlines a lambda
+    /// only where it is passed to List&lt;T&gt;.ForEach or one of CEList's ForEach helpers, so this class
+    /// is for editor and plain C# code. An UdonSharpBehaviour that wants time-slicing keeps the index itself
+    /// (a field, advanced by a fixed step each Update) and calls its per-item method directly.
     /// </remarks>
     /// <example>
     /// <code>
-    /// public class AIManager : UdonSharpBehaviour
+    /// // Editor / plain C# usage
+    /// public class AIManager
     /// {
-    ///     private BatchProcessor aiProcessor;
-    ///     private int[] enemyIds;
+    ///     // Process 50 enemies per call
+    ///     private readonly BatchProcessor aiProcessor = new BatchProcessor(50);
     ///     private int enemyCount;
     ///
-    ///     void Start()
+    ///     public void Step()
     ///     {
-    ///         // Process 50 enemies per frame
-    ///         aiProcessor = new BatchProcessor(50);
-    ///     }
-    ///
-    ///     void Update()
-    ///     {
-    ///         aiProcessor.Process(enemyCount, UpdateEnemy);
+    ///         // enemyCount may differ from the last call; the pass continues regardless
+    ///         aiProcessor.ProcessContinuous(enemyCount, UpdateEnemy);
     ///     }
     ///
     ///     void UpdateEnemy(int index)
@@ -146,12 +148,13 @@ namespace UdonSharp.CE.Perf
             if (processItem == null) return true;
 
             // Start new pass if needed
-            if (!_isProcessing || _totalItems != totalItems)
+            if (!_isProcessing)
             {
                 _currentIndex = 0;
-                _totalItems = totalItems;
                 _isProcessing = true;
             }
+
+            SyncTotalItems(totalItems);
 
             if (_currentIndex >= _totalItems)
             {
@@ -191,12 +194,13 @@ namespace UdonSharp.CE.Perf
         {
             if (processItem == null) return true;
 
-            if (!_isProcessing || _totalItems != totalItems)
+            if (!_isProcessing)
             {
                 _currentIndex = 0;
-                _totalItems = totalItems;
                 _isProcessing = true;
             }
+
+            SyncTotalItems(totalItems);
 
             if (_currentIndex >= _totalItems)
             {
@@ -229,6 +233,27 @@ namespace UdonSharp.CE.Perf
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// Adopts the caller's current item count for the pass in progress, without restarting it.
+        /// </summary>
+        /// <remarks>
+        /// The count is expected to move between frames -- that is what spreading work over frames
+        /// means when the items are entities being spawned and destroyed. A changed count used to send
+        /// the pass back to index 0, so while the count changed every frame only the first batch was
+        /// ever processed: everything past it starved, the pass never completed, and CompletedPasses
+        /// stayed at 0. The position is kept and only pulled back when the collection shrank beneath it,
+        /// in which case the pass is simply over.
+        /// </remarks>
+        private void SyncTotalItems(int totalItems)
+        {
+            _totalItems = totalItems;
+
+            if (_currentIndex > _totalItems)
+            {
+                _currentIndex = Mathf.Max(0, _totalItems);
+            }
         }
 
         /// <summary>

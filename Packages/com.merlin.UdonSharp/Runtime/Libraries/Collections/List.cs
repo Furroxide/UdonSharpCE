@@ -93,7 +93,7 @@ namespace UdonSharp.Lib.Internal.Collections
             
             if (size == itemArr.Length)
             {
-                T[] newItems = new T[itemArr.Length * 2];
+                T[] newItems = new T[itemArr.Length == 0 ? 4 : itemArr.Length * 2];
                 System.Array.Copy(itemArr, newItems, itemArr.Length);
                 _items = newItems;
                 itemArr = newItems;
@@ -104,7 +104,6 @@ namespace UdonSharp.Lib.Internal.Collections
         }
         
         private int[] _sortStack;
-        private ListIterator<T> _cachedIterator;
         
         public void Sort()
         {
@@ -294,7 +293,7 @@ namespace UdonSharp.Lib.Internal.Collections
             int size = _size;
             T[] itemArr = _items;
             
-            if (index < 0 || index >= size)
+            if (index < 0 || index > size)
             {
                 Debug.LogError($"Index out of range: {index}");
             #pragma warning disable CS0251
@@ -374,7 +373,7 @@ namespace UdonSharp.Lib.Internal.Collections
             
             if (size == itemArr.Length)
             {
-                T[] newItems = new T[itemArr.Length * 2];
+                T[] newItems = new T[itemArr.Length == 0 ? 4 : itemArr.Length * 2];
                 System.Array.Copy(itemArr, newItems, itemArr.Length);
                 _items = newItems;
                 itemArr = newItems;
@@ -541,13 +540,8 @@ namespace UdonSharp.Lib.Internal.Collections
 
         public IEnumerator GetEnumerator()
         {
-            // Cache and reuse iterator to avoid allocation (safe because Udon is single-threaded)
-            if (_cachedIterator == null)
-                _cachedIterator = new ListIterator<T>(this);
-            else
-                _cachedIterator.Reset();
-            
-            return _cachedIterator;
+            // Nested enumerations need independent cursors, even on a single-threaded VM.
+            return new ListIterator<T>(this);
         }
 
         public static List<T> CreateFromArray(T[] items)
@@ -564,10 +558,12 @@ namespace UdonSharp.Lib.Internal.Collections
         {
             List<T> list = new List<T>(hashSet.Count);
 
-            foreach (T item in hashSet)
-            {
-                list.Add(item);
-            }
+            // An explicit loop, not foreach: U# lowers foreach only over the System collection types, and this is
+            // the library's own HashSet, so a foreach here failed to compile and took new List<T>(hashSet) with it.
+            HashSetIterator<T> iterator = hashSet.GetEnumerator();
+
+            while (iterator.MoveNext())
+                list.Add(iterator.Current);
 
             return list;
         }

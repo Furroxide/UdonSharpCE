@@ -185,9 +185,45 @@ namespace UdonSharp.CE.Editor.Optimizers
         /// <summary>
         /// Clears all recorded entries. Used between compilations.
         /// </summary>
+        /// <summary>
+        /// Generators that met their trigger in a file and correctly emitted nothing for it, by id.
+        /// </summary>
+        private readonly Dictionary<string, int> _dischargedObligations = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Called by a generator that recognised its trigger in the current file and, correctly, had nothing
+        /// to emit for it -- every <c>[SyncOnJoin]</c> field was an unsupported type that CE0032 reports, or
+        /// an <c>[Rpc]</c> method already carried everything the emitter would have added.
+        ///
+        /// The USCE0001 tripwire reads "trigger token written, zero files transformed" as a generator that
+        /// silently failed, and the runner counts a transform by tree identity. Without this a legitimate
+        /// no-op is indistinguishable from that failure, so a correct project fails to compile -- and it
+        /// fails in the generator phase, before the analyzer that would have explained the real problem.
+        /// A generator must only call this where it positively recognised the construct and chose to leave
+        /// it alone; calling it anywhere else blinds the tripwire to the failure it exists to catch.
+        /// </summary>
+        public void RecordObligationDischarged(string generatorId)
+        {
+            if (string.IsNullOrEmpty(generatorId))
+                return;
+
+            _dischargedObligations.TryGetValue(generatorId, out int count);
+            _dischargedObligations[generatorId] = count + 1;
+        }
+
+        /// <summary>
+        /// How many times <paramref name="generatorId"/> has called
+        /// <see cref="RecordObligationDischarged"/> since the last <see cref="Clear"/>.
+        /// </summary>
+        public int GetDischargedObligationCount(string generatorId)
+        {
+            return generatorId != null && _dischargedObligations.TryGetValue(generatorId, out int count) ? count : 0;
+        }
+
         public void Clear()
         {
             _entries.Clear();
+            _dischargedObligations.Clear();
             InternedStrings.Clear();
             _semanticModelLookup.Clear();
             _semanticModelTrees = null;

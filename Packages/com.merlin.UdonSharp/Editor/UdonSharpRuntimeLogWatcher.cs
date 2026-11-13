@@ -116,8 +116,14 @@ namespace UdonSharpEditor
                 }
             }
 
+            EnsureScriptLookup();
+            return true;
+        }
+
+        private static void EnsureScriptLookup()
+        {
             if (_scriptLookup != null)
-                return true;
+                return;
 
             _scriptLookup = new Dictionary<long, (string, UdonSharpProgramAsset)>();
             UdonSharpProgramAsset[] udonSharpDataAssets = UdonSharpProgramAsset.GetAllUdonSharpPrograms();
@@ -141,7 +147,6 @@ namespace UdonSharpEditor
                 _scriptLookup.Add(programID, (AssetDatabase.GetAssetPath(programAsset.sourceCsScript), programAsset));
             }
 
-            return true;
         }
 
         private static void CleanupLogWatcher()
@@ -175,11 +180,13 @@ namespace UdonSharpEditor
             }
         }
 
-        private const string MATCH_STR = "\\r\\n\\d{4}.\\d{2}.\\d{2} \\d{2}:\\d{2}:\\d{2} ";
-        private static Regex _lineMatch;
+        private const string MATCH_STR = "\\r?\\n\\d{4}.\\d{2}.\\d{2} \\d{2}:\\d{2}:\\d{2} ";
+        private static readonly Regex _lineMatch = new Regex(MATCH_STR, RegexOptions.Compiled);
 
         private static void OnEditorUpdate()
         {
+            // A failed C# compile may not reload the domain; keep subscriptions for the next update.
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating) return;
             if (!InitializeScriptLookup())
             {
                 CleanupLogWatcher();
@@ -200,8 +207,6 @@ namespace UdonSharpEditor
             if (!shouldListenForVRC) 
                 return;
             
-            if (_lineMatch == null)
-                _lineMatch = new Regex(MATCH_STR, RegexOptions.Compiled);
 
             List<(string, string)> modifiedFilesAndContents = null;
 
@@ -318,6 +323,7 @@ namespace UdonSharpEditor
         [PublicAPI]
         public static void ParseLogText(string contents, string name)
         {
+            EnsureScriptLookup();
             if (string.IsNullOrWhiteSpace(contents))
                 return;
 
@@ -478,12 +484,13 @@ namespace UdonSharpEditor
 
             const string exceptionMessageStr = "Exception Message:";
             // const string separatorStr = "----------------------";
-            int errorMessageStart = errorStr.IndexOf(exceptionMessageStr, StringComparison.Ordinal) + exceptionMessageStr.Length;
+            int errorMessageStart = errorStr.IndexOf(exceptionMessageStr, StringComparison.Ordinal);
             if (errorMessageStart == -1)
                 return;
 
-            const string endSeparator = "----------------------\r\nInner Exception:";
-            int errorMessageEnd = errorStr.IndexOf(endSeparator, errorMessageStart, StringComparison.Ordinal);
+            errorMessageStart += exceptionMessageStr.Length;
+            int innerException = errorStr.IndexOf("Inner Exception:", errorMessageStart, StringComparison.Ordinal);
+            int errorMessageEnd = innerException < 0 ? -1 : errorStr.LastIndexOf("----------------------", innerException, StringComparison.Ordinal);
             // errorMessageEnd = errorMessageEnd != -1 ? errorStr.IndexOf("\n\n", errorMessageEnd, StringComparison.Ordinal) : errorMessageEnd;
 
             if (errorMessageEnd == -1 || errorMessageEnd < errorMessageStart)
@@ -515,9 +522,9 @@ namespace UdonSharpEditor
                 programCounter = int.Parse(programCounterMatch.Groups["counter"].Value);
 
                 int stackDumpIdx = errorStr.IndexOf("Stack Dump:", StringComparison.Ordinal);
-                int heapDumpIdx = errorStr.IndexOf("Heap Dump:", stackDumpIdx, StringComparison.Ordinal);
+                int heapDumpIdx = stackDumpIdx < 0 ? -1 : errorStr.IndexOf("Heap Dump:", stackDumpIdx, StringComparison.Ordinal);
                 
-                if (stackDumpIdx != -1)
+                if (stackDumpIdx != -1 && heapDumpIdx != -1)
                 {
                     int stackEnd = errorStr.IndexOf("----------------------", stackDumpIdx, StringComparison.Ordinal);
                     string stackDumpStr = errorStr.Substring(stackDumpIdx, stackEnd - stackDumpIdx);
@@ -535,9 +542,10 @@ namespace UdonSharpEditor
                         if (valueStart == -1)
                             continue;
                         
-                        valueStart = heapDumpStr.IndexOf(":", valueStart, StringComparison.Ordinal) + 1; 
+                        valueStart = heapDumpStr.IndexOf(":", valueStart, StringComparison.Ordinal);
                         if (valueStart == -1)
                             continue;
+                        valueStart++;
                         
                         int valueEnd = heapDumpStr.IndexOf("\n", valueStart, StringComparison.Ordinal);
                         if (valueEnd == -1)
@@ -562,6 +570,7 @@ namespace UdonSharpEditor
                 return;
             }
 
+            EnsureScriptLookup();
             if (!_scriptLookup.TryGetValue(programID, out var assetInfo))
                 return;
 

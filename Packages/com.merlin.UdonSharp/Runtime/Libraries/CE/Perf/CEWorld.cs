@@ -27,22 +27,31 @@ namespace UdonSharp.CE.Perf
     /// public class BulletHell : UdonSharpBehaviour
     /// {
     ///     private CEWorld world;
+    ///     private Vector3[] positions;
+    ///     private Vector3[] velocities;
+    ///     private int positionSlot;
+    ///     private int velocitySlot;
     ///
     ///     void Start()
     ///     {
     ///         world = new CEWorld(2000);
-    ///         world.RegisterComponentArrays(
-    ///             positions,      // Vector3[]
-    ///             velocities,     // Vector3[]
-    ///             lifetimes,      // float[]
-    ///             active          // bool[]
-    ///         );
+    ///         positions = new Vector3[world.MaxEntities];
+    ///         velocities = new Vector3[world.MaxEntities];
+    ///
+    ///         // One call per array. The returned slot (0-31) is what AddComponent/HasComponent take.
+    ///         positionSlot = world.RegisterComponent(ComponentTypeId.CustomBase + 0, positions);
+    ///         velocitySlot = world.RegisterComponent(ComponentTypeId.CustomBase + 1, velocities);
+    ///
+    ///         // Systems are public, parameterless methods invoked by name.
+    ///         world.RegisterSystem(this, nameof(MoveBullets));
     ///     }
     ///
     ///     void Update()
     ///     {
     ///         world.Tick();
     ///     }
+    ///
+    ///     public void MoveBullets() { /* iterate world.ActiveEntities */ }
     /// }
     /// </code>
     /// </example>
@@ -107,10 +116,29 @@ namespace UdonSharp.CE.Perf
         private int _freeListCount;
 
         /// <summary>
-        /// List of entities pending destruction for O(1) check.
+        /// Flush queue for deferred destruction. Holds each queued id once; an entry whose entity is no
+        /// longer PendingDestroy by the time the flush reaches it is skipped.
         /// </summary>
         private readonly int[] _pendingDestroyList;
         private int _pendingDestroyCount;
+
+        /// <summary>
+        /// Whether an id already has an entry in <see cref="_pendingDestroyList"/>.
+        /// </summary>
+        /// <remarks>
+        /// The queue is only emptied by a flush, while an entity can be deferred, cancelled and deferred
+        /// again -- or destroyed outright, recycled and deferred again -- any number of times in between.
+        /// Appending on every deferral filled the queue with duplicates and stale ids until it was full,
+        /// after which a deferral was dropped without being queued and that entity stayed PendingDestroy
+        /// forever: never flushed, never returned to the free list. One entry per id cannot overflow.
+        /// </remarks>
+        private readonly bool[] _pendingDestroyQueued;
+
+        /// <summary>
+        /// Number of entities currently in the PendingDestroy state. Kept separately from the queue
+        /// length, which also counts entries that were cancelled or destroyed immediately since.
+        /// </summary>
+        private int _pendingEntityCount;
 
         /// <summary>
         /// Dense list of active entity IDs for O(activeCount) iteration.
@@ -157,6 +185,17 @@ namespace UdonSharp.CE.Perf
         private readonly int[] _systemOrders;
 
         /// <summary>
+        /// System indices in the order Tick runs them.
+        /// </summary>
+        /// <remarks>
+        /// Sorting permutes this array and nothing else. The system arrays stay in registration order
+        /// because the index RegisterSystem hands back is how callers name a system afterwards: when the
+        /// sort moved the systems themselves, that index pointed at a different system from the first
+        /// Tick on, and DisableSystem switched off whichever one had been sorted into its place.
+        /// </remarks>
+        private readonly int[] _systemExecutionOrder;
+
+        /// <summary>
         /// Whether each system is enabled.
         /// </summary>
         private readonly bool[] _systemEnabled;
@@ -191,10 +230,14 @@ namespace UdonSharp.CE.Perf
         public int ComponentTypeCount => _registeredComponentCount;
 
         /// <summary>
-        /// Gets the number of entities pending destruction.
+        /// Gets the number of entities currently in the PendingDestroy state.
         /// Useful for debugging or deciding whether to call FlushPendingDestructions().
         /// </summary>
-        public int PendingDestroyCount => _pendingDestroyCount;
+        /// <remarks>
+        /// This is a live count: an entity stops being counted the moment it is destroyed immediately,
+        /// disabled or has its destruction cancelled, not only when the next flush runs.
+        /// </remarks>
+        public int PendingDestroyCount => _pendingEntityCount;
 
         /// <summary>
         /// Gets the number of available entity slots (free list + unallocated).
@@ -213,9 +256,37 @@ namespace UdonSharp.CE.Perf
         /// for (int i = 0; i &lt; count; i++)
         /// {
         ///     int entityId = active[i];
-        ///     // Process entity - no validity check needed
+        ///     // Active as long as nothing in this loop destroys, defers, disables or creates entities
         /// }
         /// </code>
+        ///
+        /// The list is unordered and is edited in place. <see cref="DestroyEntity"/>,
+        /// <see cref="DestroyEntityDeferred"/> and <see cref="DisableEntity"/> all take the entity out
+        /// immediately by swap-remove: the last entry moves into the vacated index and the count drops by
+        /// one. <see cref="CreateEntity"/>, <see cref="EnableEntity"/> and <see cref="CancelDestruction"/>
+        /// append at the end. Entries at or beyond <see cref="ActiveEntityCount"/> are stale leftovers.
+        ///
+        /// So the forward loop above is only correct while the loop body leaves the entity set alone.
+        /// Removing an entity the loop has not reached yet makes it visit the moved entry twice (once
+        /// at its new index, once at its stale old one); removing the current one and then creating
+        /// another makes it miss the moved entry. Re-reading ActiveEntityCount every pass does not
+        /// help: removing the current entity then skips whichever one was moved into its place.
+        ///
+        /// What is safe when a loop has to remove entities:
+        /// <list type="bullet">
+        /// <item>Iterate backwards (<c>for (int i = count - 1; i &gt;= 0; i--)</c>) and remove only the
+        /// entity being visited, or ones already visited. Every entry that moves comes from an index
+        /// the loop has already passed.</item>
+        /// <item>Copy the ids out first with <see cref="GetActiveEntities"/> or CEQuery.Execute, loop over
+        /// the copy, and check <see cref="IsValidEntity"/> on each id before using it. This is the one to
+        /// use when a system removes entities other than the current one. Remove them with
+        /// <see cref="DestroyEntityDeferred"/> and leave the flush until the loop is done: the check only
+        /// says whether an id is active, and an id destroyed outright can be handed to a new entity by a
+        /// CreateEntity later in the same loop, which then passes the check in the old entity's place.
+        /// A deferred id is not handed out again before the flush.</item>
+        /// <item>Scan ids <c>0..MaxEntities</c> and test <see cref="GetEntityState"/>, which does not
+        /// depend on this list at all.</item>
+        /// </list>
         /// </remarks>
         public int[] ActiveEntities => _activeList;
 
@@ -241,7 +312,9 @@ namespace UdonSharp.CE.Perf
             _freeList = new int[maxEntities];
             _freeListCount = 0;
             _pendingDestroyList = new int[maxEntities];
+            _pendingDestroyQueued = new bool[maxEntities];
             _pendingDestroyCount = 0;
+            _pendingEntityCount = 0;
             _activeEntityCount = 0;
             _nextEntitySlot = 0;
             
@@ -261,6 +334,7 @@ namespace UdonSharp.CE.Perf
             // System storage
             _systems = new CECallback[MaxSystems];
             _systemOrders = new int[MaxSystems];
+            _systemExecutionOrder = new int[MaxSystems];
             _systemEnabled = new bool[MaxSystems];
             _systemCount = 0;
             _systemsDirty = false;
@@ -345,10 +419,19 @@ namespace UdonSharp.CE.Perf
         }
 
         /// <summary>
-        /// Destroys an entity immediately and clears its component data.
+        /// Destroys an entity immediately and clears its component mask.
         /// Works for Active, Disabled, and PendingDestroy entities.
         /// The entity ID is recycled and may be reused by future CreateEntity calls.
         /// </summary>
+        /// <remarks>
+        /// Only the mask is cleared. The values in the registered component arrays are left exactly as
+        /// they were, so the next entity to be given this id finds the previous owner's data at its
+        /// index. Whoever calls <see cref="AddComponent"/> on a new entity has to write that component's
+        /// initial value; the world cannot do it, it does not know what a fresh value looks like.
+        ///
+        /// An Active entity is swap-removed from <see cref="ActiveEntities"/> here; see the remarks
+        /// there before calling this from inside a loop over that list.
+        /// </remarks>
         /// <param name="entityId">The entity to destroy.</param>
         /// <returns>True if the entity was destroyed, false if already free or invalid.</returns>
         public bool DestroyEntity(int entityId)
@@ -362,6 +445,11 @@ namespace UdonSharp.CE.Perf
             if (currentState == EntityState.Active)
             {
                 RemoveFromActiveList(entityId);
+            }
+            else if (currentState == EntityState.PendingDestroy)
+            {
+                // Its queue entry stays behind and is skipped by the flush; only the live count moves.
+                _pendingEntityCount--;
             }
 
             _entityStates[entityId] = EntityState.Free;
@@ -380,9 +468,21 @@ namespace UdonSharp.CE.Perf
 
         /// <summary>
         /// Marks an entity for destruction at the end of the current tick.
-        /// Safer than immediate destruction during system iteration.
         /// Idempotent: calling multiple times on the same entity has no additional effect.
         /// </summary>
+        /// <remarks>
+        /// What is deferred is the recycling, not the removal. The entity leaves
+        /// <see cref="ActiveEntities"/> immediately, by the same swap-remove as
+        /// <see cref="DestroyEntity"/>, and <see cref="ActiveEntityCount"/> drops at once. Until the
+        /// flush at the end of <see cref="Tick"/> (or <see cref="FlushPendingDestructions"/>) its id is
+        /// not handed out again and its component mask is kept, so code still holding the id this tick
+        /// reads this entity's data rather than a newly created one's.
+        ///
+        /// It is therefore no safer than DestroyEntity for a loop over ActiveEntities itself: the list is
+        /// reordered either way. Where it does matter is a loop over a copy of the ids, which relies on a
+        /// removed id staying inactive for the rest of the loop. The remarks on
+        /// <see cref="ActiveEntities"/> list the loops that hold up.
+        /// </remarks>
         /// <param name="entityId">The entity to destroy.</param>
         /// <returns>True if the entity was marked for destruction, false if already pending or invalid.</returns>
         public bool DestroyEntityDeferred(int entityId)
@@ -401,10 +501,13 @@ namespace UdonSharp.CE.Perf
             RemoveFromActiveList(entityId);
             
             _entityStates[entityId] = EntityState.PendingDestroy;
+            _pendingEntityCount++;
             
-            // Add to pending destroy list for O(1) processing
-            if (_pendingDestroyCount < _pendingDestroyList.Length)
+            // Queue for the flush, once per id. An id that was deferred earlier and then cancelled,
+            // disabled or destroyed-and-recycled still has its entry, and that entry will do.
+            if (!_pendingDestroyQueued[entityId])
             {
+                _pendingDestroyQueued[entityId] = true;
                 _pendingDestroyList[_pendingDestroyCount] = entityId;
                 _pendingDestroyCount++;
             }
@@ -456,6 +559,7 @@ namespace UdonSharp.CE.Perf
             {
                 // PendingDestroy entities are already removed from dense list
                 _entityStates[entityId] = EntityState.Disabled;
+                _pendingEntityCount--;
                 return true;
             }
             return false;
@@ -472,6 +576,7 @@ namespace UdonSharp.CE.Perf
             if (_entityStates[entityId] == EntityState.PendingDestroy)
             {
                 _entityStates[entityId] = EntityState.Active;
+                _pendingEntityCount--;
                 
                 // Add back to dense active list
                 _entityToActiveIndex[entityId] = _activeEntityCount;
@@ -671,7 +776,11 @@ namespace UdonSharp.CE.Perf
         /// <param name="target">The UdonSharpBehaviour that owns the system method.</param>
         /// <param name="methodName">The name of the method to call (use nameof()).</param>
         /// <param name="order">Execution order (lower runs first).</param>
-        /// <returns>The system index, or -1 if registration failed.</returns>
+        /// <returns>
+        /// The system index, or -1 if registration failed. It identifies this system for
+        /// EnableSystem/DisableSystem/IsSystemEnabled for the life of the world, whatever order the
+        /// systems end up running in.
+        /// </returns>
         /// <example>
         /// <code>
         /// world.RegisterSystem(this, nameof(UpdatePhysics), order: 10);
@@ -702,6 +811,7 @@ namespace UdonSharp.CE.Perf
             _systems[index] = new CECallback(target, methodName);
             _systemOrders[index] = order;
             _systemEnabled[index] = true;
+            _systemExecutionOrder[index] = index;
             _systemCount++;
             _systemsDirty = true;
 
@@ -713,7 +823,7 @@ namespace UdonSharp.CE.Perf
         /// </summary>
         /// <param name="callback">The callback to register.</param>
         /// <param name="order">Execution order (lower runs first).</param>
-        /// <returns>The system index, or -1 if registration failed.</returns>
+        /// <returns>The system index (stable, see the other overload), or -1 if registration failed.</returns>
         public int RegisterSystem(CECallback callback, int order = 0)
         {
             if (!callback.IsValid)
@@ -732,6 +842,7 @@ namespace UdonSharp.CE.Perf
             _systems[index] = callback;
             _systemOrders[index] = order;
             _systemEnabled[index] = true;
+            _systemExecutionOrder[index] = index;
             _systemCount++;
             _systemsDirty = true;
 
@@ -791,12 +902,13 @@ namespace UdonSharp.CE.Perf
                 _systemsDirty = false;
             }
 
-            // Execute systems
+            // Execute systems in sorted order; the arrays themselves are indexed by registration
             for (int i = 0; i < _systemCount; i++)
             {
-                if (_systemEnabled[i])
+                int systemIndex = _systemExecutionOrder[i];
+                if (_systemEnabled[systemIndex])
                 {
-                    _systems[i].Invoke();
+                    _systems[systemIndex].Invoke();
                 }
             }
 
@@ -832,6 +944,7 @@ namespace UdonSharp.CE.Perf
             for (int i = 0; i < pendingCount; i++)
             {
                 int entityId = pendingList[i];
+                _pendingDestroyQueued[entityId] = false;
                 
                 // Verify entity is still pending (could have been destroyed immediately via DestroyEntity
                 // or cancelled via CancelDestruction/DisableEntity)
@@ -840,6 +953,7 @@ namespace UdonSharp.CE.Perf
                     _entityStates[entityId] = EntityState.Free;
                     _entityVersions[entityId]++;
                     _componentMasks[entityId] = 0;
+                    _pendingEntityCount--;
                     // Note: _activeEntityCount was already decremented when entity was marked PendingDestroy
                     destroyedCount++;
 
@@ -856,30 +970,30 @@ namespace UdonSharp.CE.Perf
         }
 
         /// <summary>
-        /// Sorts systems by execution order.
+        /// Sorts the execution order by system order value.
         /// Uses simple insertion sort (good for small arrays).
         /// </summary>
+        /// <remarks>
+        /// Only <see cref="_systemExecutionOrder"/> is rearranged. _systems, _systemOrders and
+        /// _systemEnabled are never moved, so a system keeps the index it was registered under.
+        /// </remarks>
         private void SortSystems()
         {
-            // Insertion sort - stable and efficient for small arrays
+            // Insertion sort - stable and efficient for small arrays. Stable matters: systems sharing an
+            // order value run in the order they were registered.
             for (int i = 1; i < _systemCount; i++)
             {
-                CECallback system = _systems[i];
-                int order = _systemOrders[i];
-                bool enabled = _systemEnabled[i];
+                int systemIndex = _systemExecutionOrder[i];
+                int order = _systemOrders[systemIndex];
 
                 int j = i - 1;
-                while (j >= 0 && _systemOrders[j] > order)
+                while (j >= 0 && _systemOrders[_systemExecutionOrder[j]] > order)
                 {
-                    _systems[j + 1] = _systems[j];
-                    _systemOrders[j + 1] = _systemOrders[j];
-                    _systemEnabled[j + 1] = _systemEnabled[j];
+                    _systemExecutionOrder[j + 1] = _systemExecutionOrder[j];
                     j--;
                 }
 
-                _systems[j + 1] = system;
-                _systemOrders[j + 1] = order;
-                _systemEnabled[j + 1] = enabled;
+                _systemExecutionOrder[j + 1] = systemIndex;
             }
         }
 
@@ -894,14 +1008,25 @@ namespace UdonSharp.CE.Perf
         {
             for (int i = 0; i < _maxEntities; i++)
             {
+                // Clearing destroys every live entity, so each one's version moves exactly as it would
+                // for DestroyEntity. Ids are handed out again from 0 straight afterwards; without the
+                // bump an (id, version) pair held from before the clear matched the unrelated entity
+                // that was given the same id after it.
+                if (_entityStates[i] != EntityState.Free)
+                {
+                    _entityVersions[i]++;
+                }
+
                 _entityStates[i] = EntityState.Free;
                 _componentMasks[i] = 0;
                 _entityToActiveIndex[i] = -1;
+                _pendingDestroyQueued[i] = false;
             }
 
             _activeEntityCount = 0;
             _freeListCount = 0;
             _pendingDestroyCount = 0;
+            _pendingEntityCount = 0;
             _nextEntitySlot = 0;
         }
 

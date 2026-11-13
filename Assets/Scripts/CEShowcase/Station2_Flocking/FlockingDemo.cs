@@ -51,9 +51,13 @@ namespace CEShowcase.Station2_Flocking
         [Header("Visual Settings")]
         [SerializeField] private float _agentScale = 0.5f;
         
+        // World space: agents are positioned with Transform.position. These used to be +/-25 around the
+        // origin, which is the hub's spawn point -- the flock swarmed the hub and the walled arena built
+        // for it stood empty. The defaults match Station2_Arena in CEShowcase.unity: the 40 m square
+        // between the boundary walls at x = +/-20 and z = 20..60.
         [Header("Arena Bounds")]
-        [SerializeField] private Vector3 _arenaMin = new Vector3(-25, 0, -25);
-        [SerializeField] private Vector3 _arenaMax = new Vector3(25, 5, 25);
+        [SerializeField] private Vector3 _arenaMin = new Vector3(-20, 0, 20);
+        [SerializeField] private Vector3 _arenaMax = new Vector3(20, 5, 60);
         [SerializeField] private float _cellSize = 5f;
         
         [Header("Flocking Behavior")]
@@ -488,15 +492,29 @@ namespace CEShowcase.Station2_Flocking
                 Vector3 pos = _positions[i];
                 Vector3 vel = _velocities[i];
                 
-                // Soft boundary - steer back towards center
-                if (pos.x < _arenaMin.x + 2 || pos.x > _arenaMax.x - 2)
+                // Soft boundary - turn an agent round only while it is still heading out. Reversing on
+                // every frame it spent in the 2 m band flipped an agent that had already turned straight
+                // back towards the wall, so its speed along that axis halved away to nothing and it sat
+                // pinned to the edge, facing a different way each frame.
+                if (pos.x < _arenaMin.x + 2)
                 {
-                    vel.x *= -0.5f;
+                    if (vel.x < 0f) vel.x *= -0.5f;
                     pos.x = Mathf.Clamp(pos.x, _arenaMin.x, _arenaMax.x);
                 }
-                if (pos.z < _arenaMin.z + 2 || pos.z > _arenaMax.z - 2)
+                else if (pos.x > _arenaMax.x - 2)
                 {
-                    vel.z *= -0.5f;
+                    if (vel.x > 0f) vel.x *= -0.5f;
+                    pos.x = Mathf.Clamp(pos.x, _arenaMin.x, _arenaMax.x);
+                }
+
+                if (pos.z < _arenaMin.z + 2)
+                {
+                    if (vel.z < 0f) vel.z *= -0.5f;
+                    pos.z = Mathf.Clamp(pos.z, _arenaMin.z, _arenaMax.z);
+                }
+                else if (pos.z > _arenaMax.z - 2)
+                {
+                    if (vel.z > 0f) vel.z *= -0.5f;
                     pos.z = Mathf.Clamp(pos.z, _arenaMin.z, _arenaMax.z);
                 }
                 

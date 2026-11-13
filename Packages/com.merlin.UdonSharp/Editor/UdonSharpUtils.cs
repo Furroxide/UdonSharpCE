@@ -386,6 +386,10 @@ namespace UdonSharp
                         udonType = typeof(object[]);
                     }
                 }
+                else if (IsUserDefinedEnum(type))
+                {
+                    udonType = Enum.GetUnderlyingType(type);
+                }
                 else if (IsUserDefinedClass(type))
                 {
                     udonType = typeof(object[]);
@@ -608,13 +612,6 @@ namespace UdonSharp
             
             int logEntryCount = (int)logEntryType.GetMethod("StartGettingEntries", BindingFlags.Public | BindingFlags.Static).Invoke(null, Array.Empty<object>());
 
-            // Unity ConsoleWindow.Mode flags:
-            // 1 << 6  == AssetImportError - errors during asset import (including package C# compilation)
-            // 1 << 11 == ScriptCompileError - script compilation errors
-            const int assetImportError = 1 << 6;
-            const int scriptCompileError = 1 << 11;
-            const int compileErrorMask = assetImportError | scriptCompileError;
-
             try
             {
                 object[] getLinesParams = { 0, 1, 0, "" };
@@ -624,10 +621,7 @@ namespace UdonSharp
                     getLinesParams[0] = i;
                     getLinesAndModeMethod.Invoke(null, getLinesParams);
 
-                    int mode = (int)getLinesParams[2];
-
-                    // Check for either script compile errors or asset import errors (which includes package C# errors)
-                    if ((mode & compileErrorMask) != 0)
+                    if (IsScriptCompileErrorMode((int)getLinesParams[2]))
                     {
                         hasCompileError = true;
                         break;
@@ -640,6 +634,20 @@ namespace UdonSharp
             }
 
             return hasCompileError;
+        }
+
+        /// <summary>
+        /// Whether a console entry's ConsoleWindow.Mode flags mark a C# script compile error (1 &lt;&lt; 11).
+        ///
+        /// Only that bit. AssetImportError (1 &lt;&lt; 6) used to be included, so one importer failure -- a corrupt
+        /// texture, a model the importer rejected -- made U# refuse every compile, and the build hook went on to
+        /// upload the programs from before the refusal.
+        /// </summary>
+        internal static bool IsScriptCompileErrorMode(int consoleMode)
+        {
+            const int scriptCompileError = 1 << 11;
+
+            return (consoleMode & scriptCompileError) != 0;
         }
 
         internal static void SetDirty(UnityEngine.Object obj)

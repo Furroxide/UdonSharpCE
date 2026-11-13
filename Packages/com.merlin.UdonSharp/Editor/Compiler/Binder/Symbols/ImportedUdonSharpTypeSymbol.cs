@@ -78,6 +78,18 @@ namespace UdonSharp.Compiler.Symbols
             
             if (!IsValueType && !isUnityAssetType && (BaseType != context.GetTypeSymbol(typeof(object))))
                 throw new NotSupportedException("Inheritance is not supported by U# on non-UdonSharpBehaviour classes", RoslynSymbol.DeclaringSyntaxReferences.First().GetSyntax().GetLocation());
+
+            // U# runs a type's static field initializers on first use (EmitContext.EmitStaticTypeInitialization) but
+            // never the body of an explicit static constructor, so whatever it assigned silently stayed at default.
+            // Unity asset types are exempt: Udon never runs their code at all.
+            if (!isUnityAssetType && RoslynSymbol is INamedTypeSymbol namedType)
+            {
+                foreach (IMethodSymbol constructor in namedType.StaticConstructors)
+                {
+                    if (!constructor.IsImplicitlyDeclared)
+                        throw new NotSupportedException("Explicit static constructors are not supported by UdonSharp; use static field initializers instead.", constructor.DeclaringSyntaxReferences.First().GetSyntax().GetLocation());
+                }
+            }
             
             foreach (ISymbol symbol in RoslynSymbol.GetMembers())
             {

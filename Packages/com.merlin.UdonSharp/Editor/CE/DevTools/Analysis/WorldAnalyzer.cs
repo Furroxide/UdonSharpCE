@@ -20,7 +20,7 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
         /// <summary>
         /// Network budget in KB/s.
         /// </summary>
-        public const float NETWORK_BUDGET_KBPS = 11f;
+        public const float NETWORK_BUDGET_KBPS = BehaviourAnalyzer.NETWORK_BUDGET_KBPS;
 
         /// <summary>
         /// Warning threshold as percentage of budget.
@@ -54,8 +54,11 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
             {
                 try
                 {
-                    var typeAnalysis = _behaviourAnalyzer.Analyze(group.Key);
-                    typeAnalysis.InstanceCount = group.Count();
+                    // The instances go in with the type: a synced array's length lives on the object.
+                    List<UdonSharpBehaviour> instances = group.ToList();
+
+                    var typeAnalysis = _behaviourAnalyzer.Analyze(group.Key, null, instances);
+                    typeAnalysis.InstanceCount = instances.Count;
 
                     // Only include behaviours that actually cost variable-sync bandwidth. This used to
                     // also admit anything whose SyncMode was not "None", which now that an absent
@@ -93,15 +96,18 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
             if (behaviours == null)
                 return result;
 
-            // Group by type
-            var byType = behaviours.GroupBy(b => b.GetType());
+            // Group by type. A destroyed behaviour is still a managed object with a type, but there is
+            // nothing left on it to measure.
+            var byType = behaviours.Where(b => b != null).GroupBy(b => b.GetType());
 
             foreach (var group in byType)
             {
                 try
                 {
-                    var typeAnalysis = _behaviourAnalyzer.Analyze(group.Key);
-                    typeAnalysis.InstanceCount = group.Count();
+                    List<UdonSharpBehaviour> instances = group.ToList();
+
+                    var typeAnalysis = _behaviourAnalyzer.Analyze(group.Key, null, instances);
+                    typeAnalysis.InstanceCount = instances.Count;
 
                     if (typeAnalysis.Fields.Count > 0)
                     {
@@ -200,11 +206,16 @@ namespace UdonSharp.CE.Editor.DevTools.Analysis
                 {
                     if (violation.Severity == AnalysisSeverity.Error)
                     {
-                        // Propagate errors to world level with context
-                        result.Violations.Add(LimitViolation.Error(
+                        // Propagate errors to world level with context. The behaviour travels with the
+                        // copy so a consumer can attribute it without going back to the per-behaviour
+                        // list, which is where the copy came from and would give it the same error twice.
+                        LimitViolation propagated = LimitViolation.Error(
                             $"{behaviour.BehaviourType.Name}: {violation.Message}",
                             violation.Recommendation
-                        ));
+                        );
+
+                        propagated.BehaviourType = behaviour.BehaviourType;
+                        result.Violations.Add(propagated);
                     }
                 }
             }

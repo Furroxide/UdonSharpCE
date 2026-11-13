@@ -34,14 +34,14 @@ namespace UdonSharp.CE.Async
         RanToCompletion = 4,
 
         /// <summary>
-        /// The task acknowledged cancellation by throwing an OperationCanceledException.
-        /// In Udon, this is handled gracefully without actual exceptions.
+        /// The task was canceled. Only <c>UdonTask.FromCanceled</c> produces this: cancellation in CE is
+        /// cooperative, so a canceled async method simply returns and its machine completes normally.
         /// </summary>
         Canceled = 5,
 
         /// <summary>
-        /// The task completed due to an unhandled exception.
-        /// In Udon, faulted tasks log their error and stop execution.
+        /// The task faulted. Only <c>FromError</c> and <c>FromException</c> produce this, and it is a value
+        /// to read: nothing logs it or stops because of it, since Udon has no exception handling.
         /// </summary>
         Faulted = 6
     }

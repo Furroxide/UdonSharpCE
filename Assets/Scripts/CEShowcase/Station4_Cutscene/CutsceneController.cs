@@ -69,11 +69,14 @@ namespace CEShowcase.Station4_Cutscene
         // Authored on the AudioSource in the scene; the fades lerp back to this rather than to a literal.
         private float _musicVolume = 0.5f;
 
-        // The frame a sequence was last cancelled on. A cancelled state machine only tears itself down
-        // when it next resumes, so for the rest of that frame it is still holding the shared locals and
-        // the generated guard refuses anything new -- and the refused start's scheduled resume is lost
-        // with it. Waiting one frame costs nothing: no player can press two buttons inside a single frame.
-        private int _cancelFrame = -1;
+        // True from the moment a sequence starts until its state machine has actually finished unwinding,
+        // cancelled or not, and every button is busy while it is set. A cancelled machine only tears
+        // itself down when it next resumes -- a frame later inside a fade, up to two seconds later inside
+        // a Delay -- and until then it is still holding its shared locals, so the generated guard refuses
+        // a second start of the same method and nothing runs. Cancelling a sequence and starting the next
+        // in one press therefore killed the first, started nothing, and left the stage half-set. A start
+        // is only ever issued once the previous sequence has reported itself finished; see EndSequence.
+        private bool _sequenceRunning;
         // Local status text only. This was previously [SyncOnJoin], which was wrong twice over: the
         // cutscene is started by a purely local interact and driven by a local async sequence, so every
         // client writes its own value; and the behaviour is BehaviourSyncMode.None, so nothing on it can
@@ -678,7 +681,6 @@ namespace CEShowcase.Station4_Cutscene
             if (_cancellation != null)
             {
                 _cancellation.Cancel();
-                _cancelFrame = Time.frameCount;
             }
 
             _isPlaying = false;
@@ -717,7 +719,9 @@ namespace CEShowcase.Station4_Cutscene
 
             SetStageElementsActive(false);
             
-            if (_playButton != null) _playButton.SetActive(true);
+            // The button comes back when a press on it would be accepted. A sequence cancelled above is
+            // still unwinding, and EndSequence shows the button once it has let go.
+            if (_playButton != null) _playButton.SetActive(!_sequenceRunning);
             
             UpdateStatus("Ready to play");
         }
@@ -728,18 +732,11 @@ namespace CEShowcase.Station4_Cutscene
         
         public void OnPlayCutscene()
         {
-            if (_isPlaying) return;
-            if (Time.frameCount == _cancelFrame) return;
+            if (_isPlaying || _sequenceRunning) return;
 
             // Fire off the async cutscene!
             // The compiler generates the state machine - we just write clean code.
-            //
-            // Nothing is committed here on purpose. A cancelled sequence only unwinds when its state
-            // machine next resumes, so a start issued in the same frame as a cancel is refused by the
-            // generated guard -- and marking the cutscene as playing before that point would hide the
-            // play button forever with nothing running. Letting the body below do it means a refused
-            // start changes nothing at all and the next press just works.
-            _ = PlayCutsceneAsync(BeginSequence());
+            _ = RunCutsceneAsync(BeginSequence());
         }
 
         public void OnSkipCutscene()
@@ -754,23 +751,54 @@ namespace CEShowcase.Station4_Cutscene
         }
 
         /// <summary>
-        /// Starts a new cancellable sequence and stops whatever was running. A fresh source each time:
+        /// Marks a sequence as running and hands it a token to watch. A fresh source each time:
         /// CancellationTokenSource.Reset() would resurrect a token an older sequence is still holding.
+        /// Every caller checks _sequenceRunning first, so there is never a live sequence here to cancel.
         /// </summary>
         private CancellationToken BeginSequence()
         {
-            if (_cancellation != null)
-            {
-                _cancellation.Cancel();
-                _cancelFrame = Time.frameCount;
-
-                // A sequence cancelled mid-flight never reaches its own teardown, so anything it switched
-                // on -- sparkles, stage lights -- would still be running when the next one starts.
-                if (_effects != null) _effects.StopAllEffects();
-            }
+            _sequenceRunning = true;
+            if (_playButton != null) _playButton.SetActive(false);
 
             _cancellation = new CancellationTokenSource();
             return _cancellation.Token;
+        }
+
+        /// <summary>
+        /// Reached once a sequence's state machine has completed, whether it ran to the end or saw its
+        /// token cancelled. From here another sequence can start.
+        /// </summary>
+        private void EndSequence()
+        {
+            _sequenceRunning = false;
+            if (!_isPlaying && _playButton != null) _playButton.SetActive(true);
+        }
+
+        // Each button starts one of these rather than the sequence itself. The await resumes however the
+        // sequence ended -- a cancelled one returns early through the same completion -- which makes
+        // this the one place that learns its state machine has let go of its locals.
+        private async UdonTask RunCutsceneAsync(CancellationToken token)
+        {
+            await PlayCutsceneAsync(token);
+            EndSequence();
+        }
+
+        private async UdonTask RunDemoFadeAsync(CancellationToken token)
+        {
+            await DemoFadeAsync(token);
+            EndSequence();
+        }
+
+        private async UdonTask RunDemoCurtainsAsync(CancellationToken token)
+        {
+            await DemoCurtainsAsync(token);
+            EndSequence();
+        }
+
+        private async UdonTask RunDemoSpotlightAsync(CancellationToken token)
+        {
+            await SpotlightSequenceAsync(3f, token);
+            EndSequence();
         }
         
         public void OnResetCutscene()
@@ -788,9 +816,8 @@ namespace CEShowcase.Station4_Cutscene
         /// </summary>
         public void OnDemoFade()
         {
-            if (_isPlaying) return;
-            if (Time.frameCount == _cancelFrame) return;
-            _ = DemoFadeAsync(BeginSequence());
+            if (_isPlaying || _sequenceRunning) return;
+            _ = RunDemoFadeAsync(BeginSequence());
         }
 
         private async UdonTask DemoFadeAsync(CancellationToken token)
@@ -807,9 +834,8 @@ namespace CEShowcase.Station4_Cutscene
         /// </summary>
         public void OnDemoCurtains()
         {
-            if (_isPlaying) return;
-            if (Time.frameCount == _cancelFrame) return;
-            _ = DemoCurtainsAsync(BeginSequence());
+            if (_isPlaying || _sequenceRunning) return;
+            _ = RunDemoCurtainsAsync(BeginSequence());
         }
 
         private async UdonTask DemoCurtainsAsync(CancellationToken token)
@@ -831,9 +857,8 @@ namespace CEShowcase.Station4_Cutscene
         /// </summary>
         public void OnDemoSpotlight()
         {
-            if (_isPlaying) return;
-            if (Time.frameCount == _cancelFrame) return;
-            _ = SpotlightSequenceAsync(3f, BeginSequence());
+            if (_isPlaying || _sequenceRunning) return;
+            _ = RunDemoSpotlightAsync(BeginSequence());
         }
     }
 }

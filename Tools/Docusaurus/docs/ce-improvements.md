@@ -29,15 +29,19 @@ The standard UdonSharp experience is plagued by subtle networking bugs that caus
 **The Problem:** Continuous sync has a ~200 byte limit. Exceed it and you get "death runs"—data loss with no indication of what went wrong.
 
 ```csharp
-// ❌ This is ~400 bytes and will cause silent data loss
+// ❌ Thirteen quaternions are 208 bytes, over the Continuous limit
 [UdonBehaviourSyncMode(BehaviourSyncMode.Continuous)]
-public class TooBig : UdonSharpBehaviour
+public class RagdollPose : UdonSharpBehaviour
 {
-    [UdonSynced] public float[] positions = new float[100];
+    [UdonSynced] public Quaternion hips, spine, chest, neck, head;
+    [UdonSynced] public Quaternion upperArmL, lowerArmL, upperArmR, lowerArmR;
+    [UdonSynced] public Quaternion upperLegL, lowerLegL, upperLegR, lowerLegR;
 }
 ```
 
-**CE Solution:** The compiler warns you when your sync payload is too large, with an estimate of actual byte usage.
+**CE Solution:** The compiler warns you when your sync payload is too large, with an estimate of actual byte usage
+counted at each field's real width. Arrays and strings cannot be Continuous at all: CE rejects them with CE0034
+during code generation and points you at Manual sync.
 
 ### Late-Joiner State Reconstruction
 
@@ -220,7 +224,7 @@ public class PlayerSaveData
 - Attribute-based field mapping
 - Built-in validation (`[Range]`, `[MaxLength]`, `[Required]`)
 - **Size estimation** — know if you're approaching the 100KB limit
-- Lifecycle callbacks for save/restore events
+- Save/restore results and same-behaviour corruption details
 
 ---
 
@@ -388,27 +392,37 @@ CELogger.Error("Save failed", "Persistence");
 Pre-publish checks accessible via `Udon CE/Dev Tools/World Validator`:
 
 - GetComponent calls in Update loops
-- Uninitialized synced arrays
+- Synced arrays that are null on a behaviour in the scene, including arrays a base class declares
 - Invalid VRCPlayerApi usage
-- Bandwidth limit violations
-- Persistence size warnings
+- Bandwidth limit violations, with synced arrays sized from the scene and figures in 1024-byte KB
+- `[PlayerData]` models near the storage quota, including models no scene object uses (a warning at most)
 
 ---
 
 ## Compile-Time Optimizations
 
-CE automatically optimizes your code during compilation:
+**None run in this release.** CE ships six source-level optimizers, and all six are switched off:
 
-| Optimization                     | What It Does                               |
-| -------------------------------- | ------------------------------------------ |
-| Loop Invariant Code Motion       | Moves unchanging calculations out of loops |
-| Small Loop Unrolling             | Unrolls tiny fixed-iteration loops         |
-| Common Subexpression Elimination | Reuses repeated calculations               |
-| Tiny Method Inlining             | Inlines small private methods              |
-| Extern Call Caching              | Caches repeated SDK property lookups       |
-| String Interning                 | Deduplicates identical string literals     |
+| Optimization                     | What It Would Do                           | Status   |
+| -------------------------------- | ------------------------------------------ | -------- |
+| Loop Invariant Code Motion       | Move unchanging calculations out of loops  | Disabled |
+| Small Loop Unrolling             | Unroll tiny fixed-iteration loops          | Disabled |
+| Common Subexpression Elimination | Reuse repeated calculations                | Disabled |
+| Tiny Method Inlining             | Inline small private methods               | Disabled |
+| Extern Call Caching              | Cache repeated SDK property lookups        | Disabled |
+| String Interning                 | Deduplicate identical string literals      | Disabled |
 
-You don't need to do anything—these apply automatically.
+Each one is a syntactic rewriter that was found able to change what a program does — dropping a
+write, hoisting a call past the null check that guarded it, or emitting code that does not compile — so
+they stay off until they are rewritten against the semantic model. The same applies to the
+assembly-level optimizer in `Editor/Compiler/Optimization`: it is not wired into the compiler. The Udon
+your scripts compile to is what stock UdonSharp would produce for the same C#.
+
+What does run on every compile are CE's **code generators** (async state machines, `Action` →
+`CECallback`, `ForEach` lambda inlining, the `CELogger` rewrite, `[SyncOnJoin]` glue, `[Sync(Quantize)]`
+rounding, `[Rpc]`, sync-mode inference and persistence converters). Those are not optimizations: the
+program is incorrect without them, so they cannot be disabled and a failure in one is a compile error.
+See [CE Editor Tools](ce-editor-tools#compile-time-code-generators).
 
 ---
 
@@ -417,21 +431,23 @@ You don't need to do anything—these apply automatically.
 Expose your U# code to Udon Graph users:
 
 ```csharp
-[GraphNode("Utilities/Math")]
-public static class MathNodes
+public static class UtilityMath
 {
-    [GraphOutput("result")]
+    [GraphNode("Utilities/Math/Lerp")]
     public static float Lerp(
-        [GraphInput] float a,
-        [GraphInput] float b,
-        [GraphInput] float t)
+        [GraphInput("A")] float a,
+        [GraphInput("B")] float b,
+        [GraphInput("T")] float t)
     {
         return Mathf.Lerp(a, b, t);
     }
 }
 ```
 
-Editor tools generate wrapper nodes and documentation automatically.
+`[GraphNode]` goes on the method and `[GraphInput]`/`[GraphOutput]` on its parameters; the return value
+becomes the output port. Nothing is generated automatically: run **Udon CE → Graph Bridge → Generate
+Wrappers** (and **Generate Documentation** for the reference pages) when the attributed methods change.
+See [CE GraphBridge](ce-graphbridge).
 
 ---
 
@@ -441,7 +457,7 @@ UdonSharp CE installs via VPM (VRChat Creator Companion):
 
 1. Open VCC → Settings → Packages → Add Repository
 2. Add: `https://vrc.furroxide.dev/vpm/index.json`
-3. Open your project → Install "UdonSharp Community Edition"
+3. Open your project → Install "UdonSharp CE"
 
 CE declares compatibility with standard UdonSharp, so existing prefabs work without changes.
 
