@@ -12,7 +12,7 @@
     "com.merlin.udonsharp"
   ],
   "dependencies": {
-    "com.coplaydev.unity-mcp": "10.1.2",
+    "com.coplaydev.unity-mcp": "10.2.0",
     "com.merlin.udonsharp": "file:com.merlin.UdonSharp",
     "com.unity.2d.sprite": "1.0.0",
     "com.unity.2d.tilemap": "1.0.0",
