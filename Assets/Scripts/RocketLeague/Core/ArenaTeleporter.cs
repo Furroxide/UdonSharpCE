@@ -47,10 +47,11 @@ namespace RocketLeague
                     false
                 );
 
-                // From here the car this player drives may listen to them. Until they arrive it must
-                // not: its recorder reads the same movement input that walks them around the hub.
+                // Arriving is what earns the player a seat and, while one is free, a car -- not joining
+                // the instance. From here that car may listen to them; until they arrive it must not, as
+                // its recorder reads the same movement input that walks them around the hub.
                 if (Manager != null && Manager.Spawner != null)
-                    Manager.Spawner.SetLocalPlayerInArena(true);
+                    Manager.Spawner.RequestJoinArena();
             }
 
             Debug.Log("[ArenaTeleporter] Teleported player to Rocket League arena");

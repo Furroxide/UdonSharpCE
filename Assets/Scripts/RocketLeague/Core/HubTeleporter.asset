@@ -171,8 +171,8 @@ MonoBehaviour:
       Data: 11|UnityEngine.TooltipAttribute, UnityEngine.CoreModule
     - Name: tooltip
       Entry: 1
-      Data: Roster that gates vehicle input. Found beside this teleporter when left
-        empty.
+      Data: Roster the player's seat and car go back to. Found beside this teleporter
+        when left empty.
     - Name: 
       Entry: 8
       Data: 

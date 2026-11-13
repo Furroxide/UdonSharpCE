@@ -14,7 +14,7 @@ namespace RocketLeague
         public Transform HubSpawnPoint;
 
         [Header("Arena Control")]
-        [Tooltip("Roster that gates vehicle input. Found beside this teleporter when left empty.")]
+        [Tooltip("Roster the player's seat and car go back to. Found beside this teleporter when left empty.")]
         public PlayerSpawner Spawner;
 
         public override void Interact()
@@ -28,11 +28,12 @@ namespace RocketLeague
             if (player == null || !player.IsValid())
                 return;
 
-            // Leaving the arena takes the player's hands off the car. Without this the car they drive
-            // goes on reading their movement input for as long as they walk around the hub.
+            // Leaving the arena takes the player's hands off the car and gives it back to the pool, for
+            // the next player waiting. Without this the car went on reading their movement input for as
+            // long as they walked around the hub, and nobody else could have it.
             PlayerSpawner spawner = ResolveSpawner();
             if (spawner != null)
-                spawner.SetLocalPlayerInArena(false);
+                spawner.RequestLeaveArena();
 
             if (HubSpawnPoint != null)
             {

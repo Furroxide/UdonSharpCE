@@ -400,7 +400,6 @@ namespace CEShowcase.Tests.Editor
             Assert.That(team, Is.EqualTo(0), "Without auto-assignment everyone defaults to blue.");
             Assert.That(GetField<int>(spawner, "_bluePlayerCount"), Is.EqualTo(1),
                 "The joiner has to be counted, or the next spawn lookup asks for index -1.");
-            Assert.That(InvokePrivate(spawner, "GetSpawnIndexForTeam", 0), Is.EqualTo(0));
         }
 
         /// <summary>
@@ -431,11 +430,11 @@ namespace CEShowcase.Tests.Editor
         }
 
         /// <summary>
-        /// A driver is named when they join the instance, and the recorder on their car reads VRChat's
-        /// ordinary movement callbacks wherever the player is standing. So the first player in drove the
-        /// car from the hub: walking to a station steered it and every button click spent its boost. The
-        /// roster gates every pool car's input on the local player being in the arena, and the gate starts
-        /// closed.
+        /// The recorder on a car reads VRChat's ordinary movement callbacks wherever the player is standing,
+        /// so a driver who could drive from the hub steered the car by walking to a station, and every
+        /// button click spent its boost. The roster gates every pool car's input on the local player being
+        /// in the arena: closed at Start, opened by arriving, closed again by leaving -- at once, before the
+        /// roster's owner has even heard the request.
         /// </summary>
         [Test]
         public void Spawner_KeepsCarInputOff_UntilTheLocalPlayerIsInTheArena()
@@ -453,11 +452,164 @@ namespace CEShowcase.Tests.Editor
             Assert.That(recorder.InputEnabled, Is.False,
                 "A car must not listen to a driver who has not come to the arena.");
 
-            InvokePrivate(spawner, "SetLocalPlayerInArena", true);
+            InvokePrivate(spawner, "RequestJoinArena");
             Assert.That(recorder.InputEnabled, Is.True);
 
-            InvokePrivate(spawner, "SetLocalPlayerInArena", false);
+            InvokePrivate(spawner, "RequestLeaveArena");
             Assert.That(recorder.InputEnabled, Is.False, "Leaving for the hub takes the player's hands off it.");
+        }
+
+        /// <summary>
+        /// Cars were handed out in OnPlayerJoined, so the pool went to the first visitors to load the world
+        /// wherever they were, and a visitor who never came near the arena kept a car from everybody who
+        /// did. A seat and a car now go with arriving in the arena, and come back with leaving it by the
+        /// return pad or a respawn.
+        /// </summary>
+        [Test]
+        public void Spawner_HandsOutCarsOnArrivingInTheArena_NotOnJoiningTheInstance()
+        {
+            const string spawnerPath = "Assets/Scripts/RocketLeague/Core/PlayerSpawner.cs";
+
+            List<string> onJoin = InvokedNames(ParseMethod(spawnerPath, "OnPlayerJoined"));
+            foreach (string handout in new[]
+                     { "AllocateSlot", "JoinArena", "GiveVehicleToSlot", "AssignVehicleToPlayer", "FindAvailableVehicle" })
+            {
+                Assert.That(onJoin, Does.Not.Contain(handout), "Joining the instance must not reach " + handout + ".");
+            }
+
+            Assert.That(InvokedNames(ParseMethod("Assets/Scripts/RocketLeague/Core/ArenaTeleporter.cs", "TeleportToArena")),
+                Does.Contain("RequestJoinArena"), "Arriving in the arena is what asks for a seat.");
+            Assert.That(InvokedNames(ParseMethod("Assets/Scripts/RocketLeague/Core/HubTeleporter.cs", "TeleportToHub")),
+                Does.Contain("RequestLeaveArena"), "Going back to the hub gives the car back.");
+            Assert.That(InvokedNames(ParseMethod(spawnerPath, "OnPlayerRespawn")),
+                Does.Contain("RequestLeaveArena"), "A respawn lands in the hub, so it gives the car back too.");
+        }
+
+        /// <summary>
+        /// The roster is the owner's to write, so a seat request travels to the owner, which acts for the
+        /// sender rather than for a player id in the payload. A payload id would let any client put any
+        /// player in a car, or take one away from them.
+        /// </summary>
+        [Test]
+        public void Spawner_SeatRequests_ReachTheOwner_AndActForWhoeverSentThem()
+        {
+            Type spawnerType = RocketLeagueType("PlayerSpawner");
+
+            foreach (string entry in new[] { "OwnerJoinArena", "OwnerLeaveArena" })
+            {
+                MethodInfo method = spawnerType.GetMethod(
+                    entry, BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
+                Assert.That(method, Is.Not.Null, entry + " has to be a public, parameterless network entry point.");
+                Assert.That(method.GetCustomAttribute<NetworkCallableAttribute>(), Is.Not.Null, entry);
+
+                string body = ParseMethod("Assets/Scripts/RocketLeague/Core/PlayerSpawner.cs", entry).ToString();
+                Assert.That(body, Does.Contain("NetworkCalling.CallingPlayer"), entry + " has to act for its sender.");
+            }
+        }
+
+        /// <summary>
+        /// A client that inherits the roster before it ever received it holds the compiled defaults, where a
+        /// 0 in the team and vehicle columns reads as "on blue, in car 0". Claiming a slot clears both, and
+        /// asking for a seat twice keeps the one already held.
+        /// </summary>
+        [Test]
+        public void Spawner_ClaimingASeat_ClearsWhatTheSlotHeldBefore()
+        {
+            Component spawner = CreateRocketLeague("PlayerSpawner");
+            SetField(spawner, "_slotPlayerIds", new int[16]);
+            SetField(spawner, "_playerTeams", new int[16]);
+            SetField(spawner, "_playerVehicleIndices", new int[16]);
+
+            Assert.That(InvokePrivate(spawner, "AllocateSlot", 5), Is.EqualTo(0));
+            Assert.That(GetField<int[]>(spawner, "_slotPlayerIds")[0], Is.EqualTo(5));
+            Assert.That(GetField<int[]>(spawner, "_playerTeams")[0], Is.EqualTo(-1));
+            Assert.That(GetField<int[]>(spawner, "_playerVehicleIndices")[0], Is.EqualTo(-1));
+            Assert.That(InvokePrivate(spawner, "AllocateSlot", 5), Is.EqualTo(0));
+        }
+
+        /// <summary>
+        /// Leaving takes back the seat, the team place and the car, which goes dark and parks until it is
+        /// handed on. A second leave for the same player -- a resent request -- changes nothing.
+        /// </summary>
+        [Test]
+        public void Spawner_LeavingTheArena_GivesBackTheSeatTheTeamPlaceAndTheCar()
+        {
+            NetVehicle car = CreatePoolCar("PoolCar", Vector3.zero);
+            Component spawner = CreateRocketLeague("PlayerSpawner");
+            SetField(spawner, "VehiclePool", new[] { car });
+
+            int[] slots = Filled(16, -1);
+            int[] teams = Filled(16, -1);
+            int[] vehicles = Filled(16, -1);
+            slots[3] = 7;
+            teams[3] = 1;
+            vehicles[3] = 0;
+            SetField(spawner, "_slotPlayerIds", slots);
+            SetField(spawner, "_playerTeams", teams);
+            SetField(spawner, "_playerVehicleIndices", vehicles);
+            SetField(spawner, "_orangePlayerCount", 1);
+
+            InvokePrivate(spawner, "ApplyVehicleAssignments");
+            Assume.That(car.GetComponent<Renderer>().enabled, Is.True, "Guard: a driven car is shown.");
+
+            InvokePrivate(spawner, "LeaveArena", 7);
+
+            Assert.That(GetField<int[]>(spawner, "_slotPlayerIds")[3], Is.EqualTo(-1));
+            Assert.That(GetField<int[]>(spawner, "_playerTeams")[3], Is.EqualTo(-1));
+            Assert.That(GetField<int[]>(spawner, "_playerVehicleIndices")[3], Is.EqualTo(-1));
+            Assert.That(GetField<int>(spawner, "_orangePlayerCount"), Is.EqualTo(0));
+            Assert.That(car.GetComponent<Renderer>().enabled, Is.False, "A car nobody drives is hidden.");
+            Assert.That(car.GetComponent<Rigidbody>().isKinematic, Is.True, "A car nobody drives is parked.");
+
+            InvokePrivate(spawner, "LeaveArena", 7);
+            Assert.That(GetField<int>(spawner, "_orangePlayerCount"), Is.EqualTo(0),
+                "A repeated leave must not take the player off their team twice.");
+        }
+
+        /// <summary>
+        /// A car that joins a match in progress went to the newest team member's spawn point, which after a
+        /// teammate left could be a spot a car was still standing on -- and two bodies spawned inside each
+        /// other are thrown apart. It now takes the first spot with room, a team with more drivers than
+        /// spawn points gets lanes beside them, and a hidden car waiting in the pool is not in the way.
+        /// </summary>
+        [Test]
+        public void Spawner_PutsAJoiningCarClearOfTheCarsAlreadyOnTheField()
+        {
+            Transform near = CreateObject("BlueSpawnA").transform;
+            near.position = new Vector3(0f, 0.5f, -40f);
+            Transform far = CreateObject("BlueSpawnB").transform;
+            far.position = new Vector3(-12f, 0.5f, -40f);
+
+            NetVehicle driven = CreatePoolCar("Driven", near.position);
+            NetVehicle joining = CreatePoolCar("Joining", new Vector3(30f, 0.5f, 0f));
+            NetVehicle parked = CreatePoolCar("Parked", far.position); // in the pool, nobody drives it
+            NetVehicle second = CreatePoolCar("Second", new Vector3(20f, 0.5f, 0f));
+
+            Component spawner = CreateRocketLeague("PlayerSpawner");
+            SetField(spawner, "BlueSpawnPoints", new[] { near, far });
+            SetField(spawner, "VehiclePool", new[] { driven, joining, parked, second });
+
+            int[] slots = Filled(16, -1);
+            int[] vehicles = Filled(16, -1);
+            slots[0] = 1;
+            vehicles[0] = 0; // somebody drives "Driven", which stands on the first spawn point
+            SetField(spawner, "_slotPlayerIds", slots);
+            SetField(spawner, "_playerVehicleIndices", vehicles);
+
+            Assert.That(InvokePrivate(spawner, "FindClearSpawnIndex", 0, joining), Is.EqualTo(1),
+                "The first spawn point is taken; the second has only a hidden pool car on it.");
+
+            // Both spawn points taken: the next spot is the lane beside the first one.
+            second.transform.position = far.position;
+            slots[1] = 2;
+            vehicles[1] = 3;
+            int lane = (int)InvokePrivate(spawner, "FindClearSpawnIndex", 0, joining);
+            Assert.That(lane, Is.EqualTo(2));
+
+            var offset = (Vector3)InvokePrivate(spawner, "GetSpawnLaneOffset", 0, lane);
+            Assert.That(offset.magnitude, Is.EqualTo(4f).Within(1e-4f), "A lane is a car's width beside its spawn point.");
+            Assert.That((Vector3)InvokePrivate(spawner, "GetSpawnLaneOffset", 0, 1), Is.EqualTo(Vector3.zero),
+                "The first lap through the spawn points stands on them.");
         }
 
         /// <summary>
@@ -611,6 +763,53 @@ namespace CEShowcase.Tests.Editor
             Assert.That(scorer.text, Is.EqualTo("BLUE TEAM"));
         }
 
+        /// <summary>
+        /// The lobby read its player count off the instance, which counts everybody in the hub, and built an
+        /// unused 80-element player array every frame on the way. A match is played by the players in the
+        /// arena, so that is the number shown.
+        /// </summary>
+        [Test]
+        public void Hud_Lobby_CountsThePlayersInTheArena()
+        {
+            Component manager = CreateRocketLeague("RocketLeagueManager"); // a fresh manager is in the lobby
+            Component spawner = CreateRocketLeague("PlayerSpawner");
+            int[] slots = Filled(16, -1);
+            slots[0] = 3;
+            slots[4] = 8;
+            SetField(spawner, "_slotPlayerIds", slots);
+
+            Component hud = CreateRocketLeague("RocketLeagueHUD");
+            SetField(hud, "Manager", manager);
+            SetField(hud, "Spawner", spawner);
+            TMPro.TextMeshProUGUI count = Text(hud, "PlayerCountText");
+
+            InvokePrivate(hud, "UpdateLobbyUI");
+
+            Assert.That(count.text, Is.EqualTo("Players in the arena: 2"));
+        }
+
+        /// <summary>
+        /// The boost gauge rides over the local player's own car. With no car to show -- everyone outside
+        /// the arena -- it is hidden rather than left floating where it was built, and the status line that
+        /// names the player's team is blank.
+        /// </summary>
+        [Test]
+        public void Hud_WithoutACar_HidesTheGauge_AndBlanksTheStatusLine()
+        {
+            Component hud = CreateRocketLeague("RocketLeagueHUD");
+            SetField(hud, "Spawner", CreateRocketLeague("PlayerSpawner"));
+
+            GameObject gauge = CreateObject("BoostGauge");
+            SetField(hud, "BoostGauge", gauge.transform);
+            TMPro.TextMeshProUGUI status = Text(hud, "LocalStatusText");
+            status.text = "YOU DRIVE FOR BLUE";
+
+            InvokePrivate(hud, "Update");
+
+            Assert.That(gauge.activeSelf, Is.False);
+            Assert.That(status.text, Is.Empty);
+        }
+
         // -----------------------------------------------------------------------------------------
         // Helpers
         // -----------------------------------------------------------------------------------------
@@ -630,6 +829,19 @@ namespace CEShowcase.Tests.Editor
         private Component CreateRocketLeague(string typeName)
         {
             return CreateObject(typeName + "UnderTest").AddComponent(RocketLeagueType(typeName));
+        }
+
+        /// <summary>A pool car with what the roster touches: a renderer, a collider, a body and a recorder.</summary>
+        private NetVehicle CreatePoolCar(string name, Vector3 position)
+        {
+            GameObject car = CreateObject(name);
+            car.transform.position = position;
+            car.AddComponent<MeshRenderer>();
+            car.AddComponent<BoxCollider>();
+            car.AddComponent<Rigidbody>();
+            NetVehicle vehicle = car.AddComponent<NetVehicle>();
+            car.AddComponent<InputRecorder>();
+            return vehicle;
         }
 
         private GameObject Panel(Component hud, string fieldName)
@@ -909,6 +1121,118 @@ namespace CEShowcase.Tests.Editor
             Assert.That(reached, Is.SameAs(spawner),
                 "The return pad must be wired to the roster or sit beside it, or a player back in the hub keeps " +
                 "driving the car from there.");
+        }
+
+        /// <summary>
+        /// The arena HUD shipped with every display reference empty, so nobody in the arena saw the score,
+        /// the clock or a single match overlay. Every display it draws has to exist and sit on the scoreboard
+        /// or the boost gauge it moves, and the board has to hang over the field, above the walls.
+        /// </summary>
+        [Test]
+        public void Arena_HudDrawsOnARealScoreboard()
+        {
+            Component hud = FindInShowcase(CEShowcaseGameplayRegressionTests.RocketLeagueType("RocketLeagueHUD"));
+
+            var board = CEShowcaseGameplayRegressionTests.GetField<Transform>(hud, "Scoreboard");
+            var gauge = CEShowcaseGameplayRegressionTests.GetField<Transform>(hud, "BoostGauge");
+            Assert.That(board != null, Is.True, "The HUD has no scoreboard.");
+            Assert.That(gauge != null, Is.True, "The HUD has no boost gauge.");
+
+            foreach (string field in new[]
+                     {
+                         "BlueScoreText", "OrangeScoreText", "TimerText", "LocalStatusText", "GoalScoredPanel",
+                         "GoalScoredText", "GoalScorerText", "CountdownPanel", "CountdownText", "GameOverPanel",
+                         "WinnerText", "OvertimePanel", "LobbyPanel", "PlayerCountText",
+                     })
+            {
+                AssertWiredUnder(hud, field, board);
+            }
+
+            foreach (string field in new[] { "BoostMeter", "BoostFill", "BoostText" })
+                AssertWiredUnder(hud, field, gauge);
+
+            Bounds floor = ArenaFloor(hud);
+            Assert.That(board.position.x, Is.InRange(floor.min.x, floor.max.x));
+            Assert.That(board.position.z, Is.InRange(floor.min.z, floor.max.z));
+            Assert.That(board.position.y, Is.GreaterThan(floor.max.y + 10f), "The board hangs above the walls, clear of play.");
+        }
+
+        /// <summary>
+        /// One car for the whole instance meant one driver at a time. The pool needs a car for each of two a
+        /// side, each wired to the arena's physics world -- an unwired car is never simulated or synced -- and
+        /// parked apart from the others on the arena floor; each team needs kickoff spots for its half.
+        /// </summary>
+        [Test]
+        public void Arena_PoolHasRoomForTwoASide_AndEveryCarIsInTheSimulation()
+        {
+            Component spawner = FindInShowcase(CEShowcaseGameplayRegressionTests.RocketLeagueType("PlayerSpawner"));
+            Component manager = FindInShowcase(CEShowcaseGameplayRegressionTests.RocketLeagueType("RocketLeagueManager"));
+            var world = CEShowcaseGameplayRegressionTests.GetField<NetPhysicsWorld>(manager, "PhysicsWorld");
+            Assert.That(world != null, Is.True, "The match manager has no physics world.");
+
+            NetVehicle[] pool = CEShowcaseGameplayRegressionTests.GetField<NetVehicle[]>(spawner, "VehiclePool");
+            Assert.That(pool, Is.Not.Null);
+            Assert.That(pool.Length, Is.GreaterThanOrEqualTo(4), "Two a side needs four cars.");
+            Assert.That(pool.Distinct().Count(), Is.EqualTo(pool.Length), "A car is listed twice.");
+
+            Bounds floor = ArenaFloor(spawner);
+            for (int i = 0; i < pool.Length; i++)
+            {
+                NetVehicle car = pool[i];
+                Assert.That(car != null, Is.True, $"Pool entry {i} is empty.");
+                Assert.That(car.World == world, Is.True, $"{car.name} is not in the arena's physics world.");
+
+                InputRecorder recorder = car.GetComponent<InputRecorder>();
+                Assert.That(recorder != null && recorder.World == world, Is.True,
+                    $"{car.name}'s input recorder is not wired to the arena's physics world.");
+
+                Assert.That(OnFloor(floor, car.transform.position), Is.True, $"{car.name} is parked off the arena floor.");
+                for (int j = 0; j < i; j++)
+                {
+                    Assert.That(Vector3.Distance(car.transform.position, pool[j].transform.position), Is.GreaterThan(3f),
+                        $"{car.name} is parked on top of {pool[j].name}.");
+                }
+            }
+
+            foreach (string team in new[] { "BlueSpawnPoints", "OrangeSpawnPoints" })
+            {
+                Transform[] points = CEShowcaseGameplayRegressionTests.GetField<Transform[]>(spawner, team);
+                Assert.That(points, Is.Not.Null);
+                Assert.That(points.Length * 2, Is.GreaterThanOrEqualTo(pool.Length),
+                    team + " has fewer kickoff spots than half the pool.");
+
+                foreach (Transform point in points)
+                {
+                    Assert.That(point != null, Is.True, team + " has an empty entry.");
+                    Assert.That(OnFloor(floor, point.position), Is.True, team + ": " + point.name + " is off the arena floor.");
+                }
+            }
+        }
+
+        private static void AssertWiredUnder(Component hud, string field, Transform root)
+        {
+            var value = CEShowcaseGameplayRegressionTests.GetField<UnityEngine.Object>(hud, field);
+            Assert.That(value != null, Is.True, "RocketLeagueHUD." + field + " is not wired.");
+
+            Transform placed = value is GameObject go ? go.transform : ((Component)value).transform;
+            Assert.That(placed.IsChildOf(root), Is.True, $"RocketLeagueHUD.{field} is not on {root.name}.");
+        }
+
+        private static Bounds ArenaFloor(Component inArena)
+        {
+            Transform arena = inArena.transform;
+            while (arena.parent != null)
+                arena = arena.parent;
+
+            Transform floor = arena.Find("Environment/Floor");
+            Assert.That(floor, Is.Not.Null, $"'{arena.name}/Environment/Floor' not found.");
+            return floor.GetComponent<Renderer>().bounds;
+        }
+
+        private static bool OnFloor(Bounds floor, Vector3 position)
+        {
+            return position.x >= floor.min.x && position.x <= floor.max.x &&
+                   position.z >= floor.min.z && position.z <= floor.max.z;
         }
 
         private T FindInShowcase<T>() where T : Component

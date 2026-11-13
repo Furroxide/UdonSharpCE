@@ -9,8 +9,11 @@ using VRC.SDKBase;
 namespace RocketLeague
 {
     /// <summary>
-    /// Main HUD controller for the Rocket League game.
-    /// Displays scores, timer, boost meter, and game state overlays.
+    /// Main HUD controller for the Rocket League game: the arena scoreboard (scores, timer and the match
+    /// overlays), the boost gauge over the local player's car, and the local player's status line.
+    ///
+    /// Everything here is world-space -- VRChat draws nothing over a player's own view -- and every
+    /// reference is optional, so a scene can wire as much or as little of it as it likes.
     /// </summary>
     [PublicAPI]
     [UdonBehaviourSyncMode(BehaviourSyncMode.None)]
@@ -25,12 +28,28 @@ namespace RocketLeague
         public TextMeshProUGUI OrangeScoreText;
         public TextMeshProUGUI TimerText;
 
+        [Header("Scoreboard")]
+        [Tooltip("Optional. Turned about the vertical axis to face the local player, so one board reads from " +
+                 "anywhere in the arena.")]
+        public Transform Scoreboard;
+
         [Header("Boost Meter")]
         public Slider BoostMeter;
         public Image BoostFill;
         public TextMeshProUGUI BoostText;
         public Color BoostFullColor = new Color(1f, 0.8f, 0f);
         public Color BoostLowColor = new Color(0.3f, 0.3f, 0.3f);
+
+        [Tooltip("Optional. Rides above the local player's own car, turned to face them, and hides while they " +
+                 "have no car. Each client places its own, so nobody sees anybody else's.")]
+        public Transform BoostGauge;
+
+        [Tooltip("Height of the boost gauge above the car, in metres.")]
+        public float BoostGaugeHeight = 2.2f;
+
+        [Header("Local Player")]
+        [Tooltip("Optional. Tells the local player which team they drive for, or that they are waiting for a car.")]
+        public TextMeshProUGUI LocalStatusText;
 
         [Header("Goal Scored Overlay")]
         public GameObject GoalScoredPanel;
@@ -58,10 +77,21 @@ namespace RocketLeague
         public Color BlueTeamColor = new Color(0.2f, 0.4f, 1f);
         public Color OrangeTeamColor = new Color(1f, 0.5f, 0.1f);
 
+        // Local status codes, and the "nothing shown yet" marker for the caches below.
+        private const int StatusNotSeated = -2;
+        private const int StatusWaitingForCar = -1;
+        private const int NothingShown = -99;
+
         private NetVehicle _localVehicle;
         private float _goalDisplayTimer;
         private float _countdownTimer;
         private bool _showingCountdown;
+
+        // What the per-frame readouts last wrote. A TextMeshPro text assignment rebuilds the mesh and the
+        // string formatting allocates, so a value that has not changed is not written again.
+        private int _shownBoostPercent = NothingShown;
+        private int _shownPlayerCount = NothingShown;
+        private int _shownLocalStatus = NothingShown;
 
         private void Start()
         {
@@ -79,7 +109,18 @@ namespace RocketLeague
 
         private void Update()
         {
+            VRCPlayerApi local = Networking.LocalPlayer;
+            bool hasLocal = local != null && local.IsValid();
+
+            // Looked up every frame rather than cached. A car goes back to the pool when its driver
+            // leaves the arena and can be driven by somebody else a moment later; a cached reference went
+            // on showing that car's boost, and would have carried the gauge along after it.
+            _localVehicle = hasLocal && Spawner != null ? Spawner.GetPlayerVehicle(local) : null;
+
             UpdateBoostMeter();
+            UpdateBoostGauge(local);
+            UpdateScoreboardFacing(local, hasLocal);
+            UpdateLocalStatus(local, hasLocal);
             UpdateCountdown();
             UpdateGoalDisplay();
             UpdateLobbyUI();
@@ -87,16 +128,6 @@ namespace RocketLeague
 
         private void UpdateBoostMeter()
         {
-            // Find local player's vehicle if we don't have it
-            if (_localVehicle == null && Spawner != null)
-            {
-                VRCPlayerApi local = Networking.LocalPlayer;
-                if (local != null && local.IsValid())
-                {
-                    _localVehicle = Spawner.GetPlayerVehicle(local);
-                }
-            }
-
             if (_localVehicle == null)
             {
                 if (BoostMeter != null)
@@ -113,7 +144,95 @@ namespace RocketLeague
                 BoostFill.color = Color.Lerp(BoostLowColor, BoostFullColor, boostAmount);
 
             if (BoostText != null)
-                BoostText.text = Mathf.RoundToInt(boostAmount * 100f).ToString();
+            {
+                int percent = Mathf.RoundToInt(boostAmount * 100f);
+                if (percent != _shownBoostPercent)
+                {
+                    _shownBoostPercent = percent;
+                    BoostText.text = percent.ToString();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Keeps the boost gauge over the local player's car, turned towards their eyes. The player drives
+        /// the car from wherever they stand, so the gauge goes where they are already looking.
+        /// </summary>
+        private void UpdateBoostGauge(VRCPlayerApi local)
+        {
+            if (BoostGauge == null)
+                return;
+
+            bool show = _localVehicle != null;
+            GameObject gaugeObject = BoostGauge.gameObject;
+            if (gaugeObject.activeSelf != show)
+                gaugeObject.SetActive(show);
+
+            if (!show)
+                return;
+
+            Vector3 anchor = _localVehicle.transform.position + Vector3.up * BoostGaugeHeight;
+            BoostGauge.position = anchor;
+
+            // A world-space canvas reads correctly from the side its forward axis points away from.
+            Vector3 away = anchor - local.GetTrackingData(VRCPlayerApi.TrackingDataType.Head).position;
+            if (away.sqrMagnitude > 0.0001f)
+                BoostGauge.rotation = Quaternion.LookRotation(away);
+        }
+
+        /// <summary>
+        /// Turns the scoreboard about the vertical axis to face the local player. Each client turns its
+        /// own copy, so a single board hanging over the field reads from either end.
+        /// </summary>
+        private void UpdateScoreboardFacing(VRCPlayerApi local, bool hasLocal)
+        {
+            if (Scoreboard == null || !hasLocal)
+                return;
+
+            Vector3 away = Scoreboard.position - local.GetPosition();
+            away.y = 0f;
+
+            if (away.sqrMagnitude > 0.01f)
+                Scoreboard.rotation = Quaternion.LookRotation(away);
+        }
+
+        /// <summary>
+        /// Tells the local player where they stand: on which team, or waiting for a car to come free.
+        /// Blank for a player who holds no seat, which is everyone outside the arena.
+        /// </summary>
+        private void UpdateLocalStatus(VRCPlayerApi local, bool hasLocal)
+        {
+            if (LocalStatusText == null)
+                return;
+
+            int status = StatusNotSeated;
+            if (hasLocal && Spawner != null && Spawner.IsSeated(local))
+                status = _localVehicle != null ? Spawner.GetPlayerTeam(local) : StatusWaitingForCar;
+
+            if (status == _shownLocalStatus)
+                return;
+
+            _shownLocalStatus = status;
+
+            if (status == 0)
+            {
+                LocalStatusText.text = "YOU DRIVE FOR BLUE";
+                LocalStatusText.color = BlueTeamColor;
+            }
+            else if (status == 1)
+            {
+                LocalStatusText.text = "YOU DRIVE FOR ORANGE";
+                LocalStatusText.color = OrangeTeamColor;
+            }
+            else if (status == StatusWaitingForCar)
+            {
+                LocalStatusText.text = "ALL CARS ARE TAKEN - YOU GET THE NEXT ONE TO COME FREE";
+                LocalStatusText.color = Color.white;
+            }
+            else
+            {
+                LocalStatusText.text = "";
+            }
         }
 
         private void UpdateCountdown()
@@ -162,12 +281,16 @@ namespace RocketLeague
             if (LobbyPanel != null && LobbyPanel.activeSelf != inLobby)
                 LobbyPanel.SetActive(inLobby);
 
-            // Update player count
+            // The players a match would be played by: the ones in the arena, when there is a roster to
+            // ask. This allocated an unused 80-element player array every frame as well.
             if (PlayerCountText != null && inLobby)
             {
-                VRCPlayerApi[] players = new VRCPlayerApi[80];
-                int count = VRCPlayerApi.GetPlayerCount();
-                PlayerCountText.text = $"Players: {count}";
+                int count = Spawner != null ? Spawner.SeatedPlayerCount : VRCPlayerApi.GetPlayerCount();
+                if (count != _shownPlayerCount)
+                {
+                    _shownPlayerCount = count;
+                    PlayerCountText.text = Spawner != null ? $"Players in the arena: {count}" : $"Players: {count}";
+                }
             }
 
             // Only master can start match
@@ -375,4 +498,3 @@ namespace RocketLeague
         }
     }
 }
-

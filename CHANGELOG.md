@@ -28,6 +28,10 @@ Changes to the underlying UdonSharp compiler inherited from
   `InputRecorder.InputEnabled` (send neutral input while the local driver is away).
 - `CEDebugConsole.OnFilterDropdownChanged()` / `OnAutoScrollToggleChanged()` — parameterless handlers a
   uGUI control can actually reach, with optional Dropdown/TMP_Dropdown/Toggle references.
+- The showcase arena has a HUD: a scoreboard over the centre spot (score, clock, match overlays and the
+  local player's team) that turns to face each player, a boost gauge over the local player's own car,
+  and a how-to-play board where players arrive. The pool has four cars instead of one, each painted in
+  its driver's team colour.
 - A regression suite for everything below: the edit-mode `CEShowcase.Tests` assembly grows from 107 to
   553 tests, including tests that compile fixtures with UdonSharp and run them in the Udon
   VM, and a guardrail that fails if any runtime-library method can re-enter itself without
@@ -58,6 +62,10 @@ Changes to the underlying UdonSharp compiler inherited from
   removed.
 - The CE Inspector's "Use CE Inspector" preference reflects UdonSharp's Default Behaviour Editor
   setting, which is the switch that actually decides.
+- Showcase arena cars are handed out when a player arrives in the arena and handed back when they return
+  to the hub, respawn or leave the instance, instead of going to the first players to join the instance
+  wherever they were. Teams are balanced over the players who drive, and a car that joins a match in
+  progress is put down clear of the others.
 
 ### Fixed
 
@@ -153,8 +161,8 @@ Changes to the underlying UdonSharp compiler inherited from
 - Only the instance master's leaderboard score synced; the stress test overwrote the shared roster;
   bullets spawned on Station 6; the flock ran in the hub and stuck to its walls; the Rocket League car
   drove from anywhere in the world and a freed car never reached a waiting player; showing the theater
-  turned the stage lights on; plus fixes to the HUD state, cutscene buttons, achievements, chat events
-  and late-join state.
+  turned the stage lights on; the arena HUD allocated an unused player array every frame; plus fixes to
+  the HUD state, cutscene buttons, achievements, chat events and late-join state.
 
 **Editor tools**
 - "Simulate Late-Join" zeroed every synced field in an edit-mode scene and could not restore them.
