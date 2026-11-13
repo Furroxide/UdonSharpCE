@@ -1,7 +1,14 @@
 name: Build Release
 
 on:
+  # A manual run packages the version in package.json and, by default, leaves the release as a draft
+  # to review. Publishing that draft creates the tag; see "Check for a release published from a draft".
   workflow_dispatch:
+    inputs:
+      draft:
+        description: "Create the release as a draft"
+        type: boolean
+        default: true
   push:
     tags:
       - "v*"
@@ -58,7 +65,39 @@ jobs:
       - name: Set environment variables
         run: echo "zipFile=${{ env.packageName }}-${{ steps.version.outputs.prop }}.zip" >> $GITHUB_ENV
 
+      # Publishing a draft from the GitHub UI creates its tag, and a tag push starts this workflow again.
+      # That release already carries the zip that was reviewed as a draft; rebuilding it would replace the
+      # file with one whose bytes (zip timestamps) differ from the one the listing was built against.
+      - name: Check for a release published from a draft
+        id: existing
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name' 2>/dev/null \
+              | grep -qxF "${zipFile}"; then
+            echo "::notice::Release ${TAG} already carries ${zipFile}; nothing to build"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The release notes are the version's own section of CHANGELOG.md.
+      - name: Extract release notes
+        if: steps.existing.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.prop }}
+        run: |
+          awk -v heading="## [${VERSION}]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::warning::CHANGELOG.md has no section for ${VERSION}; the release has no notes"
+          fi
+
       - name: Create zip
+        if: steps.existing.outputs.skip != 'true'
         uses: thedoctor0/zip-release@09336613be18a8208dfa66bd57efafd9e2685657
         with:
           type: "zip"
@@ -68,14 +107,18 @@ jobs:
       # The .unitypackage upload was removed: nothing in this workflow builds one, so
       # action-gh-release was being handed a file that never existed.
       - name: Make release
+        if: steps.existing.outputs.skip != 'true'
         uses: softprops/action-gh-release@1e07f4398721186383de40550babbdf2b84acfc5
         with:
           tag_name: ${{ steps.tag.outputs.name }}
           # Only consulted when the tag does not exist yet (a manual workflow_dispatch run): tag the
           # commit that was actually zipped instead of whatever the default branch points at by then.
           target_commitish: ${{ github.sha }}
+          # A tag push publishes at once; a manual run makes a draft unless told otherwise.
+          draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft }}
           # 1.2.0-b1 and friends are semver prereleases; VCC hides them unless the user opts in.
           prerelease: ${{ contains(steps.version.outputs.prop, '-') }}
+          body_path: release-notes.md
           files: |
             ${{ env.zipFile }}
             Packages/${{ env.packageName }}/package.json

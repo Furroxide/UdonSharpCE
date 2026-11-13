@@ -60,3 +60,14 @@ CE ships compile-time diagnostics (`CE0001`–`CE0063`). If you add or change on
 - Keep commits focused; explain *why* in the body, not just what.
 - Run the test suite before opening the PR and say whether it passed.
 - Documentation lives in `Tools/Docusaurus/docs/`; update it alongside behaviour changes.
+
+## Releases
+
+1. Set the version in `Packages/com.merlin.UdonSharp/package.json`, and give it a `## [x.y.z] - date`
+   section in `CHANGELOG.md`. That section becomes the release notes.
+2. Run **Build Release** from the Actions tab on `master`. A manual run creates a draft release with the
+   package zip attached and no tag yet.
+3. Review the draft and publish it. Publishing creates the `vx.y.z` tag on the commit that was packaged,
+   and the VPM listing is rebuilt from the published release.
+
+Pushing a `vx.y.z` tag instead publishes the release straight away, without a draft.

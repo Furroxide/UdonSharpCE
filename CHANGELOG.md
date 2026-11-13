@@ -7,6 +7,10 @@ Changes to the underlying UdonSharp compiler inherited from
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-13
+
+The first UdonSharp CE release.
+
 ### Added
 - `UdonSharp.CE.Net.Authority` — declares at the field who may write a synced value.
   `[Sync(Authority.Owner)]` keeps the strict ownership check; `[Sync(Authority.Predicted)]` states
@@ -66,6 +70,8 @@ Changes to the underlying UdonSharp compiler inherited from
   to the hub, respawn or leave the instance, instead of going to the first players to join the instance
   wherever they were. Teams are balanced over the players who drive, and a car that joins a match in
   progress is put down clear of the others.
+- Releases cut by hand (Build Release, run manually) are drafts by default, and every release takes its
+  notes from its version's section of this file.
 
 ### Fixed
 
